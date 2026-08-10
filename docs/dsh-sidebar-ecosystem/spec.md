@@ -366,6 +366,7 @@ genoffice relay (:8787) ── + CORS(loopback origin) + /api/dir
 
 ---
 
+
 ## 4. Phase 计划与任务详情
 
 > Phase 依赖链：
@@ -374,80 +375,597 @@ genoffice relay (:8787) ── + CORS(loopback origin) + /api/dir
 P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab → P4 文件 tab → P5 终端 tab → P6 集成验收
 ```
 
-> 任务状态跟踪：任务数 ≥ 8，用同目录 `tasks.csv`（Stage 2 生成）。
-> 任务标题必须是 `### Task {N}: {标题}` 格式（Stage 2 展开）。
+> 任务状态跟踪：任务数 ≥ 8，用同目录 `tasks.csv`（纯状态板，8 列）。
 
-### Phase 0: 基线与勘察（P0 草案）
+### Phase 0: 基线与勘察
 
-> 你在哪里：worktree 已建、机制已勘察（§1.3）
-> 做完之后：插件加载链路跑通（冒烟面板出现）、iframe 嵌入实测可行、本地插件包安装方式确定
+> 你在哪里：worktree 已建（`genoffice/.dsh-plugin-dev` @ c15895f，分支 `genoffice-web-plugin`）；机制已勘察（§1.3 全部为实测事实）
+> 做完之后：插件加载链路跑通（冒烟面板出现）、iframe 嵌入实测可行、本地插件包安装方式确定、genoffice 基线回归全绿
 
-草案任务（Stage 2 展开详情）：
+### Task 1: 搭建冒烟插件包并验证 DSH 加载链路
 
-1. 冒烟插件：最小 client 插件包（注册测试 tab 到 sidebar）+ profile patch 加载 + `dsh web` 重启实测出现 → 确认 ASM-001/ASM-002
-2. 勘察确认：`ui-slots` register API 全貌、`ui-workspace` inject 形状、profile-boot 启动方式、pty spawn 字段（P5 前置勘察可并入）
-3. 基线回归：genoffice 现有 e2e 全绿 + DSH web 现状截图 → 记录基线
+- **关联**：BR-001 / INV-004 / EVD-008（UF: NA——内部验证任务，不直接面向用户）
+- **前置任务**：无
+- **风险等级**：P0（ASM-001/ASM-002 的验证点，失败则阻塞 P2）
 
-### Phase 1: genoffice relay 配套（P0 草案）
+**为什么做**：本地插件包能否被 DSH client boot 加载（ASM-001）与 iframe 能否嵌入（ASM-002）是整个方案的地基，必须先以小代价验证。
 
-> 做完之后：`/api/dir` 可用、跨域可调、既有 API 不回归
+**涉及文件与定位**：
 
-草案任务：
+- `genoffice/dsh-plugin/`（新建）：最小 client 插件包（package.json + apply(ctx) 注册 `sidebar.tabs.smoke` 测试面板）
+- `.dsh-plugin-dev/packages/client/ui-workspace/src/client/index.ts`：`ctx.slots.inject('sidebar.workspaces', ...)`，`rg "slots.inject"`，L107（注册模式模板）
+- `~/.dsh/profiles/web/cordis.patch.yml`：`- insert:` 列表，`rg "insert"`，L~18（插件装载点）
+- `~/.dsh/profiles/web/package.json`：`dsh.profile.bundles`，`rg "bundles"`，L~10（依赖链接点）
+- `/Users/nothing/workspace/dsh/test-Nothing1024/bin/dsh`：CLI 入口（`dsh web` 启动 DSH Web GUI）
 
-4. 实现 `GET /api/dir?path=`（列目录：entries[name/dir/size/mtime/ext] + 当前路径 + 上级路径；安全策略同 /api/file）
-5. 实现 relay CORS 中间层（loopback Origin 白名单回显 + Allow-Headers/Methods + 预检 OPTIONS）
-6. relay 回归：curl 全端点 + `node web/e2e-url-open.mjs` 全绿
+**具体操作**：
 
-### Phase 2: 插件骨架（P0 草案）
+1. 在 `genoffice/dsh-plugin/` 建最小包：`package.json`（name `dsh-genoffice-sidebar`，client 入口 `apply(ctx)`，`ctx.slots.register({name:'sidebar.tabs.smoke',...}, <SmokePanel>)` 注册测试面板）+ TS 源文件
+2. 在 `~/.dsh/profiles/web/package.json` 加依赖 `"dsh-genoffice-sidebar": "file:/Users/nothing/workspace/dsh/genoffice/dsh-plugin"`，执行 `cd ~/.dsh/profiles/web && pnpm install`（nodeLinker: hoisted）
+3. 在 `~/.dsh/profiles/web/cordis.patch.yml` 的 insert 列表加 `- id: genoffice-smoke` / `name: 'dsh-genoffice-sidebar'`（参照 ui-layout 行的 id/name 形状）
+4. 重启 DSH Web GUI：`/Users/nothing/workspace/dsh/test-Nothing1024/bin/dsh web`，浏览器打开 http://127.0.0.1:3080，F12 console 检查插件加载日志（EVD-008）
+5. 若插件未加载：检查 patch 语法、包解析（`node -e "require.resolve('dsh-genoffice-sidebar', {paths:['<profiles/web>']})"`）、bootHost 对 client 插件的扫描规则（`rg "dshClient|__DSH_BOOT__" .dsh-plugin-dev/packages/client/web/src`）——记录根因回写 §1.3
+6. iframe 实测：在 DSH GUI 页面 F12 执行 `document.body.insertAdjacentHTML('beforeend','<iframe src="http://localhost:8787/docs/"/>')`，确认渲染无 CSP 拦截（验证 ASM-002）
 
-> 做完之后：侧边栏出现选项卡容器，官方工作区/设置面板在容器内可用，rail 折叠恢复正常
+**验证**：`dsh web` 启动后 console 出现冒烟插件日志/面板可见 → 期望加载成功；iframe 注入后可见 docs 页面 → 期望无 frame 拦截
 
-草案任务：
+**Evidence**：`evidence/phase-0/smoke-console.log` + `evidence/phase-0/iframe.png`
 
-7. 搭建 `dsh-plugin/` 包结构（client 入口 + 构建配置 + 类型引用 worktree 包）
-8. 实现 TabsRoot 容器（替换 sidebar 注册：patch disable ui-sidebar；渲染选项卡栏 + sidebar.workspaces/sidebar.settings 子槽位 + sidebar.tabs.* 子槽位 + rail 态）
-9. 激活 tab 内存 store + 折叠恢复（BR-003）+ 子槽位未注册降级（UF-001 失败分支）
-10. 工作区/设置回归验证（INV-001）
+**注意事项**：易错点——patch 的 id 与 name 必须与既有行同构、`file:` 依赖路径必须绝对；禁止修改 DSH 官方包源码（INV-004）
 
-### Phase 3: GenOffice tab（P0 草案）
+### Task 2: 建立 genoffice 基线回归快照
 
-> 做完之后：文件列表 + iframe 预览 + 浏览器打开（BR-004~BR-008/BR-011）
+- **关联**：INV-002 / INV-005 / EVD-009（UF: NA——基线任务）
+- **前置任务**：无
+- **风险等级**：P2
 
-草案任务：
+**为什么做**：后续 Phase 改动 relay 与桥后，需要与基线对比证明无回归。
 
-11. GenOffice 面板：文件列表（relay /api/dir，默认主目录、目录导航、类型过滤、错误态/重试）
-12. iframe 预览（构造 path: URL、加载态、错误态）+ 只读确认（BR-011）
-13. "在浏览器中打开"按钮（BR-008）
+**涉及文件与定位**：
 
-### Phase 4: 文件 tab（P0 草案）
+- `genoffice/web/*.mjs`：6 个 e2e 脚本（`smoke-test` / `e2e-open-save` / `e2e-home` / `e2e-cross-app` / `e2e-dragdrop` / `e2e-url-open`）
 
+**具体操作**：
+
+1. 确认 relay 运行：`curl http://localhost:8787/api/health`
+2. 依次运行 `node web/smoke-test.mjs`、`node web/e2e-open-save.mjs`、`node web/e2e-home.mjs`、`node web/e2e-cross-app.mjs`、`node web/e2e-dragdrop.mjs`、`node web/e2e-url-open.mjs`，全部期望全绿
+3. 记录每个脚本输出摘要到 `evidence/phase-0/baseline.log`
+
+**验证**：6 个脚本全部通过且无 console error → 期望与 §1.3 事实一致
+
+**Evidence**：`evidence/phase-0/baseline.log`
+
+**注意事项**：DuckDuckGo 搜索可能被限流（已有 Bing 备选自动切换），失败时重试即可
+
+### Task 3: 执行 Phase 0 回归验证
+
+- **关联**：本 Phase 全部 BR/UF/INV（冒烟链路 + 基线）
+- **前置任务**：1;2
+- **风险等级**：P1
+
+**验证**：`dsh web` 正常启动且冒烟面板可见 + `node web/e2e-url-open.mjs` 全绿 + console 无新增 error
+
+**Evidence**：`evidence/phase-0/`
+
+### Phase 1: genoffice relay 配套
+
+> 你在哪里：relay 无 CORS、无列目录 API
+> 做完之后：`/api/dir` 可用（安全策略同 `/api/file`）、loopback 跨域可调、既有 API 全绿
+
+### Task 4: 实现 relay 列目录 API /api/dir
+
+- **关联**：BR-004 / BR-005 / UF-002 / EVD-006（UF-002 的前置数据源）
+- **前置任务**：2
+- **风险等级**：P1
+
+**为什么做**：GenOffice 面板文件列表需要按路径列目录的数据源。
+
+**涉及文件与定位**：
+
+- `genoffice/web/server.mjs`：`handleApi`，`rg "handleApi"`，L204（API 注册点，紧跟 `/api/file` 分支之后加新分支）
+- `genoffice/web/server.mjs`：`FILES_ROOT` / `ALLOW_ABS_PATHS`，`rg "ALLOW_ABS_PATHS"`，L~25（复用安全策略判定）
+
+**具体操作**：
+
+1. 在 `handleApi` 中新增 `GET /api/dir?path=` 分支：
+   - `path` 缺省 = 用户主目录（`os.homedir()`）；`resolve()` 成绝对路径
+   - `ALLOW_ABS_PATHS` 为 false 时返回与 `/api/file` 一致的禁用错误
+   - `readdir(path, {withFileTypes:true})` 列条目，返回 `{ ok, path, parent, entries: [{name, dir, size, mtimeMs, ext}] }`（ext 仅文件有；`..` 由前端拼接 parent）
+   - 排序：目录在前，按名称 localeCompare；隐藏文件（`.` 开头）排在最后
+   - 目录不可读/不存在 → `{ ok:false, error }`（不抛 500）
+2. 更新文件头注释的 API 清单
+
+**验证**：`curl "http://localhost:8787/api/dir?path=/tmp"` → 期望 `{ok:true, entries:[...]}`；`curl "http://localhost:8787/api/dir?path=/nonexistent"` → 期望 `{ok:false}`；`HOST=0.0.0.0` 且无开关 → 期望禁用错误
+
+**Evidence**：`evidence/API-dir/dir-tmp.json` + `evidence/API-dir/dir-missing.json`
+
+**注意事项**：禁止返回符号链接指向目录外的内容（`dirent.isSymbolicLink()` 标记即可，不追链）；禁止吞掉权限错误不提示
+
+### Task 5: 实现 relay CORS（loopback Origin 白名单）
+
+- **关联**：BR-006 / UF-002 / EVD-007
+- **前置任务**：4
+- **风险等级**：P1
+
+**为什么做**：DSH GUI（http://127.0.0.1:3080）与 relay（http://localhost:8787）跨源，浏览器 fetch 需要 CORS 头；仅放行 loopback 来源，不放宽任意站点。
+
+**涉及文件与定位**：
+
+- `genoffice/web/server.mjs`：`createServer` 回调，`rg "createServer"`，L~385（统一响应头入口）
+
+**具体操作**：
+
+1. 定义 loopback Origin 白名单判定：`/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/`
+2. 在 `createServer` 回调中对**所有**响应统一注入：
+   - 若请求头 `Origin` 命中白名单 → `Access-Control-Allow-Origin: <回显 Origin>`、`Access-Control-Allow-Headers: Content-Type, X-File-Name`、`Access-Control-Allow-Methods: GET, POST, OPTIONS`
+   - `OPTIONS` 预检请求 → 直接 204 返回（带上述头）
+   - 非白名单 Origin → 不加 CORS 头（同源行为不变）
+3. 无 `Origin` 请求（同源/curl）→ 不加头，保持现状
+
+**验证**：`curl -i -H "Origin: http://127.0.0.1:3080" http://localhost:8787/api/health` → 期望响应含 `Access-Control-Allow-Origin: http://127.0.0.1:3080`；`curl -i -H "Origin: https://evil.com" ...` → 期望无 CORS 头
+
+**Evidence**：`evidence/API-cors/cors-loopback.txt` + `evidence/API-cors/cors-foreign.txt`
+
+**注意事项**：禁止用 `*` 通配；禁止对非白名单来源回显 Origin
+
+### Task 6: relay 配套回归
+
+- **关联**：INV-002 / INV-003 / EVD-006 / EVD-007
+- **前置任务**：4;5
+- **风险等级**：P1
+
+**验证**：`node web/e2e-url-open.mjs` 全绿 + `curl` 既有端点（health/fetch-file/file/inject 各一发）结构不变 + 新端点双配置（loopback 默认 / HOST=0.0.0.0 无开关）行为符合 BR-005
+
+**Evidence**：`evidence/API-dir/regression.log`
+
+**注意事项**：验证 `/api/file` 的禁用分支仍为原错误文案（INV-003 不允许文案漂移）
+
+### Task 7: 执行 Phase 1 回归验证
+
+- **关联**：本 Phase 全部 BR/INV
+- **前置任务**：6
+- **风险等级**：P2
+
+**验证**：Task 6 全绿 + `curl /api/dir` 三态（正常/缺失/禁用）复跑一致
+
+**Evidence**：`evidence/phase-1/`
+
+### Phase 2: 插件骨架（TabsRoot 选项卡容器）
+
+> 你在哪里：冒烟插件可加载；侧边栏仍为官方单面板
+> 做完之后：侧边栏出现选项卡栏（工作区/终端/GenOffice/文件），官方工作区/设置面板在容器内可用，rail 折叠恢复正常，激活 tab 记忆
+
+### Task 8: 搭建 dsh-plugin 正式包结构
+
+- **关联**：BR-002 / INV-004 / EVD-008（UF: NA——工程任务）
+- **前置任务**：1
+- **风险等级**：P1
+
+**为什么做**：从冒烟包演进为正式 client 插件包，承载 TabsRoot 与三个面板。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/`（Task 1 已建）：package.json / tsconfig / src 结构
+- `.dsh-plugin-dev/packages/client/ui-slots/src/index.ts`：`register` / `SlotMap` 合并，`rg "register"`，L115/L240（注册契约）
+- `.dsh-plugin-dev/packages/client/ui-sidebar/src/client/index.ts`：`apply` / `inject`，`rg "inject"`，L38-L39（官方注册形状参考）
+
+**具体操作**：
+
+1. 规范包结构：`src/index.ts`（`apply(ctx)` + `inject: ['slots','layout','sessions','workspaces','locale']` 按需声明）、`src/TabsRoot.tsx`、`src/store.ts`、`src/tabs/{workspace,terminal,genoffice,files}.tsx`（占位）、`README.md`
+2. 构建：参考 `ui-sidebar` 的 `tsdown.config.ts` 输出 client 可加载产物；typecheck 命令进 package.json scripts
+3. 确认 `ctx.slots.register` 的完整签名（children 声明、inject hook、store seat）并记录到 README（P2 实现依赖）
+
+**验证**：`cd dsh-plugin && npm run typecheck` 通过 + `npm run build` 产物可被 client 加载（沿用 Task 1 冒烟验证路径）
+
+**Evidence**：`evidence/phase-2/build.log`
+
+**注意事项**：禁止把官方包的内部类型当公共 API 用（以 packages/client 各包 `/client` 导出面为准）；DSH 包版本演进风险记录到 README
+
+### Task 9: 实现 TabsRoot 选项卡容器并替换 sidebar 注册者
+
+- **关联**：BR-001 / BR-002 / BR-003 / UF-001 / UF-006 / INV-001 / EVD-001（核心任务）
+- **前置任务**：8
+- **风险等级**：P0
+
+**为什么做**：统一生态的骨架——选项卡栏 + 可插拔子槽位 + 官方面板保留。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/src/TabsRoot.tsx`（新建）：容器组件
+- `.dsh-plugin-dev/packages/client/ui-sidebar/src/client/SidebarRoot.tsx`：`renderSlot('sidebar.workspaces')` / `renderSlot('sidebar.settings')`，L174/L182（子槽位渲染参考与 props 形状）
+- `.dsh-plugin-dev/packages/client/ui-sidebar/src/client/index.ts`：`name: 'sidebar'`，L39（被替换的注册者；patch disable 的对象）
+- `~/.dsh/profiles/web/cordis.patch.yml`：insert 列表（装载点）
+- `genoffice/dsh-plugin/src/index.ts`：`ctx.slots.register({name:'sidebar', children:{...}, ...}, TabsRoot)`（注册点）
+
+**具体操作**：
+
+1. `TabsRoot` 组件：
+   - 顶部选项卡栏：`工作区 | 终端 | GenOffice | 文件`（激活态高亮；图标用文本+简单 SVG，样式对齐官方 rail 风格）
+   - 内容区按激活 tab 渲染：工作区 → `renderSlot('sidebar.workspaces', props)`；设置保留在 rail 底部入口（`renderSlot('sidebar.settings', {wide})`）；其余 → `renderSlot('sidebar.tabs.<name>')`
+   - 折叠态（`collapsed` owner prop）：渲染 rail 图标列（tab 图标可点击直接激活对应 tab 并展开）
+2. `index.ts` 注册：`children` 声明 `sidebar.tabs`（容器级）+ 三个 tab 子槽位（`sidebar.tabs.terminal/genoffice/files`，kind single, scope root）——子槽位由后续 Task 注册，本 Task 先声明（未注册时按 UF-001 失败分支降级隐藏 tab）
+3. patch 配置：`cordis.patch.yml` 增加 `- id: ui-sidebar` + `disabled: true`（官方行）+ insert 本插件行（`name: 'dsh-genoffice-sidebar'`）
+4. 重启 `dsh web` 实测：选项卡栏出现；工作区 tab 内官方会话列表可用；设置入口可用
+
+**验证**：`dsh web` 后侧边栏显示选项卡栏，点击各 tab 无 console error；官方工作区列表可见可点（INV-001 初步）
+
+**Evidence**：`evidence/UF-001/tabs-bar.png` + `evidence/phase-2/tabs-console.log`
+
+**注意事项**：禁止改动官方 `ui-sidebar` 源码（INV-004）；patch disable 后若 rail 样式缺失，参考 `SidebarRoot.module.css` 自绘（ASM-003）；子槽位未注册时 tab 必须隐藏而非渲染空白
+
+### Task 10: 实现激活 tab store 与折叠恢复
+
+- **关联**：BR-003 / UF-006 / EVD-001
+- **前置任务**：9
+- **风险等级**：P2
+
+**为什么做**：折叠/展开后恢复原 tab（BR-003），并处理会话切换等边界。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/src/store.ts`（新建）：`createTabsStore`（激活 tab、每 tab 状态保留位）
+- `.dsh-plugin-dev/packages/client/ui-layout/src/client/stores.ts`：布局 store（参考其 transient store 形状，`rg "createLayoutStore"`）
+
+**具体操作**：
+
+1. store：`{ active: TabId, byTab: Record<TabId, unknown> }`，`setActive` / `patchTab` actions；参照 `ui-layout` 的 store 模式（transient，不写 localStorage——与官方一致，刷新回默认）
+2. TabsRoot 订阅 `layout` 折叠状态：折叠时记录 active，展开时恢复
+3. 错误边界：单个 tab 渲染抛错 → 占位 + console 记录，不白屏（UF-001 失败分支）
+
+**验证**：browser 实测：切 GenOffice → 折叠 → 展开 → 仍为 GenOffice；渲染抛错模拟（临时 throw）→ 占位出现
+
+**Evidence**：`evidence/UF-006/collapse-restore.png`
+
+**注意事项**：store 状态不许写 localStorage（与官方布局策略一致，ASM-003 注明刷新回默认）
+
+### Task 11: 执行 Phase 2 回归验证
+
+- **关联**：INV-001 / UF-001 / UF-006 全分支
+- **前置任务**：9;10
+- **风险等级**：P1
+
+**验证**：官方工作区会话创建/切换/搜索 + 设置入口逐项可用；四个 tab 可达（终端/GenOffice/文件显示占位或隐藏）；rail 折叠展开恢复；console 无 error
+
+**Evidence**：`evidence/phase-2/`
+
+### Phase 3: GenOffice tab
+
+> 你在哪里：选项卡容器就绪，GenOffice tab 占位
+> 做完之后：文件列表（relay /api/dir）+ iframe 只读预览 + 浏览器打开（BR-004~BR-008/BR-011）
+
+### Task 12: 实现 GenOffice 文件列表面板
+
+- **关联**：BR-004 / BR-005 / UF-002 / EVD-002 / EVD-006
+- **前置任务**：7;11
+- **风险等级**：P0
+
+**为什么做**：GenOffice 面板的文件浏览器（自带文件浏览器需求）。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/src/tabs/genoffice.tsx`（新建）：面板组件
+- `genoffice/web/server.mjs`：`/api/dir`（Task 4 产出，数据源）
+
+**具体操作**：
+
+1. 组件状态机：`idle/loading/list/error`（对应 UF-002 状态机）
+2. 初始路径 = 主目录（`/api/dir` 缺省）；顶部当前路径栏 + 上级（`..`）按钮；目录行点击进入；文件行按扩展名分类展示（docx/md 可点击，其他置灰并提示"仅桌面版可用"）；空目录占位；错误态显示"中继服务未启动/路径不可读" + 重试按钮（UF-002 失败分支）
+3. 数据获取：`fetch('http://localhost:8787/api/dir?path=' + encodeURIComponent(p))`（CORS 由 Task 5 保证）；失败捕获进 error 态
+4. 选中文件后调用 `onPreview(path, name)`（由 Task 13 接线）
+5. 文件类型过滤：仅 docx/md 可预览（BR-007）
+
+**验证**：browser 实测：列表加载主目录 → 进入子目录 → 上级返回；点击 .docx 触发预览回调；点击 .xlsx 提示"仅桌面版可用"；relay 停掉后错误态 + 重试恢复
+
+**Evidence**：`evidence/UF-002/list.png` + `evidence/UF-002/list-error.png`
+
+**注意事项**：禁止直接拼 iframe URL 而不经过 Task 13 的预览控制器；路径一律 encodeURIComponent；隐藏文件默认不显示（与 relay 排序一致）
+
+### Task 13: 实现 iframe 预览（只读）
+
+- **关联**：BR-007 / BR-011 / UF-002 / EVD-002
+- **前置任务**：12
+- **风险等级**：P0
+
+**为什么做**：侧边栏内嵌打开 GenOffice 预览（用户确认：嵌入；只读）。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/src/tabs/genoffice.tsx`：预览区（列表下方或切换视图）
+- `genoffice/apps/docs/src/renderer/web-bridge.ts`：`parseOpenTarget` / `openTarget`（`path:` 目标由 relay 读取，`rg "isPath"`，L1028——预览复用此链路，无需改动）
+
+**具体操作**：
+
+1. 预览控制器：`preview(path, name)` → 按扩展名构造 URL：docx → `/docs/?open=path:<abs>`，md → `/markdown/?open=path:<abs>`（`<abs>` 需 `encodeURIComponent` 整个 `path:` 前缀）
+2. iframe 挂载：`src=构造 URL`；`loading` 态（iframe onLoad）+ `error` 态（onError / 超时 10s → 显示错误与重试）
+3. 只读保障（BR-011）：预览文档在 relay 侧是字节副本；iframe 内 Ctrl+S 触发下载而非写回——实测原文件 sha256 前后一致（`shasum -a 256 <file>` 对比）
+4. 预览区提供「在浏览器中打开」按钮（接线 Task 14）
+
+**验证**：browser 实测：点击 .docx → iframe 渲染"标题第一段。第二段。"（用 fixtures/generated/simple.docx）；预览前后 `shasum -a 256 fixtures/generated/simple.docx` 一致；iframe 内 Ctrl+S 出现下载而非写回
+
+**Evidence**：`evidence/UF-002/preview-docx.png` + `evidence/UF-002/hash-before-after.txt`
+
+**注意事项**：禁止 iframe sandbox 属性导致文档交互失效（需允许 same-origin 以加载 relay 资源——用 sandbox="allow-scripts allow-same-origin" 并实测）；iframe 每次预览重建（避免陈旧状态）
+
+### Task 14: 实现「在浏览器中打开」按钮
+
+- **关联**：BR-008 / UF-003 / EVD-003
+- **前置任务**：13
+- **风险等级**：P2
+
+**为什么做**：用户确认"支持跳转"——完整编辑器体验。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/src/tabs/genoffice.tsx`：预览工具栏
+
+**具体操作**：
+
+1. 预览工具栏加「在浏览器中打开」按钮：`window.open(iframeSrc, '_blank', 'noopener')`
+2. 弹窗拦截失败（window.open 返回 null）→ 面板内提示"请允许弹窗后重试"（UF-003 失败分支）
+
+**验证**：browser 实测点击按钮 → 新标签打开完整编辑器（可编辑）；拦截场景（浏览器设置禁用弹窗）→ 提示出现
+
+**Evidence**：`evidence/UF-003/open-new-tab.png`
+
+### Task 15: 执行 Phase 3 回归验证
+
+- **关联**：UF-002 / UF-003 全分支 / BR-011 / INV-005
+- **前置任务**：12;13;14
+- **风险等级**：P1
+
+**验证**：列表/预览/打开三环节主路径 + 全部失败分支（relay 停、路径不可读、类型不支持、空目录、弹窗拦截）；`node web/smoke-test.mjs` 全绿（INV-005 初步）；console 无 error
+
+**Evidence**：`evidence/phase-3/`
+
+### Phase 4: 文件 tab
+
+> 你在哪里：文件 tab 占位
 > 做完之后：host.listDirectory 目录浏览（BR-009, UF-004）
 
-草案任务：
+### Task 16: 实现文件管理面板（host.listDirectory）
 
-14. 文件面板：listDirectory 数据源 + 路径导航 + 错误态（UF-004 全分支）
+- **关联**：BR-009 / UF-004 / EVD-004
+- **前置任务**：11
+- **风险等级**：P1
 
-### Phase 5: 终端 tab（P0 草案）
+**为什么做**：独立于 GenOffice 的通用文件浏览（用户确认"文件管理"）。
 
-> 做完之后：xterm + pty ws 双向实时、会话生命周期（BR-010, UF-005）
+**涉及文件与定位**：
 
-草案任务：
+- `genoffice/dsh-plugin/src/tabs/files.tsx`（新建）：面板组件
+- `.dsh-plugin-dev/packages/client/connection/src/client/fixture.ts`：`listDirectory` 返回形状参考，`rg "listDirectory"`，L2082
+- `.dsh-plugin-dev/packages/client/connection/src/client/index.ts`：`ctx.connection.api`，L49-L67（数据通道）
 
-15. host 侧 pty 插件（node-pty spawn + `/api/pty.ws` WebSocket，cwd=主目录；会话注册表与销毁）
-16. client 终端面板（xterm.js 渲染、ws 连接、重连、卸载销毁）
+**具体操作**：
 
-### Phase 6: 集成验收（P0 草案）
+1. 数据源：`ctx.connection.api.host.listDirectory(path?)`（`host` 域，DSH host 侧执行，无跨域）；`isLoopback` 为 false 时提示降级（非本机场景）
+2. UI：当前路径栏、上级/主目录按钮、目录进入、文件/目录图标区分、错误态（RpcResponse 非 ok 或 reject → 错误行 + 保留上次列表）、host 断连提示（UF-004 失败分支）
+3. 状态机对齐 UF-004：`idle → loading → list | error`
 
-> 做完之后：profile 加载完整插件、5.2 真实场景全套通过、回归全绿
+**验证**：browser 实测：进入 `/tmp` → 列表出现；`..` 返回；主目录按钮回 home；故意传不可读路径 → 错误态且列表保留
 
-草案任务：
+**Evidence**：`evidence/UF-004/files-browse.png` + `evidence/UF-004/files-error.png`
 
-17. profile 集成（patch disable ui-sidebar + insert 全部面板；本地包安装确认）
-18. 执行 spec 5.2 真实场景全套测试（UF-001~UF-006 主路径+失败分支）
-19. 全量回归（INV-001~INV-006）+ evidence 归档 + 状态板收尾
+**注意事项**：禁止在 client 侧用 fetch 拼 host 路径（必须走 `ctx.connection.api`）；`listDirectory` 的 request 形状以 `host.schema.ts` 为准（`rg "host.listDirectory" .dsh-plugin-dev/packages/host-apiproxy`）
+
+### Task 17: 执行 Phase 4 回归验证
+
+- **关联**：UF-004 全分支 / INV-001
+- **前置任务**：16
+- **风险等级**：P2
+
+**验证**：文件浏览主路径 + 错误/断连分支；工作区 tab 不受影响；console 无 error
+
+**Evidence**：`evidence/phase-4/`
+
+### Phase 5: 终端 tab
+
+> 你在哪里：终端 tab 占位；node-pty 在依赖树（dsh-pty-local）
+> 做完之后：xterm + host pty ws 双向实时、会话生命周期（BR-010, UF-005）
+
+### Task 18: 实现 host 侧 pty WebSocket 端点
+
+- **关联**：BR-010 / UF-005 / INV-006 / EVD-005（UF: NA——host 服务；用户可见部分由 Task 19 承接，本任务说明其原因）
+- **前置任务**：8
+- **风险等级**：P0（ASM-005 验证点）
+
+**为什么做**：DSH 无 pty client 传输，需要 host 插件提供 WebSocket 通道 + node-pty 会话。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/host/src/index.ts`（新建）：host 侧 cordis 插件
+- `.dsh-plugin-dev/packages/pty/pty/src/types.ts`：`PtySpawnRequest`，`rg "PtySpawnRequest"`，L40（{type, name?, cwd?}）
+- `.dsh-plugin-dev/packages/pty/pty-local/src/index.ts`：node-pty backend 参考，`rg "nodePty"`，L8/L99
+- DSH host httpServer 注册方式：`待勘察`（rg `httpServer` .dsh-plugin-dev/packages/bundle/base/ 及既有 ws 端点如 `MUX_EVENTS_PATH` 的注册处）
+
+**具体操作**：
+
+1. 勘察并记录 host 侧注册 WebSocket 端点的方式（复用 DSH 既有 `/api/events.*` ws 的注册模式）
+2. host 插件：`/api/pty.ws` 端点——握手后 spawn shell（优先复用 DSH 既有服务：`ctx.pty.spawn(owner, {type:'local', cwd: homedir()})`，owner 用当前会话 Agent；复用失败再直接 node-pty）
+3. 消息协议：client→host `{type:'input', data}`；host→client `{type:'output', data}` / `{type:'exit', code}` / `{type:'error', message}`；帧为 JSON 行
+4. 会话生命周期：ws close/error → 销毁 pty（kill + close）；会话注册表 Map<ws, session>；页面断连 30s 无心跳自动销毁（防孤儿，INV-006）
+5. cwd：默认用户主目录；`cwd` 请求字段可覆盖
+
+**验证**：Playwright page.evaluate 建 WebSocket：发送 `echo hello\n` → 收到含 `hello` 的 output 帧；close 后 `ps aux | grep -c <shell>` 无新增残留
+
+**Evidence**：`evidence/UF-005/ws-echo.log` + `evidence/UF-005/no-orphan.txt`
+
+**注意事项**：禁止把 pty 会话交给未认证来源（ws 握手校验 `Origin` 为 loopback 或 DSH 页面）；禁止 spawn 常驻进程泄漏（异常路径也走销毁）；node-pty 为原生模块，加载失败要给出明确错误帧
+
+### Task 19: 实现 client 终端面板（xterm.js）
+
+- **关联**：BR-010 / UF-005 / EVD-005
+- **前置任务**：18
+- **风险等级**：P1
+
+**为什么做**：终端 UX（用户确认"类 terminal"面板）。
+
+**涉及文件与定位**：
+
+- `genoffice/dsh-plugin/src/tabs/terminal.tsx`（新建）：xterm.js 集成
+- `genoffice/dsh-plugin/package.json`：加 `xterm` / `xterm-addon-fit` 依赖（ASM：npm 安装 xterm@5）
+
+**具体操作**：
+
+1. 面板挂载：创建 xterm 实例（fit 插件自适应面板宽度）、建立 `ws://127.0.0.1:<dshPort>/api/pty.ws`（端口从 `location.port` 推断）
+2. 双向：`term.onData(d => ws.send({type:'input', data:d}))`；ws message → `term.write(data)`；`{type:'exit'}` → 显示退出码
+3. 连接状态机（UF-005）：`disconnected → connecting → connected → closed`；失败显示"连接失败"+ 重连按钮（指数退避 1s/2s/5s）
+4. 生命周期：组件卸载（切 tab/折叠到 rail 不可见）→ 关闭 ws（host 侧销毁会话，INV-006）；重新激活 → 新会话（BR-010 允许重建）
+5. Ctrl+C 等按键由 xterm 默认发送，host 侧 pty 处理
+
+**验证**：browser 实测：终端出现 shell 提示符；`echo hello` 输出 `hello`；`Ctrl+C` 中断 `sleep 100`；切走 tab 再切回 → 新会话可用；`ps aux | grep -c sleep` 在切走后归零
+
+**Evidence**：`evidence/UF-005/terminal-echo.png` + `evidence/UF-005/terminal-ctrl-c.png`
+
+**注意事项**：禁止在面板不可见时保持 ws 连接（资源泄漏）；xterm 版本与 React 严格模式兼容性实测；`fit` 在面板宽度变化（拖拽）时调用 `term.fit()`
+
+### Task 20: 执行 Phase 5 回归验证
+
+- **关联**：UF-005 全分支 / INV-006
+- **前置任务**：18;19
+- **风险等级**：P1
+
+**验证**：终端主路径 + 失败分支（ws 失败重连、切 tab 销毁）；`ps` 无残留；console 无 error
+
+**Evidence**：`evidence/phase-5/`
+
+### Phase 6: 集成验收
+
+> 你在哪里：四个 tab 各自可用
+> 做完之后：profile 加载完整插件、5.2 真实场景全套通过、全量回归绿、evidence 归档
+
+### Task 21: profile 最终集成与安装固化
+
+- **关联**：BR-001 / INV-004 / EVD-008
+- **前置任务**：11;15;17;20
+- **风险等级**：P0
+
+**为什么做**：把全部面板与 host 插件一次性装入 profile，并固化安装步骤（README）。
+
+**涉及文件与定位**：
+
+- `~/.dsh/profiles/web/cordis.patch.yml`：insert 列表（client + host 插件行）
+- `~/.dsh/profiles/web/package.json`：`dsh.profile.bundles` 与 dependencies（本地链接）
+- `genoffice/dsh-plugin/README.md`：安装/卸载/回退说明（patch disable 即回退官方）
+
+**具体操作**：
+
+1. patch 最终化：disable `ui-sidebar` 行 + insert client 插件 + insert host 插件（id/name 与既有行同构）
+2. 依赖固化：`file:` 链接 + `pnpm install`；README 记录重装命令与回退（注释掉 patch 行即还原）
+3. 干净启动验证：从零执行 README 安装步骤 → `dsh web` → 四个 tab 全部出现且可用
+4. 卸载验证：patch 注释后重启 → 官方侧边栏原样恢复（回退可用性，EVD-001）
+
+**验证**：全新安装路径一次成功；回退后官方侧边栏截图对比无差异
+
+**Evidence**：`evidence/phase-6/install.log` + `evidence/UF-001/fallback-official.png`
+
+**注意事项**：禁止把安装步骤写成只有本机可用的绝对路径（README 用变量占位）；回退验证必须真实执行一次
+
+### Task 22: 执行 spec 5.2 真实场景全套测试
+
+- **关联**：全部用户可见 UF（UF-001~UF-006）
+- **前置任务**：21
+- **风险等级**：P0
+
+**验证**：按 5.2 执行矩阵逐行回放（主路径 + 全部失败分支），每行核对界面反馈与 console/network；全部通过才算本任务完成
+
+**Evidence**：`evidence/UF-xxx/`（按矩阵行归档）
+
+**注意事项**：禁止用"单测通过"或"代码审查"替代本节；失败一行即回到对应任务修复重跑
+
+### Task 23: 全量回归与 evidence 收尾
+
+- **关联**：INV-001~INV-006 / EVD-009
+- **前置任务**：22
+- **风险等级**：P1
+
+**验证**：genoffice 6 个 e2e 全绿 + DSH 官方功能回归（会话创建/切换/设置）+ `ps` 无残留 + console 无 error；evidence 目录与 2.5 节 EVD 清单逐一核对；tasks.csv 全部更新为已完成
+
+**Evidence**：`evidence/phase-6/regression.log`
 
 ---
 
 ## 5. 验收与 Review 协议
 
-> Stage 2 展开：5.1 命令级验证表 / 5.2 真实场景执行矩阵（环境准备：`dsh web` 启动 + Playwright + curl）/ 5.3 evidence 结构 / 5.4 专项检查清单。
+> **验收铁律：命令级验证（5.1）通过只是入场券，不是完成。** 用户可见的需求必须通过 5.2 真实场景全套测试才算完成——单元测试全绿但界面点不动 = 未完成。
+
+### 5.1 命令级验证（入场券）
+
+| 验证项 | 命令 | 期望 | Evidence |
+|---|---|---|---|
+| 插件包 typecheck | `cd dsh-plugin && npm run typecheck` | 0 error | EVD-008 |
+| 插件包构建 | `cd dsh-plugin && npm run build` | 产物生成、可加载 | EVD-008 |
+| relay 端点 | `curl "http://localhost:8787/api/dir?path=/tmp"` | `{ok:true, entries:[...]}` | EVD-006 |
+| relay CORS | `curl -i -H "Origin: http://127.0.0.1:3080" http://localhost:8787/api/health` | 含 ACAO 回显头 | EVD-007 |
+| relay 安全 | `HOST=0.0.0.0` 无开关 → `curl /api/file` | 禁用错误（文案同基线） | EVD-007 |
+| genoffice 回归 | `node web/e2e-url-open.mjs` 等 6 脚本 | 全绿 | EVD-009 |
+| pty 无残留 | `ps aux | grep -E "sleep|bash" | grep -v grep` | 无新增进程 | EVD-005 |
+
+### 5.2 真实场景全套测试（Real-Run，完成的唯一标准）
+
+> 在真实运行的应用上，把第 2.3 节每条流程脚本从头到尾走一遍——用和真实用户完全相同的方式。禁止用"跑了单测"或"读了代码确认逻辑正确"代替本节。
+
+**环境准备**：
+
+| 项 | 值 |
+|---|---|
+| 启动命令 | `cd ~/.dsh/profiles/web && pnpm install`（插件已链入）后运行 `/Users/nothing/workspace/dsh/test-Nothing1024/bin/dsh web`（或 PATH 中 `dsh web`）；relay：`cd /Users/nothing/workspace/dsh/genoffice && node web/server.mjs` |
+| 访问入口 | DSH GUI `http://127.0.0.1:3080`（侧边栏）；relay `http://localhost:8787` |
+| 测试账号/数据 | 无需账号；测试文件：`genoffice/fixtures/generated/simple.docx`（内容"标题第一段。第二段。"）与一个临时 `.md` |
+| 干净状态定义 | 重启 `dsh web`；relay 重启；浏览器无痕窗口 |
+| 可用测试工具 | Playwright（chromium，已有）+ curl；DSH GUI 用 Playwright 打开 127.0.0.1:3080 实际操作侧边栏 |
+
+**执行矩阵**（每条 = 2.3 节一条流程脚本的真实回放）：
+
+| UF | 执行方式 | 操作来源 | 必须核对的点 | Evidence |
+|---|---|---|---|---|
+| UF-001 主路径 | browser | 2.3 节 UF-001 步骤 1-3 逐条点击四个 tab | 每步即时反馈与脚本一致；激活态高亮；console 无新增 error | `evidence/UF-001/tabs.png` + console.log |
+| UF-001 失败分支（子槽位缺失） | browser | 临时注释某个 tab 插件行重启 | 该 tab 隐藏/不可用，其余正常 | `evidence/UF-001/missing-slot.png` |
+| UF-001 失败分支（渲染异常） | browser | 临时注入 throw 组件 | 错误边界占位，不白屏 | `evidence/UF-001/error-boundary.png` |
+| UF-002 主路径 | browser | 2.3 节 UF-002 步骤 1-3：列目录→点击 simple.docx→预览 | iframe 渲染"标题第一段。第二段。"；加载态可见；hash 前后一致 | `evidence/UF-002/preview-docx.png` + hash 记录 |
+| UF-002 失败分支（relay 停） | browser | 停 relay 后刷新列表/点文件 | "中继服务未启动"+ 重试恢复 | `evidence/UF-002/relay-down.png` |
+| UF-002 失败分支（类型不支持） | browser | 点击 .xlsx 文件 | 提示"仅桌面版可用"，行不可点 | `evidence/UF-002/unsupported.png` |
+| UF-002 失败分支（空目录） | browser | 进入空目录 | "空目录"占位 | `evidence/UF-002/empty-dir.png` |
+| UF-003 主路径 | browser | 2.3 节 UF-003：点「在浏览器中打开」 | 新标签完整编辑器（可编辑） | `evidence/UF-003/open-new-tab.png` |
+| UF-004 主路径 | browser | 2.3 节 UF-004 步骤 1-3：进入 /tmp、上级、主目录 | 列表即时刷新、路径栏正确 | `evidence/UF-004/browse.png` |
+| UF-004 失败分支（路径错误） | browser | 访问不可读目录 | 错误提示 + 列表保留 | `evidence/UF-004/error.png` |
+| UF-005 主路径 | browser | 2.3 节 UF-005 步骤 1-3：echo/Ctrl+C/exit | 实时回显；中断生效；`ps` 无残留 | `evidence/UF-005/echo.png` + `ps` 输出 |
+| UF-005 失败分支（ws 失败） | browser | 停 host 插件后开终端 | "连接失败"+ 重连按钮，恢复后可用 | `evidence/UF-005/ws-down.png` |
+| UF-006 主路径 | browser | 2.3 节 UF-006：切 GenOffice→折叠→展开 | 恢复 GenOffice tab | `evidence/UF-006/restore.png` |
+
+**按任务类型的执行方式**：
+
+- frontend：真实浏览器（Playwright 打开 127.0.0.1:3080）实际点击，截图 + console + network 三件套
+- backend/API：对真实 relay 发 curl（正常/权限/参数错误各一发），保存 request/response 样例 + server log
+- CLI/脚本：`dsh web` 真实启动、README 安装步骤真实执行
+
+**通过标准**：执行矩阵全部行通过且 evidence 齐全。任何一行失败 = 本需求未完成，回到对应任务修复后重跑。
+
+### 5.3 Evidence 目录结构与命名
+
+```text
+evidence/
+  phase-{0..6}/     # 每 Phase 的命令输出、Phase summary
+  UF-{xxx}/         # 截图、console log，文件名含 UF 编号和状态
+  API-dir/          # /api/dir 样例
+  API-cors/         # CORS 头样例
+```
+
+- EVD ID 必须能在第 2.5 节找到。
+- 截图命名：`UF-002-preview-docx.png`；API 样例命名：`API-dir-{scenario}.json`。
+
+### 5.4 Review 专项检查清单
+
+> 实现完成后的专项检查。通用 L1-L4 流程见 skill 的 review mode，此处只列本需求特有项。
+
+- [ ] 侧边栏选项卡栏与四面板从真实入口（侧边栏 UI）可达，不是只有孤立组件
+- [ ] 官方工作区列表/设置功能在容器内完整可用（INV-001）——创建会话、切换会话、搜索、设置逐项点过
+- [ ] iframe 预览只读：原文件 sha256 前后一致；Ctrl+S 触发下载不写回（BR-011）
+- [ ] relay `/api/dir` 与 CORS 的安全边界：网络暴露无开关时返回禁用错误（BR-005/BR-006）
+- [ ] 终端无孤儿进程：切 tab/关页面后 `ps` 干净（INV-006）
+- [ ] 5.2 执行矩阵全部通过，evidence 齐全且与 2.5 节 EVD 清单一致
+- [ ] 2.3 节每条流程的「入口接线清单」已实现——选项卡按钮、文件行、目录行、预览按钮、终端 ws 均已接线
+- [ ] 界面交互与 2.3 节脚本逐步一致（loading、禁用态、错误提示、成功反馈都存在）
+- [ ] 所有 BR/UF/INV 状态可对照第 2 章逐条核销
+- [ ] DSH 官方包零源码修改（`git -C .dsh-plugin-dev status --short` 干净）
+- [ ] patch 回退验证执行过：注释插件行后官方侧边栏原样恢复
