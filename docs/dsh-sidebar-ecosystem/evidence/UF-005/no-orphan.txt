@@ -1,0 +1,2 @@
+children after close: []
+verdict: {"echoOk":true,"exitFrame":{"type":"exit","code":0,"signal":0},"evilOriginRejected":true,"orphans":true}
