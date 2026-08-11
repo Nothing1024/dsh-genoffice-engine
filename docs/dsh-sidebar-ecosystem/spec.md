@@ -59,6 +59,13 @@
 | ASM-004 | GenOffice 预览用 `path:` 打开（relay 读字节副本），侧边栏 iframe 内仅只读浏览；保存=下载新文件，不写回原文件 | 低：用户已确认"暂时仅浏览" | 5.2 真实场景确认保存行为 |
 | ASM-005 | 终端 tab 用 host 侧 cordis 插件（node-pty spawn shell + `/api/pty.ws` WebSocket）+ client xterm.js 渲染；pty 会话与面板关闭联动销毁 | 高：node-pty 原生模块需在 DSH host 进程加载；ws 握手与 DSH 现有 httpServer 集成细节待勘察 | P5 任务内勘察 `packages/pty/pty/src` PtySpawnRequest 字段 + DSH httpServer 注册方式 |
 
+> **执行期验证记录（2026-08-10，execution agent 回写）**：
+> - ASM-001 ✅ 已验证：`dsh-genoffice-sidebar-r2` 经 `file:` 依赖链入 `~/.dsh/profiles/web/node_modules`，patch 行加载成功（干净启动 :3180 实测，review-report L3）
+> - ASM-002 ✅ 已验证：DSH web 无 frame-src 限制，iframe 嵌入 relay 页面实测可用（Task 1 iframe.png + UF-002 预览截图）
+> - ASM-003 ✅ 已验证：官方 SidebarRoot 组件未导出，TabsRoot 自绘 rail/选项卡栏（UF-001 截图）
+> - ASM-004 ✅ 已验证：`path:` 预览为字节副本，sha256 前后一致、Ctrl+S 触发下载（evidence/UF-002/hash-before-after.txt）
+> - ASM-005 ✅ 已验证：host 插件 `genoffice-sidebar-host`（dsh-plugin-runtime）直接 node-pty + `/api/pty.ws`，GOT-ECHO 与 ps 无残留实测（evidence/UF-005/）
+
 ---
 
 ## 2. 业务合同
