@@ -7,6 +7,8 @@ declare global {
   interface Window {
     desktop: DesktopApi
     projectApi: ProjectApi
+    /** set by the web bridge (web-bridge.ts); the renderer uses it to show web-only UI */
+    __GENOFFICE_WEB__?: boolean
   }
 }
 

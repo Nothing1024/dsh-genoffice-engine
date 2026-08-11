@@ -4493,6 +4493,95 @@ body.docs-crop-active
   color: var(--color-text-primary);
 }
 
+/* web build only: BYOK provider/api-key popover anchored under the panel header */
+.ai-panel-header-actions {
+  position: relative;
+}
+
+.ai-web-settings {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  width: 280px;
+  padding: 12px;
+  background: var(--color-bg-page);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-12);
+  box-shadow: var(--shadow-modal-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-weight: 400;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.ai-web-settings-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.ai-web-settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.ai-web-settings-row input,
+.ai-web-settings-row select {
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-8);
+  background: var(--color-bg-subtle);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.ai-web-settings-row input:focus,
+.ai-web-settings-row select:focus {
+  border-color: var(--color-border-brand);
+}
+
+.ai-web-settings-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+}
+
+.ai-web-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-web-settings-actions button {
+  padding: 5px 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-8);
+  background: var(--color-bg-page);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ai-web-settings-actions button:hover {
+  background: var(--color-bg-subtle);
+}
+
+.ai-web-settings-actions button.primary {
+  background: var(--color-btn-primary);
+  border-color: var(--color-btn-primary);
+  color: var(--color-btn-primary-text);
+}
+
+.ai-web-settings-actions button.primary:hover {
+  background: var(--color-btn-primary-hover);
+}
+
 /* collapsed AI sidebar: thin rail on the left edge */
 .ai-rail {
   display: flex;

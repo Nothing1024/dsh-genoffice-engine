@@ -33,3 +33,9 @@ electron-builder.env
 __pycache__/
 /notes/
 /MEMORY.md
+
+# Web builds (apps/*/web-dist)
+web-dist/
+
+# DSH plugin dev worktree (from test-Nothing1024)
+.dsh-plugin-dev/

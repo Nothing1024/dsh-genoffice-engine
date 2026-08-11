@@ -3,7 +3,7 @@ import type { Editor } from '@tiptap/core'
 import type { Block } from '@genoffice/docx-engine'
 import { AgentLoop, composeSkills, type AgentImage } from '@genoffice/agent-core'
 import type { AiSettings, AttachmentAddResult, AttachmentMeta } from '../../shared/ipc'
-import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
+import { ATTACHMENT_IMAGE_EXTS, AI_PROVIDERS } from '../../shared/ipc'
 import type { PmNode } from '../editor/convert'
 import { findNumId, type NumIds } from './protocol'
 import { markDocSeen } from './tools'
@@ -220,6 +220,8 @@ interface AiPanelProps {
   onCollapse?: () => void
   /** Absolute path of the currently open file (used for chat-history persistence) */
   filePath?: string | null
+  /** web build only: persist provider/api-key changes made in the panel */
+  onSettingsChange?: (settings: AiSettings) => void
 }
 
 export function AiPanel({
@@ -233,6 +235,7 @@ export function AiPanel({
   onExpand,
   onCollapse,
   filePath,
+  onSettingsChange,
 }: AiPanelProps) {
   const { t } = useI18n()
   const [input, setInput] = useState('')
@@ -249,6 +252,21 @@ export function AiPanel({
   const [attachNotice, setAttachNotice] = useState<string | null>(null)
   /** data-URL previews for image attachments, keyed by path (Genspark composer thumbnails) */
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({})
+  /** web build only: BYOK provider/api-key settings popover */
+  const [showWebSettings, setShowWebSettings] = useState(false)
+  const [webSettingsDraft, setWebSettingsDraft] = useState<AiSettings | null>(null)
+  const openWebSettings = () => {
+    void window.desktop.getAiSettings().then((s) => {
+      setWebSettingsDraft(s)
+      setShowWebSettings(true)
+    })
+  }
+  const saveWebSettings = () => {
+    if (!webSettingsDraft) return
+    onSettingsChange?.(webSettingsDraft)
+    void window.desktop.setAiSettings(webSettingsDraft)
+    setShowWebSettings(false)
+  }
   /** image paths with a read already issued — one readAttachmentImage per attach, even while pending */
   const previewRequestedRef = useRef(new Set<string>())
   useEffect(() => {
@@ -852,6 +870,156 @@ export function AiPanel({
           {t('aiPanelTitle')}
         </span>
         <div className="ai-panel-header-actions">
+          {window.__GENOFFICE_WEB__ && (
+            <>
+              <button
+                className={`ai-header-btn${showWebSettings ? ' open' : ''}`}
+                onClick={openWebSettings}
+                title="AI 设置（网页版：模型 / API Key）"
+                aria-label="AI 设置"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3.2" />
+                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.03z" />
+                </svg>
+              </button>
+              {showWebSettings && webSettingsDraft && (
+                <div className="ai-web-settings">
+                  <div className="ai-web-settings-title">AI 设置（网页版）</div>
+                  <label className="ai-web-settings-row">
+                    <span>模型服务商</span>
+                    <select
+                      value={webSettingsDraft.provider}
+                      onChange={(e) => {
+                        const id = e.target.value as (typeof AI_PROVIDERS)[number]['id']
+                        const meta = AI_PROVIDERS.find((p) => p.id === id)
+                        setWebSettingsDraft((d) =>
+                          d
+                            ? {
+                                ...d,
+                                provider: id,
+                                providers: {
+                                  ...d.providers,
+                                  [id]: d.providers[id] ?? {
+                                    apiKey: '',
+                                    model: meta?.defaultModel ?? '',
+                                  },
+                                },
+                              }
+                            : d,
+                        )
+                      }}
+                    >
+                      {AI_PROVIDERS.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {(() => {
+                    const meta = AI_PROVIDERS.find((p) => p.id === webSettingsDraft.provider)
+                    const cfg = webSettingsDraft.providers[webSettingsDraft.provider]
+                    return (
+                      <>
+                        <label className="ai-web-settings-row">
+                          <span>API Key</span>
+                          <input
+                            type="password"
+                            placeholder={meta?.keyPlaceholder ?? 'sk-...'}
+                            value={cfg?.apiKey ?? ''}
+                            onChange={(e) =>
+                              setWebSettingsDraft((d) =>
+                                d
+                                  ? {
+                                      ...d,
+                                      providers: {
+                                        ...d.providers,
+                                        [d.provider]: {
+                                          ...(d.providers[d.provider] ?? { apiKey: '', model: '' }),
+                                          apiKey: e.target.value,
+                                        },
+                                      },
+                                    }
+                                  : d,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="ai-web-settings-row">
+                          <span>模型</span>
+                          <input
+                            list="ai-web-model-list"
+                            placeholder={meta?.defaultModel ?? 'model'}
+                            value={cfg?.model ?? ''}
+                            onChange={(e) =>
+                              setWebSettingsDraft((d) =>
+                                d
+                                  ? {
+                                      ...d,
+                                      providers: {
+                                        ...d.providers,
+                                        [d.provider]: {
+                                          ...(d.providers[d.provider] ?? { apiKey: '', model: '' }),
+                                          model: e.target.value,
+                                        },
+                                      },
+                                    }
+                                  : d,
+                              )
+                            }
+                          />
+                          <datalist id="ai-web-model-list">
+                            {meta?.models.map((m) => (
+                              <option key={m} value={m} />
+                            ))}
+                          </datalist>
+                        </label>
+                        {meta?.needsBaseUrl && (
+                          <label className="ai-web-settings-row">
+                            <span>Base URL</span>
+                            <input
+                              type="text"
+                              placeholder="https://api.example.com/v1"
+                              value={cfg?.baseUrl ?? ''}
+                              onChange={(e) =>
+                                setWebSettingsDraft((d) =>
+                                  d
+                                    ? {
+                                        ...d,
+                                        providers: {
+                                          ...d.providers,
+                                          [d.provider]: {
+                                            ...(d.providers[d.provider] ?? {
+                                              apiKey: '',
+                                              model: '',
+                                            }),
+                                            baseUrl: e.target.value,
+                                          },
+                                        },
+                                      }
+                                    : d,
+                                )
+                              }
+                            />
+                          </label>
+                        )}
+                      </>
+                    )
+                  })()}
+                  <div className="ai-web-settings-note">
+                    密钥仅保存在本浏览器 (localStorage)，AI 请求由浏览器直连模型服务商。Genspark 登录仅桌面版可用。
+                  </div>
+                  <div className="ai-web-settings-actions">
+                    <button onClick={() => setShowWebSettings(false)}>取消</button>
+                    <button className="primary" onClick={saveWebSettings}>
+                      保存
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           {chat.length > 0 && (
             <button className="ai-header-btn" onClick={newChat} title={t('aiNewChatTitle')}>
               <IconNewChat size={16} />
