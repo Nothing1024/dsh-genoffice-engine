@@ -1,0 +1,121 @@
+/* Right-hand floating dock: fixed to the viewport's right edge, floating
+   over the conversation column. The official ui-sidebar stays on the left;
+   the official details column (conversation details) is left untouched. */
+
+/* Root mount point created by the client plugin. */
+.mount {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 400px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: var(--dsw-specific-sidebar-fill);
+  border-left: 1px solid var(--dsw-alias-border-l);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 12%);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family);
+  font-size: 14px;
+}
+
+/* Collapsed: a narrow rail of tab icons on the right edge. */
+.dockCollapsed {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 44px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 10px;
+  background: var(--dsw-specific-sidebar-fill);
+  border-left: 1px solid var(--dsw-alias-border-l);
+}
+
+.railBtn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-dimmed);
+  cursor: pointer;
+}
+
+.railBtn:hover {
+  background: var(--dsw-specific-sidebar-nav-item-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Tab bar: horizontal row under the top padding. */
+.tabBar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 8px 8px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l);
+  flex: none;
+}
+
+/* Collapse toggle pinned to the bar's right edge. */
+.collapseBtn {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-dimmed);
+  cursor: pointer;
+}
+
+.collapseBtn:hover {
+  background: var(--dsw-specific-sidebar-nav-item-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.tab,
+.tabActive {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-dimmed);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  background: var(--dsw-specific-sidebar-nav-item-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.tabActive {
+  background: var(--dsw-specific-sidebar-nav-item-active);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Content region: the active tab panel fills under the tab bar. */
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}

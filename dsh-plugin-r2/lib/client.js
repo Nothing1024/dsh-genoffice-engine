@@ -7,13 +7,12 @@ window.__ModuleLoader__.load({
 		//#region \0rolldown/runtime.js
 		var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);
 		//#endregion
-		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
-		let react_jsx_runtime = require("react/jsx-runtime");
-		let _deepseek_ai_dsh_client_runtime_client = require("@deepseek-ai/dsh-client-runtime/client");
 		let react = require("react");
-		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin/src/TabsRoot.module.css.mjs
-		const css$3 = ".wWuxkG_root{--dsh-sidebar-inline-padding:12px;height:100%;padding:6px var(--dsh-sidebar-inline-padding);box-sizing:border-box;background:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family);flex-direction:column;font-size:14px;display:flex}.wWuxkG_tabBar{border-bottom:1px solid var(--dsw-alias-border-l);flex:none;gap:2px;padding:4px 0 8px;display:flex}.wWuxkG_collapseBtn{width:26px;height:26px;color:var(--dsw-alias-label-dimmed);cursor:pointer;background:0 0;border:0;border-radius:6px;justify-content:center;align-items:center;margin-left:auto;display:inline-flex}.wWuxkG_collapseBtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary)}.wWuxkG_tab,.wWuxkG_tabActive{color:var(--dsw-alias-label-dimmed);font:inherit;cursor:pointer;white-space:nowrap;background:0 0;border:0;border-radius:6px;align-items:center;gap:5px;padding:5px 9px;font-size:13px;display:inline-flex}.wWuxkG_tab:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary)}.wWuxkG_tabActive{background:var(--dsw-specific-sidebar-nav-item-active);color:var(--dsw-alias-label-primary)}.wWuxkG_body{flex-direction:column;flex:1;min-height:0;display:flex;overflow:hidden}.wWuxkG_foot{border-top:1px solid var(--dsw-alias-border-l);flex:none;margin-top:6px}.wWuxkG_rootCollapsed{box-sizing:border-box;background:var(--dsw-specific-sidebar-fill);height:100%;color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family);flex-direction:column;padding:18px 10px 6px;font-size:14px;display:flex}.wWuxkG_rail{flex-direction:column;flex:none;align-items:center;gap:6px;display:flex}.wWuxkG_railBtn,.wWuxkG_railActive{width:36px;height:36px;color:var(--dsw-alias-label-dimmed);cursor:pointer;background:0 0;border:0;border-radius:8px;justify-content:center;align-items:center;display:inline-flex}.wWuxkG_railBtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary)}.wWuxkG_railActive{background:var(--dsw-specific-sidebar-nav-item-active);color:var(--dsw-alias-label-primary)}.wWuxkG_railSpacer{flex:1}.wWuxkG_footRail{flex:none}";
-		const tagId$3 = "dsh-genoffice-sidebar-r2/TabsRoot.module.css";
+		let react_dom_client = require("react-dom/client");
+		let react_jsx_runtime = require("react/jsx-runtime");
+		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin-r2/src/tabs/files.module.css.mjs
+		const css$3 = "._5_T8oa_panel{height:100%;min-height:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:13px;display:flex}._5_T8oa_toolbar{border-bottom:1px solid var(--dsw-alias-border-l);flex:none;align-items:center;gap:6px;padding:6px 2px;display:flex}._5_T8oa_btn{cursor:pointer;background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);border:0;border-radius:5px;flex:none;padding:3px 8px;font-size:12px}._5_T8oa_btn:hover{background:var(--dsw-specific-sidebar-nav-item-active)}._5_T8oa_btn:disabled{opacity:.5;cursor:default}._5_T8oa_pathText{min-width:0;color:var(--dsw-alias-label-dimmed);flex:1;font-size:11px}._5_T8oa_hint{color:var(--dsw-alias-label-dimmed);align-items:center;gap:8px;padding:10px 4px;font-size:12px;display:flex}._5_T8oa_list{flex:1;min-height:0;padding:2px 0;overflow-y:auto}._5_T8oa_row{border-radius:5px;align-items:center;gap:6px;padding:4px 6px;font-size:12px;display:flex}._5_T8oa_rowClickable{cursor:pointer}._5_T8oa_rowClickable:hover{background:var(--dsw-specific-sidebar-nav-item-hover)}._5_T8oa_rowIcon{flex:none;font-size:12px}._5_T8oa_rowName{flex:1;min-width:0}";
+		const tagId$3 = "dsh-genoffice-sidebar-r2/files.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$3) + "]") === null) {
 			const tag = document.createElement("style");
 			tag.dataset.plugin = "dsh-genoffice-sidebar-r2";
@@ -21,217 +20,17 @@ window.__ModuleLoader__.load({
 			tag.textContent = css$3;
 			document.head.appendChild(tag);
 		}
-		var TabsRoot_module_css_default = {
-			"railActive": "wWuxkG_railActive",
-			"collapseBtn": "wWuxkG_collapseBtn",
-			"rootCollapsed": "wWuxkG_rootCollapsed",
-			"root": "wWuxkG_root",
-			"body": "wWuxkG_body",
-			"tabBar": "wWuxkG_tabBar",
-			"rail": "wWuxkG_rail",
-			"tabActive": "wWuxkG_tabActive",
-			"tab": "wWuxkG_tab",
-			"foot": "wWuxkG_foot",
-			"railBtn": "wWuxkG_railBtn",
-			"railSpacer": "wWuxkG_railSpacer",
-			"footRail": "wWuxkG_footRail"
-		};
-		//#endregion
-		//#region src/TabsRoot.tsx
-		const ICON_PROPS = {
-			width: 14,
-			height: 14,
-			viewBox: "0 0 16 16",
-			fill: "none",
-			stroke: "currentColor",
-			strokeWidth: 1.4,
-			strokeLinecap: "round",
-			strokeLinejoin: "round"
-		};
-		/** Workspace icon: layered panes. */
-		function WorkspaceIcon() {
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
-				...ICON_PROPS,
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
-					x: "2",
-					y: "3",
-					width: "12",
-					height: "9",
-					rx: "1.5"
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M4 6.5h8M4 9h5" })]
-			});
-		}
-		/** Terminal icon: prompt chevron. */
-		function TerminalIcon() {
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
-				...ICON_PROPS,
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
-					x: "2",
-					y: "2.5",
-					width: "12",
-					height: "11",
-					rx: "1.5"
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M5.5 6l2 2-2 2M9 10h2" })]
-			});
-		}
-		/** GenOffice icon: document. */
-		function GenOfficeIcon() {
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
-				...ICON_PROPS,
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M4 2h5l3 3v9H4z" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M9 2v3h3M6.5 8.5h3M6.5 11h3" })]
-			});
-		}
-		/** Files icon: folder. */
-		function FilesIcon() {
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
-				...ICON_PROPS,
-				children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M2 4.5h4l1.5 2H14v6.5H2z" })
-			});
-		}
-		/** All four tabs in display order. */
-		const TABS = [
-			{
-				id: "workspace",
-				label: "工作区",
-				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(WorkspaceIcon, {})
-			},
-			{
-				id: "terminal",
-				label: "终端",
-				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TerminalIcon, {}),
-				slot: "sidebar.tabs.terminal"
-			},
-			{
-				id: "genoffice",
-				label: "GenOffice",
-				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(GenOfficeIcon, {}),
-				slot: "sidebar.tabs.genoffice"
-			},
-			{
-				id: "files",
-				label: "文件",
-				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(FilesIcon, {}),
-				slot: "sidebar.tabs.files"
-			}
-		];
-		/**
-		* Render the unified sidebar column.
-		* @param props - composed slot props (contract.ts).
-		* @returns the sidebar element tree.
-		*/
-		function TabsRoot({ collapsed, useStore, actions, renderSlot, toggleSidebar, isTabRegistered }) {
-			const activeTab = useStore((s) => s.active);
-			const visible = TABS.filter((tab) => tab.slot === void 0 || isTabRegistered(tab.slot));
-			if (collapsed) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: TabsRoot_module_css_default.rootCollapsed,
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: TabsRoot_module_css_default.rail,
-						children: visible.map((tab) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: activeTab === tab.id ? TabsRoot_module_css_default.railActive : TabsRoot_module_css_default.railBtn,
-							"aria-label": tab.label,
-							title: tab.label,
-							onClick: () => {
-								actions.setActive(tab.id);
-								toggleSidebar();
-							},
-							children: tab.icon
-						}, tab.id))
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { className: TabsRoot_module_css_default.railSpacer }),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: TabsRoot_module_css_default.footRail,
-						children: renderSlot("sidebar.settings", { wide: false })
-					})
-				]
-			});
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: TabsRoot_module_css_default.root,
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: TabsRoot_module_css_default.tabBar,
-						role: "tablist",
-						"aria-label": "侧边栏面板",
-						children: [visible.map((tab) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
-							type: "button",
-							role: "tab",
-							"aria-selected": activeTab === tab.id,
-							className: activeTab === tab.id ? TabsRoot_module_css_default.tabActive : TabsRoot_module_css_default.tab,
-							onClick: () => {
-								actions.setActive(tab.id);
-							},
-							children: [tab.icon, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: tab.label })]
-						}, tab.id)), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: TabsRoot_module_css_default.collapseBtn,
-							"aria-label": "折叠侧边栏",
-							title: "折叠侧边栏",
-							onClick: () => {
-								toggleSidebar();
-							},
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPanelLeftOutline16, { size: 14 })
-						})]
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: TabsRoot_module_css_default.body,
-						children: activeTab === "workspace" ? renderSlot("sidebar.workspaces", {
-							wide: true,
-							expandSidebar: () => {
-								if (collapsed) toggleSidebar();
-							}
-						}) : activeTab === "terminal" ? renderSlot("sidebar.tabs.terminal", {}) : activeTab === "genoffice" ? renderSlot("sidebar.tabs.genoffice", {}) : renderSlot("sidebar.tabs.files", {})
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: TabsRoot_module_css_default.foot,
-						children: renderSlot("sidebar.settings", { wide: true })
-					})
-				]
-			});
-		}
-		//#endregion
-		//#region src/store.ts
-		/**
-		* Transient tabs store: the active sidebar tab, kept across collapse/expand
-		* within the session (BR-003). Like the official layout store, state is
-		* in-memory only — a refresh returns to the default tab. Module level
-		* exports the factory only (a module-level handle would pin identity in the
-		* module cache across plugin reloads).
-		*/
-		/**
-		* Create the tabs store handle: active tab defaults to the workspace tab.
-		* @returns the store handle (spec + type + identity + factory in one).
-		*/
-		function createTabsStore() {
-			return (0, _deepseek_ai_dsh_client_runtime_client.defineStore)({
-				init: () => ({ active: "workspace" }),
-				actions: { setActive: (draft, id) => {
-					draft.active = id;
-				} }
-			});
-		}
-		//#endregion
-		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin/src/tabs/files.module.css.mjs
-		const css$2 = ".tFeIyG_panel{height:100%;min-height:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:13px;display:flex}.tFeIyG_toolbar{border-bottom:1px solid var(--dsw-alias-border-l);flex:none;align-items:center;gap:6px;padding:6px 2px;display:flex}.tFeIyG_btn{cursor:pointer;background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);border:0;border-radius:5px;flex:none;padding:3px 8px;font-size:12px}.tFeIyG_btn:hover{background:var(--dsw-specific-sidebar-nav-item-active)}.tFeIyG_btn:disabled{opacity:.5;cursor:default}.tFeIyG_pathText{min-width:0;color:var(--dsw-alias-label-dimmed);flex:1;font-size:11px}.tFeIyG_hint{color:var(--dsw-alias-label-dimmed);align-items:center;gap:8px;padding:10px 4px;font-size:12px;display:flex}.tFeIyG_list{flex:1;min-height:0;padding:2px 0;overflow-y:auto}.tFeIyG_row{border-radius:5px;align-items:center;gap:6px;padding:4px 6px;font-size:12px;display:flex}.tFeIyG_rowClickable{cursor:pointer}.tFeIyG_rowClickable:hover{background:var(--dsw-specific-sidebar-nav-item-hover)}.tFeIyG_rowIcon{flex:none;font-size:12px}.tFeIyG_rowName{flex:1;min-width:0}";
-		const tagId$2 = "dsh-genoffice-sidebar-r2/files.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$2) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "dsh-genoffice-sidebar-r2";
-			tag.dataset.pluginCss = tagId$2;
-			tag.textContent = css$2;
-			document.head.appendChild(tag);
-		}
 		var files_module_css_default = {
-			"hint": "tFeIyG_hint",
-			"rowName": "tFeIyG_rowName",
-			"toolbar": "tFeIyG_toolbar",
-			"panel": "tFeIyG_panel",
-			"row": "tFeIyG_row",
-			"list": "tFeIyG_list",
-			"rowClickable": "tFeIyG_rowClickable",
-			"rowIcon": "tFeIyG_rowIcon",
-			"btn": "tFeIyG_btn",
-			"pathText": "tFeIyG_pathText"
+			"hint": "_5_T8oa_hint",
+			"rowClickable": "_5_T8oa_rowClickable",
+			"pathText": "_5_T8oa_pathText",
+			"list": "_5_T8oa_list",
+			"row": "_5_T8oa_row",
+			"panel": "_5_T8oa_panel",
+			"btn": "_5_T8oa_btn",
+			"rowName": "_5_T8oa_rowName",
+			"rowIcon": "_5_T8oa_rowIcon",
+			"toolbar": "_5_T8oa_toolbar"
 		};
 		//#endregion
 		//#region src/tabs/files.tsx
@@ -360,31 +159,31 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin/src/tabs/genoffice.module.css.mjs
-		const css$1 = ".i8ZSUW_panel{height:100%;min-height:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:13px;display:flex}.i8ZSUW_toolbar{border-bottom:1px solid var(--dsw-alias-border-l);flex:none;align-items:center;gap:6px;padding:6px 2px;display:flex}.i8ZSUW_btn{cursor:pointer;background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);border:0;border-radius:5px;flex:none;padding:3px 8px;font-size:12px}.i8ZSUW_btn:hover{background:var(--dsw-specific-sidebar-nav-item-active)}.i8ZSUW_btn:disabled{opacity:.5;cursor:default}.i8ZSUW_pathText{min-width:0;color:var(--dsw-alias-label-dimmed);flex:1;font-size:11px}.i8ZSUW_fileName{flex:1;min-width:0;font-size:12px;font-weight:600}.i8ZSUW_hint{color:var(--dsw-alias-label-dimmed);align-items:center;gap:8px;padding:10px 4px;font-size:12px;display:flex}.i8ZSUW_list{flex:1;min-height:0;padding:2px 0;overflow-y:auto}.i8ZSUW_row{cursor:default;border-radius:5px;align-items:center;gap:6px;padding:4px 6px;font-size:12px;display:flex}.i8ZSUW_rowClickable{cursor:pointer}.i8ZSUW_rowClickable:hover{background:var(--dsw-specific-sidebar-nav-item-hover)}.i8ZSUW_rowDisabled{opacity:.55}.i8ZSUW_rowIcon{flex:none;font-size:12px}.i8ZSUW_rowName{flex:1;min-width:0}.i8ZSUW_rowTag{color:var(--dsw-alias-label-dimmed);border:1px solid var(--dsw-alias-border-l);border-radius:4px;flex:none;padding:0 4px;font-size:10px}.i8ZSUW_iframe{background:#fff;border:0;flex:1;width:100%;min-height:0}";
-		const tagId$1 = "dsh-genoffice-sidebar-r2/genoffice.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
+		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin-r2/src/tabs/genoffice.module.css.mjs
+		const css$2 = ".F5M9ea_panel{height:100%;min-height:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:13px;display:flex}.F5M9ea_toolbar{border-bottom:1px solid var(--dsw-alias-border-l);flex:none;align-items:center;gap:6px;padding:6px 2px;display:flex}.F5M9ea_btn{cursor:pointer;background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);border:0;border-radius:5px;flex:none;padding:3px 8px;font-size:12px}.F5M9ea_btn:hover{background:var(--dsw-specific-sidebar-nav-item-active)}.F5M9ea_btn:disabled{opacity:.5;cursor:default}.F5M9ea_pathText{min-width:0;color:var(--dsw-alias-label-dimmed);flex:1;font-size:11px}.F5M9ea_fileName{flex:1;min-width:0;font-size:12px;font-weight:600}.F5M9ea_hint{color:var(--dsw-alias-label-dimmed);align-items:center;gap:8px;padding:10px 4px;font-size:12px;display:flex}.F5M9ea_list{flex:1;min-height:0;padding:2px 0;overflow-y:auto}.F5M9ea_row{cursor:default;border-radius:5px;align-items:center;gap:6px;padding:4px 6px;font-size:12px;display:flex}.F5M9ea_rowClickable{cursor:pointer}.F5M9ea_rowClickable:hover{background:var(--dsw-specific-sidebar-nav-item-hover)}.F5M9ea_rowDisabled{opacity:.55}.F5M9ea_rowIcon{flex:none;font-size:12px}.F5M9ea_rowName{flex:1;min-width:0}.F5M9ea_rowTag{color:var(--dsw-alias-label-dimmed);border:1px solid var(--dsw-alias-border-l);border-radius:4px;flex:none;padding:0 4px;font-size:10px}.F5M9ea_iframe{background:#fff;border:0;flex:1;width:100%;min-height:0}";
+		const tagId$2 = "dsh-genoffice-sidebar-r2/genoffice.module.css";
+		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$2) + "]") === null) {
 			const tag = document.createElement("style");
 			tag.dataset.plugin = "dsh-genoffice-sidebar-r2";
-			tag.dataset.pluginCss = tagId$1;
-			tag.textContent = css$1;
+			tag.dataset.pluginCss = tagId$2;
+			tag.textContent = css$2;
 			document.head.appendChild(tag);
 		}
 		var genoffice_module_css_default = {
-			"fileName": "i8ZSUW_fileName",
-			"rowName": "i8ZSUW_rowName",
-			"toolbar": "i8ZSUW_toolbar",
-			"rowTag": "i8ZSUW_rowTag",
-			"rowIcon": "i8ZSUW_rowIcon",
-			"panel": "i8ZSUW_panel",
-			"list": "i8ZSUW_list",
-			"pathText": "i8ZSUW_pathText",
-			"rowClickable": "i8ZSUW_rowClickable",
-			"row": "i8ZSUW_row",
-			"rowDisabled": "i8ZSUW_rowDisabled",
-			"hint": "i8ZSUW_hint",
-			"btn": "i8ZSUW_btn",
-			"iframe": "i8ZSUW_iframe"
+			"row": "F5M9ea_row",
+			"toolbar": "F5M9ea_toolbar",
+			"rowName": "F5M9ea_rowName",
+			"hint": "F5M9ea_hint",
+			"fileName": "F5M9ea_fileName",
+			"rowClickable": "F5M9ea_rowClickable",
+			"btn": "F5M9ea_btn",
+			"rowDisabled": "F5M9ea_rowDisabled",
+			"rowTag": "F5M9ea_rowTag",
+			"pathText": "F5M9ea_pathText",
+			"iframe": "F5M9ea_iframe",
+			"list": "F5M9ea_list",
+			"panel": "F5M9ea_panel",
+			"rowIcon": "F5M9ea_rowIcon"
 		};
 		//#endregion
 		//#region src/tabs/genoffice.tsx
@@ -7767,26 +7566,26 @@ window.__ModuleLoader__.load({
 			})()));
 		}));
 		//#endregion
-		//#region \0raw:/Users/nothing/workspace/dsh/genoffice/dsh-plugin/node_modules/xterm/css/xterm.css.txt
+		//#region \0raw:/Users/nothing/workspace/dsh/genoffice/dsh-plugin-r2/node_modules/xterm/css/xterm.css.txt
 		var import_xterm = require_xterm();
 		var import_xterm_addon_fit = require_xterm_addon_fit();
 		var xterm_css_default = "/**\n * Copyright (c) 2014 The xterm.js authors. All rights reserved.\n * Copyright (c) 2012-2013, Christopher Jeffrey (MIT License)\n * https://github.com/chjj/term.js\n * @license MIT\n *\n * Permission is hereby granted, free of charge, to any person obtaining a copy\n * of this software and associated documentation files (the \"Software\"), to deal\n * in the Software without restriction, including without limitation the rights\n * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n * copies of the Software, and to permit persons to whom the Software is\n * furnished to do so, subject to the following conditions:\n *\n * The above copyright notice and this permission notice shall be included in\n * all copies or substantial portions of the Software.\n *\n * THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\n * THE SOFTWARE.\n *\n * Originally forked from (with the author's permission):\n *   Fabrice Bellard's javascript vt100 for jslinux:\n *   http://bellard.org/jslinux/\n *   Copyright (c) 2011 Fabrice Bellard\n *   The original design remains. The terminal itself\n *   has been extended to include xterm CSI codes, among\n *   other features.\n */\n\n/**\n *  Default styles for xterm.js\n */\n\n.xterm {\n    cursor: text;\n    position: relative;\n    user-select: none;\n    -ms-user-select: none;\n    -webkit-user-select: none;\n}\n\n.xterm.focus,\n.xterm:focus {\n    outline: none;\n}\n\n.xterm .xterm-helpers {\n    position: absolute;\n    top: 0;\n    /**\n     * The z-index of the helpers must be higher than the canvases in order for\n     * IMEs to appear on top.\n     */\n    z-index: 5;\n}\n\n.xterm .xterm-helper-textarea {\n    padding: 0;\n    border: 0;\n    margin: 0;\n    /* Move textarea out of the screen to the far left, so that the cursor is not visible */\n    position: absolute;\n    opacity: 0;\n    left: -9999em;\n    top: 0;\n    width: 0;\n    height: 0;\n    z-index: -5;\n    /** Prevent wrapping so the IME appears against the textarea at the correct position */\n    white-space: nowrap;\n    overflow: hidden;\n    resize: none;\n}\n\n.xterm .composition-view {\n    /* TODO: Composition position got messed up somewhere */\n    background: #000;\n    color: #FFF;\n    display: none;\n    position: absolute;\n    white-space: nowrap;\n    z-index: 1;\n}\n\n.xterm .composition-view.active {\n    display: block;\n}\n\n.xterm .xterm-viewport {\n    /* On OS X this is required in order for the scroll bar to appear fully opaque */\n    background-color: #000;\n    overflow-y: scroll;\n    cursor: default;\n    position: absolute;\n    right: 0;\n    left: 0;\n    top: 0;\n    bottom: 0;\n}\n\n.xterm .xterm-screen {\n    position: relative;\n}\n\n.xterm .xterm-screen canvas {\n    position: absolute;\n    left: 0;\n    top: 0;\n}\n\n.xterm .xterm-scroll-area {\n    visibility: hidden;\n}\n\n.xterm-char-measure-element {\n    display: inline-block;\n    visibility: hidden;\n    position: absolute;\n    top: 0;\n    left: -9999em;\n    line-height: normal;\n}\n\n.xterm.enable-mouse-events {\n    /* When mouse events are enabled (eg. tmux), revert to the standard pointer cursor */\n    cursor: default;\n}\n\n.xterm.xterm-cursor-pointer,\n.xterm .xterm-cursor-pointer {\n    cursor: pointer;\n}\n\n.xterm.column-select.focus {\n    /* Column selection mode */\n    cursor: crosshair;\n}\n\n.xterm .xterm-accessibility,\n.xterm .xterm-message {\n    position: absolute;\n    left: 0;\n    top: 0;\n    bottom: 0;\n    right: 0;\n    z-index: 10;\n    color: transparent;\n    pointer-events: none;\n}\n\n.xterm .live-region {\n    position: absolute;\n    left: -9999px;\n    width: 1px;\n    height: 1px;\n    overflow: hidden;\n}\n\n.xterm-dim {\n    /* Dim should not apply to background, so the opacity of the foreground color is applied\n     * explicitly in the generated class and reset to 1 here */\n    opacity: 1 !important;\n}\n\n.xterm-underline-1 { text-decoration: underline; }\n.xterm-underline-2 { text-decoration: double underline; }\n.xterm-underline-3 { text-decoration: wavy underline; }\n.xterm-underline-4 { text-decoration: dotted underline; }\n.xterm-underline-5 { text-decoration: dashed underline; }\n\n.xterm-overline {\n    text-decoration: overline;\n}\n\n.xterm-overline.xterm-underline-1 { text-decoration: overline underline; }\n.xterm-overline.xterm-underline-2 { text-decoration: overline double underline; }\n.xterm-overline.xterm-underline-3 { text-decoration: overline wavy underline; }\n.xterm-overline.xterm-underline-4 { text-decoration: overline dotted underline; }\n.xterm-overline.xterm-underline-5 { text-decoration: overline dashed underline; }\n\n.xterm-strikethrough {\n    text-decoration: line-through;\n}\n\n.xterm-screen .xterm-decoration-container .xterm-decoration {\n	z-index: 6;\n	position: absolute;\n}\n\n.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer {\n	z-index: 7;\n}\n\n.xterm-decoration-overview-ruler {\n    z-index: 8;\n    position: absolute;\n    top: 0;\n    right: 0;\n    pointer-events: none;\n}\n\n.xterm-decoration-top {\n    z-index: 2;\n    position: relative;\n}\n";
 		//#endregion
-		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin/src/tabs/terminal.module.css.mjs
-		const css = ".dOerca_panel{height:100%;min-height:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:13px;display:flex}.dOerca_hint{color:var(--dsw-alias-label-dimmed);flex:none;align-items:center;gap:8px;padding:10px 4px;font-size:12px;display:flex}.dOerca_btn{cursor:pointer;background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);border:0;border-radius:5px;flex:none;padding:3px 8px;font-size:12px}.dOerca_btn:hover{background:var(--dsw-specific-sidebar-nav-item-active)}.dOerca_term{flex:1;min-height:0;padding:4px 6px;overflow:hidden}.dOerca_term .xterm{height:100%}";
-		const tagId = "dsh-genoffice-sidebar-r2/terminal.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
+		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin-r2/src/tabs/terminal.module.css.mjs
+		const css$1 = ".oXQXRW_panel{height:100%;min-height:0;color:var(--dsw-alias-label-primary);flex-direction:column;font-size:13px;display:flex}.oXQXRW_hint{color:var(--dsw-alias-label-dimmed);flex:none;align-items:center;gap:8px;padding:10px 4px;font-size:12px;display:flex}.oXQXRW_btn{cursor:pointer;background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);border:0;border-radius:5px;flex:none;padding:3px 8px;font-size:12px}.oXQXRW_btn:hover{background:var(--dsw-specific-sidebar-nav-item-active)}.oXQXRW_term{flex:1;min-height:0;padding:4px 6px;overflow:hidden}.oXQXRW_term .xterm{height:100%}";
+		const tagId$1 = "dsh-genoffice-sidebar-r2/terminal.module.css";
+		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
 			const tag = document.createElement("style");
 			tag.dataset.plugin = "dsh-genoffice-sidebar-r2";
-			tag.dataset.pluginCss = tagId;
-			tag.textContent = css;
+			tag.dataset.pluginCss = tagId$1;
+			tag.textContent = css$1;
 			document.head.appendChild(tag);
 		}
 		var terminal_module_css_default = {
-			"term": "dOerca_term",
-			"hint": "dOerca_hint",
-			"panel": "dOerca_panel",
-			"btn": "dOerca_btn"
+			"panel": "oXQXRW_panel",
+			"btn": "oXQXRW_btn",
+			"term": "oXQXRW_term",
+			"hint": "oXQXRW_hint"
 		};
 		//#endregion
 		//#region src/tabs/terminal.tsx
@@ -7969,64 +7768,196 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region src/client/index.ts
-		/** Services required by the tabs container and its panels. */
-		const inject = [
-			"slots",
-			"layout",
-			"workspaces"
+		//#region \0dsh-css:/Users/nothing/workspace/dsh/genoffice/dsh-plugin-r2/src/TabsDock.module.css.mjs
+		const css = ".sGgzYW_mount{z-index:1000;background:var(--dsw-specific-sidebar-fill);border-left:1px solid var(--dsw-alias-border-l);width:400px;color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family);flex-direction:column;font-size:14px;display:flex;position:fixed;top:0;bottom:0;right:0;box-shadow:-8px 0 24px #0000001f}.sGgzYW_dockCollapsed{z-index:1000;background:var(--dsw-specific-sidebar-fill);border-left:1px solid var(--dsw-alias-border-l);flex-direction:column;align-items:center;gap:4px;width:44px;padding-top:10px;display:flex;position:fixed;top:0;bottom:0;right:0}.sGgzYW_railBtn{width:32px;height:32px;color:var(--dsw-alias-label-dimmed);cursor:pointer;background:0 0;border:0;border-radius:6px;justify-content:center;align-items:center;display:inline-flex}.sGgzYW_railBtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary)}.sGgzYW_tabBar{border-bottom:1px solid var(--dsw-alias-border-l);flex:none;align-items:center;gap:2px;padding:8px 8px 8px 10px;display:flex}.sGgzYW_collapseBtn{width:26px;height:26px;color:var(--dsw-alias-label-dimmed);cursor:pointer;background:0 0;border:0;border-radius:6px;justify-content:center;align-items:center;margin-left:auto;display:inline-flex}.sGgzYW_collapseBtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary)}.sGgzYW_tab,.sGgzYW_tabActive{color:var(--dsw-alias-label-dimmed);font:inherit;cursor:pointer;white-space:nowrap;background:0 0;border:0;border-radius:6px;align-items:center;gap:5px;padding:5px 9px;font-size:13px;display:inline-flex}.sGgzYW_tab:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary)}.sGgzYW_tabActive{background:var(--dsw-specific-sidebar-nav-item-active);color:var(--dsw-alias-label-primary)}.sGgzYW_body{flex-direction:column;flex:1;min-height:0;display:flex;overflow:hidden}";
+		const tagId = "dsh-genoffice-sidebar-r2/TabsDock.module.css";
+		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
+			const tag = document.createElement("style");
+			tag.dataset.plugin = "dsh-genoffice-sidebar-r2";
+			tag.dataset.pluginCss = tagId;
+			tag.textContent = css;
+			document.head.appendChild(tag);
+		}
+		var TabsDock_module_css_default = {
+			"collapseBtn": "sGgzYW_collapseBtn",
+			"railBtn": "sGgzYW_railBtn",
+			"body": "sGgzYW_body",
+			"mount": "sGgzYW_mount",
+			"dockCollapsed": "sGgzYW_dockCollapsed",
+			"tab": "sGgzYW_tab",
+			"tabBar": "sGgzYW_tabBar",
+			"tabActive": "sGgzYW_tabActive"
+		};
+		//#endregion
+		//#region src/TabsDock.tsx
+		/**
+		* TabsDock — the right-hand floating dock (终端 | GenOffice | 文件).
+		*
+		* Mounted by the client plugin directly (React createRoot over a fixed
+		* container), because the layout-owned `details` column is already claimed
+		* by the official conversation-details panel and single slots cannot be
+		* shared. The dock floats over the conversation column's right edge, with a
+		* collapse toggle; the active tab survives collapse within the session via
+		* a transient store (BR-003, same policy as the official layout store).
+		*/
+		const ICON_PROPS = {
+			width: 14,
+			height: 14,
+			viewBox: "0 0 16 16",
+			fill: "none",
+			stroke: "currentColor",
+			strokeWidth: 1.4,
+			strokeLinecap: "round",
+			strokeLinejoin: "round"
+		};
+		/** Terminal icon: prompt chevron. */
+		function TerminalIcon() {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
+				...ICON_PROPS,
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
+					x: "2",
+					y: "2.5",
+					width: "12",
+					height: "11",
+					rx: "1.5"
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M5.5 6l2 2-2 2M9 10h2" })]
+			});
+		}
+		/** GenOffice icon: document. */
+		function GenOfficeIcon() {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
+				...ICON_PROPS,
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M4 2h5l3 3v9H4z" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M9 2v3h3M6.5 8.5h3M6.5 11h3" })]
+			});
+		}
+		/** Files icon: folder. */
+		function FilesIcon() {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
+				...ICON_PROPS,
+				children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M2 4.5h4l1.5 2H14v6.5H2z" })
+			});
+		}
+		/** All three tabs in display order. */
+		const TABS = [
+			{
+				id: "terminal",
+				label: "终端",
+				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TerminalIcon, {})
+			},
+			{
+				id: "genoffice",
+				label: "GenOffice",
+				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(GenOfficeIcon, {})
+			},
+			{
+				id: "files",
+				label: "文件",
+				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(FilesIcon, {})
+			}
 		];
 		/**
-		* Register the tabs container and the three ecosystem tab panels.
+		* Render the right-hand floating dock.
+		* @param props - the injected directory-listing service.
+		* @returns the dock element tree.
+		*/
+		function TabsDock({ listDirectory }) {
+			const [state, setState] = (0, react.useState)({
+				active: "terminal",
+				collapsed: false
+			});
+			const stateRef = (0, react.useRef)(state);
+			stateRef.current = state;
+			if (state.collapsed) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				className: TabsDock_module_css_default.dockCollapsed,
+				children: TABS.map((tab) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+					type: "button",
+					className: TabsDock_module_css_default.railBtn,
+					"aria-label": tab.label,
+					title: tab.label,
+					onClick: () => setState({
+						...stateRef.current,
+						active: tab.id,
+						collapsed: false
+					}),
+					children: tab.icon
+				}, tab.id))
+			});
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: TabsDock_module_css_default.dock,
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: TabsDock_module_css_default.tabBar,
+					role: "tablist",
+					"aria-label": "右侧面板",
+					children: [TABS.map((tab) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+						type: "button",
+						role: "tab",
+						"aria-selected": state.active === tab.id,
+						className: state.active === tab.id ? TabsDock_module_css_default.tabActive : TabsDock_module_css_default.tab,
+						onClick: () => setState((s) => ({
+							...s,
+							active: tab.id
+						})),
+						children: [tab.icon, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: tab.label })]
+					}, tab.id)), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						className: TabsDock_module_css_default.collapseBtn,
+						"aria-label": "折叠右侧面板",
+						title: "折叠右侧面板",
+						onClick: () => setState((s) => ({
+							...s,
+							collapsed: true
+						})),
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
+							...ICON_PROPS,
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M9 4l4 4-4 4M5 4l4 4-4 4" })
+						})
+					})]
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: TabsDock_module_css_default.body,
+					children: state.active === "terminal" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TerminalPanel, {}) : state.active === "genoffice" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(GenOfficePanel, {}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(FilesPanel, { listDirectory })
+				})]
+			});
+		}
+		/** Convenience: create the mount element for the client plugin. */
+		function createDockElement() {
+			const el = document.createElement("div");
+			el.className = TabsDock_module_css_default.mount ?? "";
+			return el;
+		}
+		/**
+		* Mount the dock into a host element (called by the client plugin).
+		* Returns a disposer that unmounts and removes the host.
+		*/
+		function mountDock(host, listDirectory) {
+			const root = (0, react_dom_client.createRoot)(host);
+			root.render(/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TabsDock, { listDirectory }));
+			return () => {
+				root.unmount();
+			};
+		}
+		//#endregion
+		//#region src/client/index.ts
+		/** Services required by the dock. */
+		const inject = ["workspaces"];
+		/**
+		* Mount the right-hand dock for the plugin's lifetime.
 		* @param ctx - client root context.
 		*/
 		function apply(ctx) {
-			if (ctx.slots.entries("sidebar").length > 0) {
-				ctx.logger.warn("[genoffice-sidebar] sidebar slot already registered — duplicate instance stays inert");
-				return;
-			}
-			const injectProps = () => ({
-				toggleSidebar: () => {
-					ctx.layout.toggleSidebar();
-				},
-				isTabRegistered: (slot) => ctx.slots.entries(slot).length > 0
-			});
-			ctx.effect(() => ctx.slots.register({
-				name: "sidebar",
-				children: {
-					"sidebar.workspaces": {
-						kind: "single",
-						scope: "root"
-					},
-					"sidebar.settings": {
-						kind: "single",
-						scope: "root"
-					},
-					"sidebar.tabs.terminal": {
-						kind: "single",
-						scope: "root"
-					},
-					"sidebar.tabs.genoffice": {
-						kind: "single",
-						scope: "root"
-					},
-					"sidebar.tabs.files": {
-						kind: "single",
-						scope: "root"
-					}
-				},
-				store: createTabsStore,
-				inject: injectProps
-			}, TabsRoot), "genoffice-sidebar: tabs root registration");
-			ctx.effect(() => ctx.slots.inject("sidebar.tabs.terminal", () => ctx.slots.register({ name: "sidebar.tabs.terminal" }, TerminalPanel)), "genoffice-sidebar: terminal tab");
-			ctx.effect(() => ctx.slots.inject("sidebar.tabs.genoffice", () => ctx.slots.register({ name: "sidebar.tabs.genoffice" }, GenOfficePanel)), "genoffice-sidebar: genoffice tab");
-			ctx.effect(() => ctx.slots.inject("sidebar.tabs.files", () => {
-				const injected = () => ({ listDirectory: (path) => ctx.workspaces.listDirectory(path) });
-				return ctx.slots.register({
-					name: "sidebar.tabs.files",
-					inject: injected
-				}, FilesPanel);
-			}), "genoffice-sidebar: files tab");
+			ctx.effect(() => {
+				const host = createDockElement();
+				document.body.appendChild(host);
+				let dispose;
+				try {
+					dispose = mountDock(host, (path) => ctx.workspaces.listDirectory(path));
+				} catch (err) {
+					ctx.logger?.warn?.("[genoffice-sidebar] dock mount failed:", String(err));
+				}
+				return () => {
+					dispose?.();
+					host.remove();
+				};
+			}, "genoffice-sidebar: right dock mount");
 		}
 		//#endregion
 		exports.apply = apply;

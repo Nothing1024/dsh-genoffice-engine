@@ -62,7 +62,7 @@
 > **执行期验证记录（2026-08-10，execution agent 回写）**：
 > - ASM-001 ✅ 已验证：`dsh-genoffice-sidebar-r2` 经 `file:` 依赖链入 `~/.dsh/profiles/web/node_modules`，patch 行加载成功（干净启动 :3180 实测，review-report L3）
 > - ASM-002 ✅ 已验证：DSH web 无 frame-src 限制，iframe 嵌入 relay 页面实测可用（Task 1 iframe.png + UF-002 预览截图）
-> - ASM-003 ✅ 已验证：官方 SidebarRoot 组件未导出，TabsRoot 自绘 rail/选项卡栏（UF-001 截图）
+> - ASM-003 ✅ 已验证：官方 SidebarRoot 组件未导出；布局修订（2026-08-11）后 Dock 以 fixed 浮层自绘，不再需要 rail（UF-001 截图）
 > - ASM-004 ✅ 已验证：`path:` 预览为字节副本，sha256 前后一致、Ctrl+S 触发下载（evidence/UF-002/hash-before-after.txt）
 > - ASM-005 ✅ 已验证：host 插件 `genoffice-sidebar-host`（dsh-plugin-runtime）直接 node-pty + `/api/pty.ws`，GOT-ECHO 与 ps 无残留实测（evidence/UF-005/）
 
@@ -74,7 +74,7 @@
 
 | 规则 ID | 规则 | 正例 | 反例 | 影响范围 | 验证方式 |
 |---|---|---|---|---|---|
-| BR-001 | 侧边栏选项卡容器是 `sidebar` 槽位的唯一注册者（通过 patch disable 官方 `ui-sidebar` 行 + insert 本插件）；官方工作区/设置面板以子槽位形式在容器内继续渲染 | 加载插件后侧边栏出现选项卡栏且"工作区"tab 内能看到官方会话列表 | patch 未 disable 官方行 → 双注册冲突（single 槽位报错）或官方面板消失 | DSH profile 加载层 | browser 实测 + console 无错 |
+| BR-001 | 布局：官方 `ui-sidebar` 保留在**左侧**（工作区列表/设置原样）；本插件在**右侧**挂载浮动 Dock（终端/GenOffice/文件）。右侧不占用任何官方槽位（`details` 列已被官方会话详情占用，Dock 以 fixed 浮层实现），官方包零修改 | 左侧可见官方工作区列表，右侧可见 Dock 三个选项卡，互不干扰 | Dock 挂载进官方槽位导致 single 冲突，或左侧官方面板消失 | DSH profile 加载层 | browser 实测 + console 无错 |
 | BR-002 | 每个 tab 面板是可插拔子槽位 `sidebar.tabs.<name>`（kind single, scope root）；任何插件可用 `ctx.slots.inject('sidebar.tabs', ...)` 注册新 tab | 未来插件注册 `sidebar.tabs.music` 后选项卡栏出现新 tab | 面板代码写死进容器组件，无法扩展 | 容器组件 | 代码审查 + 冒烟注册测试 tab |
 | BR-003 | 选项卡栏至少包含：工作区、终端、GenOffice、文件；激活 tab 在会话内保持（侧边栏折叠/展开后恢复原 tab） | 切到 GenOffice → 折叠 → 展开 → 仍显示 GenOffice | 折叠后回到默认 tab | 容器组件 | browser 实测 |
 | BR-004 | GenOffice 面板文件列表数据源为 relay `GET /api/dir?path=`；默认列用户主目录；目录切换、上级导航、文件类型过滤可用 | `curl /api/dir?path=/tmp` 返回 entries | 返回非 JSON 或 500 | genoffice relay | curl 实测 |
@@ -90,7 +90,7 @@
 
 | 场景 ID | Given | When | Then | 角色 | 验证方式 | Evidence |
 |---|---|---|---|---|---|---|
-| UF-001 | 侧边栏可见，选项卡栏渲染 | 用户依次点击「工作区/终端/GenOffice/文件」 | 面板切换、激活态高亮、内容正确 | 用户 | browser | EVD-001 |
+| UF-001 | 右侧 Dock 可见，选项卡栏渲染 | 用户依次点击「终端/GenOffice/文件」 | 面板切换、激活态高亮、内容正确 | 用户 | browser | EVD-001 |
 | UF-002 | GenOffice tab 激活，文件列表已加载 | 用户点击一个 `.docx`/`.md` 文件 | 侧边栏内嵌 iframe 渲染文档内容（只读） | 用户 | browser | EVD-002 |
 | UF-003 | GenOffice 预览已打开 | 用户点击「在浏览器中打开」 | 新标签打开完整编辑器，原面板不受影响 | 用户 | browser | EVD-003 |
 | UF-004 | 文件 tab 激活 | 用户浏览目录（进入/上级/主目录）并查看文件列表 | 目录切换即时刷新；当前路径可见 | 用户 | browser | EVD-004 |
@@ -99,17 +99,17 @@
 
 ### 2.3 核心业务流程（步骤级交互脚本）
 
-#### UF-001: 侧边栏选项卡切换
+#### UF-001: 右侧 Dock 选项卡切换
 
-**前置状态**：DSH Web GUI 已加载（127.0.0.1:3080），侧边栏展开，选项卡栏含「工作区/终端/GenOffice/文件」
+**前置状态**：DSH Web GUI 已加载（127.0.0.1:3080），左侧为官方侧边栏（工作区列表），右侧 Dock 展开，选项卡栏含「终端/GenOffice/文件」
 
 **成功主路径**：
 
 | 步骤 | 用户动作 | 界面即时反馈 | 系统行为 | 用户看到的结果 |
 |---|---|---|---|---|
-| 1 | 点击「GenOffice」tab | tab 高亮、面板区切换 loading（≤300ms） | 容器切换渲染 `sidebar.tabs.genoffice` 子槽位；GenOffice 面板挂载并请求文件列表 | 面板显示文件列表（加载态→列表） |
-| 2 | 点击「文件」tab | tab 高亮切换 | 卸载 GenOffice 面板（或保持挂载按需），挂载文件面板，调用 `host.listDirectory` | 文件管理面板显示目录内容 |
-| 3 | 依次切换全部 tab | 每步即时切换 | 各子槽位按需挂载/卸载 | 工作区/终端/文件/GenOffice 均可达 |
+| 1 | 点击「GenOffice」tab | tab 高亮、面板区切换 loading（≤300ms） | Dock 切换渲染 GenOffice 面板并请求文件列表 | 面板显示文件列表（加载态→列表） |
+| 2 | 点击「文件」tab | tab 高亮切换 | Dock 切换渲染文件面板，调用 `host.listDirectory` | 文件管理面板显示目录内容 |
+| 3 | 依次切换全部 tab | 每步即时切换 | 各面板按需挂载/卸载 | 终端/文件/GenOffice 均可达；左侧官方工作区不受影响 |
 
 **失败分支**：
 
@@ -122,16 +122,16 @@
 **界面状态机**：
 
 ```text
-[rail] ←折叠→ [展开 + 激活 tab T]
-                 │ 点击 tab T' 
-                 ▼
-            [展开 + 激活 tab T']（原 T 状态保留）
+[rail（44px 图标列）] ←折叠→ [Dock 展开 + 激活 tab T]
+                             │ 点击 tab T' 
+                             ▼
+                        [Dock 展开 + 激活 tab T']（原 T 状态保留）
 ```
 
 **入口接线清单**（本流程从哪些真实入口可达；实现任务必须包含接线）：
 
-- 侧边栏选项卡栏（容器组件渲染）→ 每个 tab 按钮 onClick → 切换激活状态 + 渲染对应子槽位
-- 侧边栏折叠/展开（官方 DragHandle/rail 机制保留）→ 容器读取 layout 状态恢复激活 tab
+- 右侧 Dock 选项卡栏 → 每个 tab 按钮 onClick → 切换激活状态 + 渲染对应面板
+- Dock 折叠按钮 → rail 图标列；点击 rail 图标 → 展开并激活对应 tab
 
 #### UF-002: GenOffice 面板文件列表与预览
 
@@ -235,22 +235,22 @@ idle → loading(list) → list
 
 **入口接线清单**：终端 tab 面板挂载时建 ws 会话；卸载时关闭；xterm onData → ws send。
 
-#### UF-006: 折叠恢复
+#### UF-006: Dock 折叠恢复
 
-**前置状态**：侧边栏展开，激活 GenOffice tab
+**前置状态**：右侧 Dock 展开，激活 GenOffice tab
 
 **成功主路径**：
 
 | 步骤 | 用户动作 | 界面即时反馈 | 系统行为 | 用户看到的结果 |
 |---|---|---|---|---|
-| 1 | 折叠侧边栏（rail 态） | rail 图标保留 | 容器记录激活 tab 到内存 store | rail 显示 tab 图标（或容器图标） |
-| 2 | 展开侧边栏 | 面板恢复 | 容器按 store 恢复激活 tab | GenOffice 面板原样恢复 |
+| 1 | 点击折叠按钮（rail 态） | Dock 收成 44px 图标列 | Dock 记录激活 tab 到内存 store | rail 显示三个 tab 图标 |
+| 2 | 点击 rail 图标 | Dock 展开 | 按 store 恢复激活 tab | GenOffice 面板原样恢复 |
 
 **失败分支**：折叠期间切换会话（DSH 会话级状态）→ 面板按新会话重新挂载（ASM-003 注明）。
 
 **界面状态机**：`expanded(T) ⇄ collapsed`（T 持久于内存 store）
 
-**入口接线清单**：容器组件订阅 layout 折叠状态；rail 渲染 tab 图标按钮。
+**入口接线清单**：Dock 折叠按钮与 rail 图标按钮 onClick（组件内状态切换）。
 
 ### 2.4 INV 不变量
 
@@ -321,14 +321,14 @@ genoffice relay (:8787) ── 无 CORS、无列目录
 
 After:
 DSH Web GUI (:3080)
-└── sidebar slot ── dsh-genoffice-sidebar (TabsRoot)   ← 本插件替换注册者
-    ├── 选项卡栏: [工作区|终端|GenOffice|文件]
-    ├── sidebar.workspaces（官方保留，工作区 tab 内）
-    ├── sidebar.settings（官方保留）
-    └── sidebar.tabs.<name>（可插拔子槽位）
-        ├── sidebar.tabs.terminal ── xterm.js ⇄ ws → host pty 插件(node-pty)
-        ├── sidebar.tabs.genoffice ── 文件列表(relay /api/dir) + iframe 预览
-        └── sidebar.tabs.files ── host.listDirectory 目录浏览
+├── 左侧 sidebar slot ── ui-sidebar（官方原样：工作区列表/设置）
+└── 右侧浮动 Dock（fixed 浮层，本插件直挂，不占官方槽位）
+    ├── 选项卡栏: [终端|GenOffice|文件]
+    ├── 终端 ── xterm.js ⇄ ws → host pty 插件(node-pty, /api/pty.ws)
+    ├── GenOffice ── 文件列表(relay /api/dir) + iframe 预览 + 浏览器打开
+    └── 文件 ── host.listDirectory 目录浏览
+    备注：官方 details 列已被 ui-conversation 会话详情占用（single），
+          Dock 采用 fixed 浮层，不与任何官方槽位冲突（布局修订 2026-08-11）
 
 genoffice relay (:8787) ── + CORS(loopback origin) + /api/dir
 ```
@@ -339,8 +339,8 @@ genoffice relay (:8787) ── + CORS(loopback origin) + /api/dir
 |---|---|---|
 | genoffice `web/server.mjs` | 静态托管 + 中继 API | 新增 `GET /api/dir?path=`（列目录，安全策略同 /api/file）；统一 CORS 头（loopback Origin 白名单） |
 | genoffice 各 app web-bridge | URL 打开 | 无改动（`path:` 已支持）；如引入只读参数则 docs 桥解析 `?view=`（P1 决定，默认不做） |
-| DSH 插件包 `dsh-plugin/`（genoffice 仓库） | 侧边栏生态 | 新包：client 侧（TabsRoot + 三面板）+ host 侧（pty ws 端点） |
-| DSH profile `~/.dsh/profiles/web` | 加载层 | cordis.patch.yml：disable `ui-sidebar` + insert 本插件；package.json 链接本地包 |
+| DSH 插件包 `dsh-plugin/`（genoffice 仓库） | 右侧 Dock 生态 | 新包：client 侧（TabsDock 浮动 Dock + 三面板）+ host 侧（pty ws 端点） |
+| DSH profile `~/.dsh/profiles/web` | 加载层 | cordis.patch.yml：**不 disable `ui-sidebar`**（官方左侧保留）+ insert 本插件；package.json 链接本地包 |
 
 ### 3.3 三段式定位清单
 
@@ -537,7 +537,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 
 **Evidence**：`evidence/phase-1/`
 
-### Phase 2: 插件骨架（TabsRoot 选项卡容器）
+### Phase 2: 插件骨架（TabsDock 右侧浮动 Dock）
 
 > 你在哪里：冒烟插件可加载；侧边栏仍为官方单面板
 > 做完之后：侧边栏出现选项卡栏（工作区/终端/GenOffice/文件），官方工作区/设置面板在容器内可用，rail 折叠恢复正常，激活 tab 记忆
@@ -548,7 +548,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 - **前置任务**：1
 - **风险等级**：P1
 
-**为什么做**：从冒烟包演进为正式 client 插件包，承载 TabsRoot 与三个面板。
+**为什么做**：从冒烟包演进为正式 client 插件包，承载 TabsDock 与三个面板。
 
 **涉及文件与定位**：
 
@@ -558,7 +558,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 
 **具体操作**：
 
-1. 规范包结构：`src/index.ts`（`apply(ctx)` + `inject: ['slots','layout','sessions','workspaces','locale']` 按需声明）、`src/TabsRoot.tsx`、`src/store.ts`、`src/tabs/{workspace,terminal,genoffice,files}.tsx`（占位）、`README.md`
+1. 规范包结构：`src/client/index.ts`（`apply(ctx)` + `inject: ['workspaces']`）、`src/TabsDock.tsx`、`src/tabs/{terminal,genoffice,files}.tsx`、`README.md`
 2. 构建：参考 `ui-sidebar` 的 `tsdown.config.ts` 输出 client 可加载产物；typecheck 命令进 package.json scripts
 3. 确认 `ctx.slots.register` 的完整签名（children 声明、inject hook、store seat）并记录到 README（P2 实现依赖）
 
@@ -568,37 +568,39 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 
 **注意事项**：禁止把官方包的内部类型当公共 API 用（以 packages/client 各包 `/client` 导出面为准）；DSH 包版本演进风险记录到 README
 
-### Task 9: 实现 TabsRoot 选项卡容器并替换 sidebar 注册者
+### Task 9: 实现右侧浮动 Dock（TabsDock）并保持官方左侧边栏
 
 - **关联**：BR-001 / BR-002 / BR-003 / UF-001 / UF-006 / INV-001 / EVD-001（核心任务）
 - **前置任务**：8
 - **风险等级**：P0
 
-**为什么做**：统一生态的骨架——选项卡栏 + 可插拔子槽位 + 官方面板保留。
+**为什么做**：统一生态的骨架——右侧 Dock（终端/GenOffice/文件）与官方左侧边栏并存。
+注：`details` 槽位已被官方 ui-conversation 会话详情占用（single），故 Dock 以 fixed 浮层
+直挂实现，不注册任何槽位（布局修订 2026-08-11）。
 
 **涉及文件与定位**：
 
-- `genoffice/dsh-plugin/src/TabsRoot.tsx`（新建）：容器组件
-- `.dsh-plugin-dev/packages/client/ui-sidebar/src/client/SidebarRoot.tsx`：`renderSlot('sidebar.workspaces')` / `renderSlot('sidebar.settings')`，L174/L182（子槽位渲染参考与 props 形状）
-- `.dsh-plugin-dev/packages/client/ui-sidebar/src/client/index.ts`：`name: 'sidebar'`，L39（被替换的注册者；patch disable 的对象）
-- `~/.dsh/profiles/web/cordis.patch.yml`：insert 列表（装载点）
-- `genoffice/dsh-plugin/src/index.ts`：`ctx.slots.register({name:'sidebar', children:{...}, ...}, TabsRoot)`（注册点）
+- `genoffice/dsh-plugin-r2/src/TabsDock.tsx`：`TabsDock` / `mountDock` / `createDockElement`（新建，fixed 浮层组件）
+- `genoffice/dsh-plugin-r2/src/TabsDock.module.css`：`.mount` / `.dock` / `.dockCollapsed`（浮层定位样式）
+- `genoffice/dsh-plugin-r2/src/client/index.ts`：`apply(ctx)` → `ctx.effect` 挂载/卸载（直挂，不注册槽位）
+- `~/.dsh/profiles/web/cordis.patch.yml`：insert 列表（装载点；**不 disable ui-sidebar**）
 
 **具体操作**：
 
-1. `TabsRoot` 组件：
-   - 顶部选项卡栏：`工作区 | 终端 | GenOffice | 文件`（激活态高亮；图标用文本+简单 SVG，样式对齐官方 rail 风格）
-   - 内容区按激活 tab 渲染：工作区 → `renderSlot('sidebar.workspaces', props)`；设置保留在 rail 底部入口（`renderSlot('sidebar.settings', {wide})`）；其余 → `renderSlot('sidebar.tabs.<name>')`
-   - 折叠态（`collapsed` owner prop）：渲染 rail 图标列（tab 图标可点击直接激活对应 tab 并展开）
-2. `index.ts` 注册：`children` 声明 `sidebar.tabs`（容器级）+ 三个 tab 子槽位（`sidebar.tabs.terminal/genoffice/files`，kind single, scope root）——子槽位由后续 Task 注册，本 Task 先声明（未注册时按 UF-001 失败分支降级隐藏 tab）
-3. patch 配置：`cordis.patch.yml` 增加 `- id: ui-sidebar` + `disabled: true`（官方行）+ insert 本插件行（`name: 'dsh-genoffice-sidebar'`）
-4. 重启 `dsh web` 实测：选项卡栏出现；工作区 tab 内官方会话列表可用；设置入口可用
+1. `TabsDock` 组件（自包含，不依赖 slots）：
+   - 顶部选项卡栏：`终端 | GenOffice | 文件`（激活态高亮；图标用简单 SVG）
+   - 内容区按激活 tab 直接渲染三个面板组件（`TerminalPanel` / `GenOfficePanel` / `FilesPanel`）
+   - 折叠态：Dock 收成 44px rail 图标列（点击图标展开并激活对应 tab）；激活 tab 存内存 store（BR-003）
+2. `client/index.ts`：`apply(ctx)` 中 `ctx.effect` 内 `createDockElement()` → `document.body.appendChild` → `mountDock(host, listDirectory)`；dispose 时 unmount + remove
+3. `FilesPanel` 的 `listDirectory` 从 `ctx.workspaces.listDirectory` 注入
+4. patch 配置：`cordis.patch.yml` insert 本插件行（`name: 'dsh-genoffice-sidebar-r2'`），**保留官方 `ui-sidebar` 行**
+5. 重启 `dsh web` 实测：左侧官方工作区列表原样；右侧 Dock 出现；点击各 tab 无 console error
 
-**验证**：`dsh web` 后侧边栏显示选项卡栏，点击各 tab 无 console error；官方工作区列表可见可点（INV-001 初步）
+**验证**：`dsh web` 后左侧官方侧边栏可见可点（INV-001 初步）+ 右侧 Dock 三 tab 切换无 console error
 
 **Evidence**：`evidence/UF-001/tabs-bar.png` + `evidence/phase-2/tabs-console.log`
 
-**注意事项**：禁止改动官方 `ui-sidebar` 源码（INV-004）；patch disable 后若 rail 样式缺失，参考 `SidebarRoot.module.css` 自绘（ASM-003）；子槽位未注册时 tab 必须隐藏而非渲染空白
+**注意事项**：禁止改动官方 `ui-sidebar` 源码（INV-004）；禁止注册 `details` 槽位（已被官方占用，single 冲突）；Dock 浮层 z-index 需高于内容区且不遮挡官方 details 列拖拽手柄
 
 ### Task 10: 实现激活 tab store 与折叠恢复
 
@@ -606,7 +608,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 - **前置任务**：9
 - **风险等级**：P2
 
-**为什么做**：折叠/展开后恢复原 tab（BR-003），并处理会话切换等边界。
+**为什么做**：折叠/展开后恢复原 tab（BR-003，Dock 内折叠为 44px rail）。
 
 **涉及文件与定位**：
 
@@ -616,7 +618,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 **具体操作**：
 
 1. store：`{ active: TabId, byTab: Record<TabId, unknown> }`，`setActive` / `patchTab` actions；参照 `ui-layout` 的 store 模式（transient，不写 localStorage——与官方一致，刷新回默认）
-2. TabsRoot 订阅 `layout` 折叠状态：折叠时记录 active，展开时恢复
+2. Dock 组件内管理折叠状态：折叠时记录 active，rail 点击展开时恢复
 3. 错误边界：单个 tab 渲染抛错 → 占位 + console 记录，不白屏（UF-001 失败分支）
 
 **验证**：browser 实测：切 GenOffice → 折叠 → 展开 → 仍为 GenOffice；渲染抛错模拟（临时 throw）→ 占位出现
@@ -857,7 +859,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 
 **具体操作**：
 
-1. patch 最终化：disable `ui-sidebar` 行 + insert client 插件 + insert host 插件（id/name 与既有行同构）
+1. patch 最终化：**不 disable `ui-sidebar`**（官方左侧保留）+ insert client 插件 + insert host 插件（id/name 与既有行同构）
 2. 依赖固化：`file:` 链接 + `pnpm install`；README 记录重装命令与回退（注释掉 patch 行即还原）
 3. 干净启动验证：从零执行 README 安装步骤 → `dsh web` → 四个 tab 全部出现且可用
 4. 卸载验证：patch 注释后重启 → 官方侧边栏原样恢复（回退可用性，EVD-001）
@@ -926,7 +928,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 
 | UF | 执行方式 | 操作来源 | 必须核对的点 | Evidence |
 |---|---|---|---|---|
-| UF-001 主路径 | browser | 2.3 节 UF-001 步骤 1-3 逐条点击四个 tab | 每步即时反馈与脚本一致；激活态高亮；console 无新增 error | `evidence/UF-001/tabs.png` + console.log |
+| UF-001 主路径 | browser | 2.3 节 UF-001 步骤 1-3 逐条点击三个 tab（终端/GenOffice/文件） | 每步即时反馈与脚本一致；激活态高亮；左侧官方工作区不受影响；console 无新增 error | `evidence/UF-001/tabs.png` + console.log |
 | UF-001 失败分支（子槽位缺失） | browser | 临时注释某个 tab 插件行重启 | 该 tab 隐藏/不可用，其余正常 | `evidence/UF-001/missing-slot.png` |
 | UF-001 失败分支（渲染异常） | browser | 临时注入 throw 组件 | 错误边界占位，不白屏 | `evidence/UF-001/error-boundary.png` |
 | UF-002 主路径 | browser | 2.3 节 UF-002 步骤 1-3：列目录→点击 simple.docx→预览 | iframe 渲染"标题第一段。第二段。"；加载态可见；hash 前后一致 | `evidence/UF-002/preview-docx.png` + hash 记录 |
@@ -938,7 +940,7 @@ P0 基线与勘察 → P1 relay 配套 → P2 插件骨架 → P3 GenOffice tab 
 | UF-004 失败分支（路径错误） | browser | 访问不可读目录 | 错误提示 + 列表保留 | `evidence/UF-004/error.png` |
 | UF-005 主路径 | browser | 2.3 节 UF-005 步骤 1-3：echo/Ctrl+C/exit | 实时回显；中断生效；`ps` 无残留 | `evidence/UF-005/echo.png` + `ps` 输出 |
 | UF-005 失败分支（ws 失败） | browser | 停 host 插件后开终端 | "连接失败"+ 重连按钮，恢复后可用 | `evidence/UF-005/ws-down.png` |
-| UF-006 主路径 | browser | 2.3 节 UF-006：切 GenOffice→折叠→展开 | 恢复 GenOffice tab | `evidence/UF-006/restore.png` |
+| UF-006 主路径 | browser | 2.3 节 UF-006：切 GenOffice→折叠（rail）→点击图标展开 | 恢复 GenOffice tab | `evidence/UF-006/restore.png` |
 
 **按任务类型的执行方式**：
 

@@ -1,23 +1,27 @@
 # dsh-genoffice-sidebar
 
 DSH side panel unified ecosystem plugin (client + host dual-face cordis
-plugin): a tabbed sidebar container (工作区 | 终端 | GenOffice | 文件), a
-GenOffice file browser with embedded read-only preview, a host-backed
-directory browser, and an xterm terminal over a host pty WebSocket.
+plugin): a **right-hand floating dock** (终端 | GenOffice | 文件) with a
+GenOffice file browser + embedded read-only preview, a host-backed directory
+browser, and an xterm terminal over a host pty WebSocket. The official
+ui-sidebar stays on the LEFT (workspace list), untouched.
 
 ## Architecture
 
 ```text
-DSH sidebar slot ← dsh-genoffice-sidebar (TabsRoot)
-    ├── sidebar.workspaces（官方保留）
-    ├── sidebar.settings（官方保留）
-    └── sidebar.tabs.terminal|genoffice|files（可插拔子槽位）
+DSH Web GUI
+├── 左侧 sidebar slot ← ui-sidebar（官方原样：工作区列表/设置）
+└── 右侧浮动 Dock ← dsh-genoffice-sidebar（fixed 浮层，直挂，不占槽位）
+    ├── 终端 ── xterm.js ⇄ ws → host pty (/api/pty.ws, node-pty)
+    ├── GenOffice ── 文件列表(relay /api/dir) + iframe 只读预览 + 浏览器打开
+    └── 文件 ── host.listDirectory 目录浏览
 genoffice relay (:8787) ← /api/dir + CORS loopback（web/server.mjs）
-host pty ws: /api/pty.ws ← node-pty (host half)
 ```
 
-- Client half (`src/client/`): registers `sidebar` (the official ui-sidebar
-  is patched out), declares the ecosystem tab slots, renders the panels.
+- Client half (`src/client/index.ts`): mounts the floating dock directly via
+  `createRoot` (`mountDock`), because the layout-owned `details` column is
+  already claimed by the official conversation-details panel (single slot)
+  and `sidebar`/`conversation` are claimed as well — no slot is used.
 - Host half (`src/index.ts`): registers the `/api/pty.ws` upgrade route;
   spawns `node-pty` directly (the DSH `ctx.pty` service is line-oriented
   for model tools and does not stream to an interactive xterm).
@@ -38,9 +42,7 @@ cd ~/.dsh/profiles/web
 pnpm add file:/ABS/PATH/dsh-plugin
 
 # 2. the profile patch layer (~/.dsh/profiles/web/cordis.patch.yml) must
-#    contain:
-#    - id: ui-sidebar
-#      disabled: true
+#    contain (ui-sidebar is NOT disabled — it stays on the left):
 #    - id: directory-picker
 #      disabled: true
 #    - insert:
