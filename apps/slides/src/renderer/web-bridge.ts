@@ -10,15 +10,16 @@
  *     text/transform/fill/stroke/background edits, element add/delete,
  *     slide add/delete, undo/redo, notes, render rebuilds, theme/language,
  *     picture crop/opacity/replace/insert-url, group/ungroup, flip, text
- *     anchor, image fill, tables, charts, localStorage style templates
+ *     anchor, image fill, tables, charts, SmartArt, localStorage style templates
  *   - NOT implemented (explicit `console.warn` + null/default — never silent):
  *     presenter/audience, PDF/image export, print, master view, cloud gen,
- *     clipboard, animations, comments, sections, find-replace, SmartArt/media
+ *     clipboard, animations, comments, sections, find-replace, media
  */
 import type {
   AddChartOp,
   AddElementOp,
   AddImageBytesOp,
+  AddSmartArtOp,
   AddSlideOp,
   AddBlankSlideOp,
   AddTableOp,
@@ -57,6 +58,7 @@ import { defaultAiSettings } from '@genoffice/ai-provider'
 import {
   addChart,
   addPicture,
+  addSmartArt,
   addTable,
   editChartElement,
   editPictureSrcRect,
@@ -996,7 +998,28 @@ const slidesApi: SlidesApi = {
     const rebuilt = rebuildSlide(session, op.slideIndex)
     return rebuilt ? { slide: rebuilt, sourceId: r.elementId } : null
   },
-  addSmartArt: async () => notAvailable('addSmartArt'),
+  addSmartArt: async (op: AddSmartArtOp) => {
+    const session = getWebSession()
+    if (!session || !session.opened.deck.slides[op.slideIndex]) return null
+    pushHistory(session)
+    const r = addSmartArt(session.opened, op.slideIndex, {
+      layout: op.layout,
+      items: op.items,
+      offset: {
+        x: toEmu(session, op.fitWidthPx, op.xPx),
+        y: toEmu(session, op.fitWidthPx, op.yPx),
+        cx: toEmu(session, op.fitWidthPx, op.wPx),
+        cy: toEmu(session, op.fitWidthPx, op.hPx),
+      },
+    })
+    if (!r) {
+      session.undoStack.pop()
+      return null
+    }
+    session.fitWidthPx = op.fitWidthPx
+    const rebuilt = rebuildSlide(session, op.slideIndex)
+    return rebuilt ? { slide: rebuilt, sourceId: r.elementId } : null
+  },
   addImageBytes: async (op: AddImageBytesOp) => {
     const session = getWebSession()
     if (!session) return null
