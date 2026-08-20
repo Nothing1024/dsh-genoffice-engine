@@ -37,6 +37,8 @@ import { TextEditOverlay, firstFontFamily, liveAlign, liveBulletChar } from './T
 import { CropOverlay } from './CropOverlay'
 import { createImageLoader } from './image-loader'
 import { InkOverlay } from './InkOverlay'
+import { initControlMode, CONTROL_MODE } from './control'
+import type { DeckAccess, ClarifyQuestion } from './ai/slides-skill'
 import { inkNodesOf, type InkPenSettings, type InkStroke, type InkTool } from './ink'
 import type { SlideThemePreset } from './themes'
 import { Ribbon, type FormatCmd, type SlidesViewMode } from './components/Ribbon'
@@ -59,7 +61,7 @@ import { GensparkMark, IconAiBeautify, IconAiFactCheck, IconAiImage } from './co
 import { ToastHost } from './components/toast'
 import { showToast } from './components/toast-bus'
 import { t, useI18n } from './i18n/locale'
-import { AiPanel } from './ai/AiPanel'
+import { AiPanel, ClarifyCard } from './ai/AiPanel'
 import { ChartDataDialog } from './components/ChartDataDialog'
 import type { BrushFormat } from './format-brush'
 import { isTextUndoTarget, shouldRouteUndoToDeck } from './undo-routing'
@@ -967,6 +969,40 @@ export function App() {
     setEditing(null)
     setDirty(true)
   }, [])
+
+  const [controlClarify, setControlClarify] = useState<ClarifyQuestion[] | null>(null)
+  const controlClarifyResolverRef = useRef<((r: { answers: string; cancelled?: boolean }) => void) | null>(null)
+
+  // Control-mode adapter (genoffice-dsh-office): registers the executor and
+  // serves tool/context/export over the relay control plane (BR-001/BR-003).
+  // Non-control loads return null — zero side effects (INV-001). DeckAccess
+  // is built fresh per call from the live ctxRef state.
+  useEffect(() => {
+    const handle = initControlMode({
+      getDeckAccess: (): DeckAccess | null => {
+        const ctx = ctxRef.current
+        if (!ctx) return null
+        return {
+          getSlides: () => ctx.slides,
+          getCurrent: () => ctx.current,
+          getSelectedIds: () => ctx.selectedIds,
+          applySlide,
+          applyDeck,
+          fitWidthPx: FIT_WIDTH,
+          askClarification: (questions) => {
+            if (controlClarifyResolverRef.current !== null) {
+              return Promise.reject(new Error('askClarification already pending'))
+            }
+            return new Promise<{ answers: string; cancelled?: boolean }>((resolve) => {
+              controlClarifyResolverRef.current = resolve
+              setControlClarify(questions)
+            })
+          },
+        }
+      },
+    })
+    return () => handle?.close()
+  }, [applySlide, applyDeck])
 
   const addSlide = useCallback(() => slideActions.addSlide(ctxRef.current), [])
   const addSlideWithLayout = useCallback(
@@ -2307,6 +2343,7 @@ export function App() {
         onZoom={previewZoom}
         showThumbs={showThumbs}
         onToggleThumbs={() => setShowThumbs((v) => !v)}
+        hideAi={CONTROL_MODE}
         aiOpen={showAi}
         onToggleAi={toggleAi}
         onAiPreset={(text, opts) => pushAiPreset(text, true, undefined, undefined, opts?.slideShot)}
@@ -2474,7 +2511,7 @@ export function App() {
       />
 
       <div className="app-main">
-        {slide && viewMode !== 'reading' && viewMode !== 'sorter' && (
+        {!CONTROL_MODE && slide && viewMode !== 'reading' && viewMode !== 'sorter' && (
           <div className={`ai-dock${showAi && aiSettings ? '' : ' collapsed'}`}>
             {/* always mounted once settings load: collapse must not drop state or in-flight runs */}
             {aiSettings ? (
@@ -2744,6 +2781,7 @@ export function App() {
                           : undefined
                       }
                     >
+                      {!CONTROL_MODE && (
                       <div className="stage-ai-bar">
                         <button
                           className={`stage-ai-btn${showAi ? ' active' : ''}`}
@@ -2793,6 +2831,7 @@ export function App() {
                           </>
                         )}
                       </div>
+                      )}
                       <div
                         ref={stageScaleRef}
                         className="stage-scale"
@@ -3343,6 +3382,23 @@ export function App() {
           items={ctxItems}
           onClose={() => setCtxMenu(null)}
         />
+      )}
+      {CONTROL_MODE && controlClarify && (
+        <div className="modal-backdrop">
+          <ClarifyCard
+            questions={controlClarify}
+            onSubmit={(answers) => {
+              controlClarifyResolverRef.current?.({ answers })
+              controlClarifyResolverRef.current = null
+              setControlClarify(null)
+            }}
+            onSkip={() => {
+              controlClarifyResolverRef.current?.({ answers: '', cancelled: true })
+              controlClarifyResolverRef.current = null
+              setControlClarify(null)
+            }}
+          />
+        </div>
       )}
     </div>
   )
