@@ -13,7 +13,7 @@ import {
 import { FormatCellsDialog } from './FormatCellsDialog'
 import { GoToDialog } from './GoToDialog'
 import { useI18n, type StringKey } from './i18n/locale'
-import { CONTROL_MODE } from './control'
+import { CONTROL_MODE } from './control-flags'
 import { NameManagerDialog, type DefinedNameAction, type DefinedNameRow } from './NameManagerDialog'
 import { categoryOptionForPattern, NUMBER_FORMAT_CATEGORIES } from './number-format'
 import { type SelectionFormat } from './selection-format'
