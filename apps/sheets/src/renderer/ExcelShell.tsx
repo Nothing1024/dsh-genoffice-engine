@@ -13,6 +13,7 @@ import {
 import { FormatCellsDialog } from './FormatCellsDialog'
 import { GoToDialog } from './GoToDialog'
 import { useI18n, type StringKey } from './i18n/locale'
+import { CONTROL_MODE } from './control'
 import { NameManagerDialog, type DefinedNameAction, type DefinedNameRow } from './NameManagerDialog'
 import { categoryOptionForPattern, NUMBER_FORMAT_CATEGORIES } from './number-format'
 import { type SelectionFormat } from './selection-format'
@@ -315,7 +316,7 @@ export function ExcelShell({
     : ribbonTabs
 
   return (
-    <main className={`app-shell ${isCopilotOpen ? '' : 'copilot-collapsed'}`}>
+    <main className={`app-shell ${isCopilotOpen ? '' : 'copilot-collapsed'}${CONTROL_MODE ? ' control-mode' : ''}`}>
       <header className="excel-header">
         <nav
           className={`ribbon-tabs ${IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
@@ -418,6 +419,7 @@ export function ExcelShell({
 
       {/* AI panel docks on the left, full height under the ribbon (unified with docs) */}
       <div className="sheet-body">
+        {!CONTROL_MODE && (
         <AiChatPanel
           isOpen={isCopilotOpen}
           hasContent={sheetHasContent}
@@ -440,6 +442,7 @@ export function ExcelShell({
           onExpand={() => setIsCopilotOpen(true)}
           onCollapse={() => setIsCopilotOpen(false)}
         />
+        )}
         <div className="sheet-main">
           {/* Excel's formula-bar row, Name Box only for now (fx bar TBD). */}
           <div className="name-box-bar">
@@ -2071,6 +2074,7 @@ function Ribbon({
     : [...fontSizes, echoSize].sort((a, b) => a - b)
   return (
     <div className="ribbon">
+      {!CONTROL_MODE && (
       <RibbonGroup label={t('appGroupAiAssistant')}>
         <button
           className={`ribbon-tool as-button large ai-entry ${aiOpen ? 'active' : ''}`}
@@ -2142,6 +2146,7 @@ function Ribbon({
           </span>
         </button>
       </RibbonGroup>
+      )}
       <RibbonGroup label={t('appGroupClipboard')}>
         <button
           className="ribbon-tool as-button large"
