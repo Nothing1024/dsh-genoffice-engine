@@ -1446,11 +1446,7 @@ select.select-like {
   grid-template-columns: 34px minmax(0, 1fr);
 }
 
-/* Control mode skips <AiChatPanel> entirely, so .sheet-body has a single child
- * (.sheet-main). A two-track template would auto-place that child into the
- * first track and leave a ~360px empty second track (the layout truncation
- * bug). One 1fr track gives the sheet the full width. Independent of
- * .copilot-collapsed so non-control expand/collapse is untouched. */
+/* Single child .sheet-main must not auto-place into a leftover copilot track. */
 .app-shell.control-mode .sheet-body {
   grid-template-columns: minmax(0, 1fr);
 }
