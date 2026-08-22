@@ -731,7 +731,8 @@ async function handleApi(req, res, pathname, body, url) {
     }
     const target = String(parsed.path ?? '')
     if (!isAbsolute(target)) return json(res, 400, { ok: false, error: 'invalid path' })
-    return json(res, 200, { ok: true, docId: docIdFor(target), path: target })
+    const docId = docIdFor(target)
+    return json(res, 200, { ok: true, docId, path: target, registered: executors.has(docId) })
   }
 
   // context / tool / export: forward downstream, await the notify result
@@ -1078,8 +1079,10 @@ async function handleApi(req, res, pathname, body, url) {
     if (!isAbsolute(target)) return json(res, 400, { ok: false, error: 'path must be absolute' })
     try { await stat(target) } catch { return json(res, 200, { ok: false, error: 'file not found' }) }
     const dead = []
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+    const fileEvent = sessionId !== '' ? { path: target, sessionId } : { path: target }
     for (const s of openStreams) {
-      try { s.write(`event: file\ndata: ${JSON.stringify({ path: target })}\n\n`) }
+      try { s.write(`event: file\ndata: ${JSON.stringify(fileEvent)}\n\n`) }
       catch { dead.push(s) }
     }
     for (const s of dead) openStreams.delete(s)
