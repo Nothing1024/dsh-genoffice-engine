@@ -4872,6 +4872,7 @@ export default function App() {
     const handle = initControlMode({
       getDeps: () => aiApiRef.current,
       getSaveRequest: () => buildSaveRequestRef.current?.() ?? null,
+      exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
     })
     return () => handle?.close()
   }, [])

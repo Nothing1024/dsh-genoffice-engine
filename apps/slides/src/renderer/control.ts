@@ -10,7 +10,6 @@
  */
 import type { AgentToolCall, ToolExecution } from '@genoffice/agent-core'
 import { createSlidesSkill, type DeckAccess } from './ai/slides-skill'
-import { exportSlidesBytes } from './web-bridge'
 
 // ── module-level capture ──────────────────────────────────────────────
 const params = new URLSearchParams(location.search)
@@ -60,9 +59,19 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
+export type ControlExportBytes = () => Promise<{ bytes: Uint8Array; name: string } | null>
+
+declare global {
+  interface Window {
+    __genofficeExportBytes?: () => Promise<{ bytes: Uint8Array; name: string } | null>
+  }
+}
+
 export interface ControlAdapterOptions {
   /** fresh DeckAccess accessor (from the live App state; never stale) */
   getDeckAccess: () => DeckAccess | null
+  /** CURRENT deck bytes (web-bridge exportSlidesBytes; injected so desktop never imports it) */
+  exportBytes: ControlExportBytes
 }
 
 export interface ControlHandle {
@@ -169,7 +178,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
       return
     }
     try {
-      const exported = await exportSlidesBytes()
+      const exported = await opts.exportBytes()
       if (!exported) {
         await notify(docId, 'export', requestId, { error: 'export failed: no deck loaded' })
         return

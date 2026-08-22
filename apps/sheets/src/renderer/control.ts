@@ -12,7 +12,6 @@ import type { AgentToolCall, ToolExecution } from '@genoffice/agent-core'
 import type { SheetsSkillDeps } from './ai/tools'
 import { buildWorkbookContext, executeWorkbookTool } from './ai/tools'
 import { buildSavePayload, type SaveContext } from './save-actions'
-import { exportCurrentBytes } from './web-bridge'
 import { CONTROL_MODE, CONTROL_PATH } from './control-flags'
 
 export { CONTROL_MODE, CONTROL_PATH }
@@ -56,11 +55,21 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
+export type ControlExportBytes = () => Promise<{ bytes: Uint8Array; name: string } | null>
+
+declare global {
+  interface Window {
+    __genofficeExportBytes?: () => Promise<{ bytes: Uint8Array; name: string } | null>
+  }
+}
+
 export interface ControlAdapterOptions {
   /** fresh skill deps accessor (sheetsSkillDeps(); never a stale instance) */
   getDeps: () => SheetsSkillDeps | null
   /** fresh save context (saveContext(); used to assemble the write-back bytes) */
   getSaveContext: () => SaveContext
+  /** current workbook bytes (web-bridge exportCurrentBytes; injected so desktop never imports it) */
+  exportBytes: ControlExportBytes
 }
 
 export interface ControlHandle {
@@ -258,7 +267,7 @@ export async function buildExportBytes(opts: ControlAdapterOptions): Promise<Uin
   const bundle = await buildSavePayload(ctx)
   if (!bundle) {
     // no edits — current bytes are the opened file's bytes
-    const current = await exportCurrentBytes()
+    const current = await opts.exportBytes()
     return current?.bytes ?? null
   }
   const { payload, splitSave, heldPivots, heldTables, heldNames } = bundle
@@ -300,6 +309,6 @@ export async function buildExportBytes(opts: ControlAdapterOptions): Promise<Uin
     })
     void after
   }
-  const current = await exportCurrentBytes()
+  const current = await opts.exportBytes()
   return current?.bytes ?? null
 }

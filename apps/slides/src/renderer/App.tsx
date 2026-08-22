@@ -1126,6 +1126,7 @@ export function App() {
   // is built fresh per call from the live ctxRef state.
   useEffect(() => {
     const handle = initControlMode({
+      exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
       getDeckAccess: (): DeckAccess | null => {
         const ctx = ctxRef.current
         if (!ctx) return null

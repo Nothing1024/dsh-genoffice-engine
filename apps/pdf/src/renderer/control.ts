@@ -12,7 +12,6 @@ import type { AgentToolCall, ToolExecution } from '@genoffice/agent-core'
 import type { SavePdfRequest } from '../shared/ipc'
 import type { PdfAiDeps } from './ai/tools'
 import { executePdfTool } from './ai/tools'
-import { exportPdfBytes } from './web-bridge'
 
 // ── module-level capture ──────────────────────────────────────────────
 const params = new URLSearchParams(location.search)
@@ -62,11 +61,21 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
+export type ControlExportBytes = () => Promise<{ bytes: Uint8Array; name: string } | null>
+
+declare global {
+  interface Window {
+    __genofficeExportBytes?: () => Promise<{ bytes: Uint8Array; name: string } | null>
+  }
+}
+
 export interface ControlAdapterOptions {
   /** fresh skill deps accessor (the App's PdfAiDeps closure; never stale) */
   getDeps: () => PdfAiDeps | null
   /** build the CURRENT save request from the renderer's pending edits (BR-008) */
   getSaveRequest: () => SavePdfRequest | null
+  /** serialize CURRENT merged bytes (web-bridge exportPdfBytes; injected so desktop never imports it) */
+  exportBytes: ControlExportBytes
 }
 
 export interface ControlHandle {
@@ -181,7 +190,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
           return
         }
       }
-      const exported = await exportPdfBytes()
+      const exported = await opts.exportBytes()
       if (!exported) {
         await notify(docId, 'export', requestId, { error: 'export failed: no document loaded' })
         return

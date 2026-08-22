@@ -34,6 +34,7 @@ import { listEditFonts as listEditFontsImpl } from './web-text-edit'
 declare global {
   interface Window {
     __GENOFFICE_WEB__?: boolean
+    __genofficeExportBytes?: () => Promise<{ bytes: Uint8Array; name: string } | null>
   }
 }
 
@@ -129,6 +130,8 @@ export async function exportPdfBytes(): Promise<{ bytes: Uint8Array; name: strin
   if (!opened) return null
   return { bytes: opened.bytes, name: opened.name }
 }
+
+window.__genofficeExportBytes = exportPdfBytes
 
 // ── window.pdfApi ───────────────────────────────────────────────────────
 

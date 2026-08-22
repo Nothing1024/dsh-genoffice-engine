@@ -60,6 +60,7 @@ import {
 declare global {
   interface Window {
     __GENOFFICE_WEB__?: boolean
+    __genofficeExportBytes?: () => Promise<{ bytes: Uint8Array; name: string } | null>
     showOpenFilePicker?: (options?: unknown) => Promise<unknown[]>
     showSaveFilePicker?: (options?: unknown) => Promise<unknown>
   }
@@ -174,6 +175,8 @@ export async function exportCurrentBytes(): Promise<{ bytes: Uint8Array; name: s
   if (!opened) return null
   return { bytes: opened.latestBytes, name: opened.name }
 }
+
+window.__genofficeExportBytes = exportCurrentBytes
 
 // ── window.desktopApi ───────────────────────────────────────────────────
 

@@ -9,10 +9,10 @@
  * (`loadWorkbookSkeleton` + `readWorkbookRange`/`readWorkbookFormulas`).
  *
  * Save path: the renderer's edit journal arrives as `WorkbookSaveRequest`;
- * the gateway's pure-JSZip pipeline (`applyCellEditsToXlsx`) patches the
- * ORIGINAL archive (only touched entries change — BR-009 fidelity), the new
- * bytes become the current file state (INV-005: no direct file writes, all
- * edits still go through Univer → journal).
+ * the gateway's pure-JSZip pipeline (`planCellEditsToXlsx` + `assembleWithJsZip`)
+ * patches the ORIGINAL archive (only touched entries change — BR-009 fidelity),
+ * the new bytes become the current file state (INV-005: no direct file writes,
+ * all edits still go through Univer → journal).
  *
  * This module is only included by the web build (vite.web.config.ts); the
  * desktop build never sees it.
@@ -29,8 +29,13 @@ import type {
   WorkbookSaveRequest,
   WorkbookCellStyle,
 } from '../shared/desktop-api'
-import { applyCellEditsToXlsx } from '../gateway/xlsx-gateway'
+import {
+  assembleWithJsZip,
+  createBufferEntrySource,
+  planCellEditsToXlsx,
+} from '../gateway/xlsx-gateway'
 import type { CellEdit, SheetStructuralOps } from '../gateway/xlsx-gateway'
+import type { SheetEditPlan } from '../gateway/xlsx-sheets'
 import { columnIndex } from '../domain/cell-address'
 
 /** One record of workbookRangeResultSchema.cells (no exported type name). */
@@ -484,6 +489,7 @@ export async function parseXlsxWorkbook(
     name,
     path: undefined,
     sha256,
+    activeTab: 0,
     entryCount: Object.keys(zip.files).filter((p) => !zip.files[p]?.dir).length,
     sheets: sheets.map((sheet) => ({
       id: sheet.id,
@@ -561,6 +567,9 @@ export function buildRangeResult(
     autoFilter: null,
     dataValidations: [],
     sheetProtection: null,
+    rowBreaks: [],
+    colBreaks: [],
+    protectedRanges: [],
     // the in-memory model is fully indexed: report the sheet's full extent so
     // the renderer's streaming poll stops and requested ranges patch
     // immediately (desktop sidecar streams incrementally; we already have all
@@ -624,10 +633,60 @@ export async function applySaveRequest(
       sheetNamesById.set(`sheet-${sheetNumber}`, decodeXmlText(nameAttr))
     }
   }
+  // Sheet ops resolve first: added sheets have Univer ids the file map
+  // doesn't know, so cell edits into them resolve through the op's name.
+  const addedSheetNames = new Map<string, string>()
+  const duplicateSources = new Map<string, string>()
+  const renames: { sheetName: string; newName: string }[] = []
+  const removals: string[] = []
+  const hiddenChanges: { sheetName: string; hidden: boolean }[] = []
+  let orderChanged = false
+  for (const op of request.sheetOps) {
+    if (op.kind === 'add-sheet') {
+      addedSheetNames.set(op.sheetId, op.name)
+      continue
+    }
+    if (op.kind === 'duplicate-sheet') {
+      const sourceName = addedSheetNames.get(op.sourceSheetId) ?? sheetNamesById.get(op.sourceSheetId)
+      if (!sourceName) throw new Error(`Unknown duplicate source ${op.sourceSheetId}.`)
+      addedSheetNames.set(op.sheetId, op.name)
+      duplicateSources.set(op.sheetId, sourceName)
+      continue
+    }
+    if (op.kind === 'reorder-sheets') {
+      orderChanged = true
+      continue
+    }
+    const sheetName = addedSheetNames.get(op.sheetId) ?? sheetNamesById.get(op.sheetId)
+    if (!sheetName) throw new Error(`Unknown worksheet ${op.sheetId}.`)
+    if (op.kind === 'rename-sheet') renames.push({ sheetName, newName: op.newName })
+    else if (op.kind === 'set-sheet-hidden') hiddenChanges.push({ sheetName, hidden: op.hidden })
+    else removals.push(sheetName)
+  }
+  const renameByOriginal = new Map(renames.map((rename) => [rename.sheetName, rename.newName]))
   const resolveSheetName = (sheetId: string): string => {
-    const name = sheetNamesById.get(sheetId)
-    if (!name) throw new Error(`Unknown worksheet for save: ${sheetId}`)
-    return name
+    const sheetName = addedSheetNames.get(sheetId) ?? sheetNamesById.get(sheetId)
+    if (!sheetName) throw new Error(`Unknown worksheet for save: ${sheetId}`)
+    return sheetName
+  }
+  let sheetPlan: SheetEditPlan | undefined
+  if (request.sheetOps.length > 0) {
+    sheetPlan = {
+      renames,
+      additions: [...addedSheetNames].map(([sheetId, name]) => ({
+        name,
+        sourceSheetName: duplicateSources.get(sheetId),
+      })),
+      removals,
+      hiddenChanges,
+      orderChanged,
+      order: request.sheetOrder.map((sheetId) => {
+        const original = resolveSheetName(sheetId)
+        return addedSheetNames.has(sheetId)
+          ? original
+          : (renameByOriginal.get(original) ?? original)
+      }),
+    }
   }
   const edits: CellEdit[] = request.edits.map((edit) => ({
     sheetName: resolveSheetName(edit.sheetId),
@@ -731,22 +790,101 @@ export async function applySaveRequest(
     ...(p.header === undefined ? {} : { header: p.header }),
     ...(p.footer === undefined ? {} : { footer: p.footer }),
   }))
-  const mutation = await applyCellEditsToXlsx(
-    source as never,
+  const bulkConstantFills = (request.bulkConstantFills ?? []).map(({ sheetId, ...fill }) => ({
+    sheetName: resolveSheetName(sheetId),
+    ...fill,
+  }))
+  const protectedRangeStates = request.protectedRangeStates.map((state) => ({
+    sheetName: resolveSheetName(state.sheetId),
+    ranges: state.ranges,
+  }))
+  const visualAdditions = request.visualAdditions.map((addition) => ({
+    sheetName: resolveSheetName(addition.sheetId),
+    anchor: addition.anchor,
+    chart: addition.chart,
+    shape: addition.shape,
+    image: addition.image,
+  }))
+  const tableAdditions = request.tableAdditions.map((table) => ({
+    sheetName: resolveSheetName(table.sheetId),
+    area: table.area,
+    name: table.name,
+    columnNames: table.columnNames,
+    style: table.style,
+    bandedRows: table.bandedRows,
+  }))
+  const pivotAdditions = request.pivotAdditions.map((pivot) => ({
+    sheetName: resolveSheetName(pivot.sheetId),
+    sourceSheetName: resolveSheetName(pivot.sourceSheetId),
+    sourceArea: pivot.sourceArea,
+    location: pivot.location,
+    name: pivot.name,
+    fieldNames: pivot.fieldNames,
+    rowFieldIndices: pivot.rowFieldIndices,
+    columnFieldIndex: pivot.columnFieldIndex,
+    pageFieldIndices: pivot.pageFieldIndices,
+    rowItems: pivot.rowItems,
+    rowLevelItems: pivot.rowLevelItems,
+    rowLines: pivot.rowLines,
+    columnItems: pivot.columnItems,
+    columnFieldIndices: pivot.columnFieldIndices,
+    colLevelItems: pivot.colLevelItems,
+    colLines: pivot.colLines,
+    groupings: pivot.groupings,
+    filters: pivot.filters,
+    rowHiddenItems: pivot.rowHiddenItems,
+    colHiddenItems: pivot.colHiddenItems,
+    values: pivot.values,
+  }))
+  const sparklineAdditions = request.sparklineAdditions.map(({ sheetId, ...group }) => ({
+    sheetName: resolveSheetName(sheetId),
+    ...group,
+  }))
+  const pivotRefreshUpdates = request.pivotRefreshUpdates.map((update) => ({
+    cachePath: update.cachePath,
+    sheetName: resolveSheetName(update.sheetId),
+    newOutputRef: update.newOutputRef,
+    ...(update.relayout === undefined
+      ? {}
+      : {
+          relayout: (({ sheetId: _sheetId, sourceSheetId, ...rest }) => ({
+            ...rest,
+            sourceSheetName: resolveSheetName(sourceSheetId),
+          }))(update.relayout),
+        }),
+  }))
+  // Same argument order as saveWorkbookViaSidecar / planCellEditsToXlsx.
+  // Do not call applyCellEditsToXlsx: that helper hard-zeros visual/table/pivot
+  // /sparkline/theme/protection/bulk fills.
+  const sourceBuffer = source as never
+  const plan = await planCellEditsToXlsx(
+    await createBufferEntrySource(sourceBuffer),
     edits,
     structuralOps,
     request.chartEdits,
-    undefined,
+    sheetPlan,
     filterStates,
     hyperlinkEdits,
     cfStates,
     dvStates,
     sheetProtections,
     request.definedNamesState,
+    visualAdditions,
     pageSetupStates,
     noteStates,
+    tableAdditions,
+    pivotAdditions,
+    request.pivotCacheRefreshPaths,
+    pivotRefreshUpdates,
+    request.visualEdits,
+    sparklineAdditions,
     formulaValues,
+    request.themeState,
+    request.workbookProtectionState,
+    protectedRangeStates,
+    bulkConstantFills,
   )
+  const mutation = await assembleWithJsZip(sourceBuffer, plan)
   const bytes = mutation.buffer
   const rebuilt = await parseXlsxWorkbook(bytes, name)
   return { bytes, file: rebuilt.file, touchedEntries: mutation.touchedEntries }

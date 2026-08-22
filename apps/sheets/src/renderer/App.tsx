@@ -1354,6 +1354,7 @@ export function App(): React.JSX.Element {
     const controlHandle = initControlMode({
       getDeps: () => (lazyWorkbookRef.current ? sheetsSkillDeps() : null),
       getSaveContext: () => saveContext(),
+      exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
     })
     // live theme switching: main.tsx updates data-theme first (its listener
     // registered at bootstrap), so reading the attribute here is safe; the

@@ -16,6 +16,7 @@
  *     clipboard, animations, comments, sections, find-replace
  *   - generateImage / analyzeMedia → localhost relay (no browser net egress)
  */
+import './web-node-shims'
 import type {
   AddChartOp,
   AddElementOp,
@@ -24,6 +25,8 @@ import type {
   AddSlideOp,
   AddBlankSlideOp,
   AddTableOp,
+  ApplyTxnOp,
+  ApplyTxnResult,
   BatchEditTransformOp,
   DesktopFilesApi,
   EditBackgroundOp,
@@ -53,6 +56,7 @@ import type {
   UngroupElementOp,
   UiTheme,
 } from '../shared/ipc'
+import { runTxn } from '../main/ops/executor'
 import type { RenderSlide } from '@genoffice/pptx-render'
 import type { AiSettings, AiStreamChunk } from '@genoffice/ai-provider'
 import { defaultAiSettings } from '@genoffice/ai-provider'
@@ -94,6 +98,7 @@ import {
   EMU_PER_PX_96,
   endHistoryBatch,
   getWebSession,
+  buildAllRenderSlides,
   pushHistory,
   rebuildSlide,
   rebuildSlideWithReparse,
@@ -125,6 +130,7 @@ import {
 declare global {
   interface Window {
     __GENOFFICE_WEB__?: boolean
+    __genofficeExportBytes?: () => Promise<{ bytes: Uint8Array; name: string } | null>
     showOpenFilePicker?: (options?: unknown) => Promise<unknown[]>
   }
 }
@@ -620,7 +626,55 @@ const slidesApi: SlidesApi = {
     return null
   },
   applyEditScript: async () => notAvailable('applyEditScript'),
-  applyTxn: async () => notAvailable('applyTxn'),
+  applyTxn: async (req: ApplyTxnOp): Promise<ApplyTxnResult | null> => {
+    const session = getWebSession()
+    if (!session) return null
+    const ops = Array.isArray(req?.ops) ? (req.ops as Parameters<typeof runTxn>[1]['ops']) : []
+    if (ops.length === 0 || ops.length > 50) {
+      return {
+        applied: false,
+        failures: [
+          { index: 0, error: 'ops must be a non-empty array (at most 50 per transaction).' },
+        ],
+      }
+    }
+    const isolation = req.isolation === 'per_op' ? ('per_op' as const) : ('atomic' as const)
+    const compact = (fails?: Array<{ index: number; error: string }>) =>
+      fails?.map((f) => ({ index: f.index, error: f.error }))
+    if (req.dryRun) {
+      const r = runTxn(session.opened, { ops, isolation, dryRun: true })
+      return {
+        applied: false,
+        dryRun: true,
+        plan: r.plan ?? [],
+        ...(r.failures?.length ? { failures: compact(r.failures) } : {}),
+      }
+    }
+    // Plan before pushing history (a no-op request must not clear the redo stack)
+    const plan = runTxn(session.opened, { ops, isolation, dryRun: true })
+    const invalid = plan.failures?.length ?? 0
+    if (isolation === 'atomic' ? invalid > 0 : invalid >= ops.length) {
+      return { applied: false, failures: compact(plan.failures) }
+    }
+    pushHistory(session)
+    const r = runTxn(session.opened, { ops, isolation })
+    if (!r.applied) {
+      session.undoStack.pop()
+      return { applied: false, failures: compact(r.failures) }
+    }
+    return {
+      applied: true,
+      records: (r.records ?? []).map((rec) => ({
+        op: rec.op.op,
+        ...(rec.op.target
+          ? { target: `${rec.op.target.slide}${rec.op.target.el ? `/${rec.op.target.el}` : ''}` }
+          : {}),
+        ...(rec.created ? { created: rec.created } : {}),
+      })),
+      ...(r.failures?.length ? { failures: compact(r.failures) } : {}),
+      slides: buildAllRenderSlides(session.opened, session.fitWidthPx),
+    }
+  },
   onHistoryChanged: (handler) => {
     historyChangedListeners.add(handler)
     return () => historyChangedListeners.delete(handler)
@@ -1487,6 +1541,8 @@ export async function exportSlidesBytes(): Promise<{ bytes: Uint8Array; name: st
   const bytes = await webSaveBytes(session)
   return { bytes, name: session.path.split('/').pop() ?? 'presentation.pptx' }
 }
+
+window.__genofficeExportBytes = exportSlidesBytes
 
 // ── window.desktop (DesktopFilesApi — chat attachments, minimal) ────────
 
