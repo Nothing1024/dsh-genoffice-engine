@@ -13,7 +13,8 @@
  *     anchor, image fill, tables, charts, SmartArt, localStorage style templates
  *   - NOT implemented (explicit `console.warn` + null/default — never silent):
  *     presenter/audience, PDF/image export, print, master view, cloud gen,
- *     clipboard, animations, comments, sections, find-replace, media
+ *     clipboard, animations, comments, sections, find-replace
+ *   - generateImage / analyzeMedia → localhost relay (no browser net egress)
  */
 import type {
   AddChartOp,
@@ -161,9 +162,9 @@ function readAiSettings(): AiSettings {
 
 const RELAY_BASE = '/api'
 
-async function relay<T>(path: string, body?: unknown): Promise<T | null> {
+async function relay<T>(path: string, body?: unknown, timeoutMs = 60_000): Promise<T | null> {
   try {
-    const init: RequestInit = { signal: AbortSignal.timeout(60_000) }
+    const init: RequestInit = { signal: AbortSignal.timeout(timeoutMs) }
     if (body !== undefined) {
       init.method = 'POST'
       init.headers = { 'Content-Type': 'application/json' }
@@ -625,7 +626,10 @@ const slidesApi: SlidesApi = {
     const newId = session.opened.deck.slides[op.slideIndex]?.elements[elIdx]?.id ?? null
     return { slide: rebuilt, sourceId: newId }
   },
-  gskStatus: async () => ({ available: false }),
+  gskStatus: async () => {
+    const res = await relay<{ available: boolean; email?: string }>('/gsk-status')
+    return res ?? { available: false }
+  },
   addSlideWithLayout: async () => notAvailable('addSlideWithLayout'),
 
   editTransform: async (op: EditTransformOp) => {
@@ -1397,8 +1401,30 @@ const slidesApi: SlidesApi = {
     return { images: [], method: 'error' }
   },
 
-  generateImage: async () => ({ error: '网页版暂不支持 Genspark 图片生成' }),
-  analyzeMedia: async () => ({ error: '网页版暂不支持媒体分析' }),
+  generateImage: async (op) => {
+    const res = await relay<{ url?: string; error?: string }>(
+      '/generate-image',
+      {
+        prompt: op.prompt,
+        model: op.model,
+        referenceImageUrls: op.referenceImageUrls,
+        aspectRatio: op.aspectRatio,
+        imageSize: op.imageSize,
+      },
+      600_000,
+    )
+    if (!res) return { error: '图片生成需要本地中继服务（npm run web）且已登录 Genspark' }
+    return res
+  },
+  analyzeMedia: async (op) => {
+    const res = await relay<{ text?: string; error?: string }>(
+      '/analyze-media',
+      { mediaUrls: op.mediaUrls, requirements: op.requirements },
+      600_000,
+    )
+    if (!res) return { error: '媒体分析需要本地中继服务（npm run web）且已登录 Genspark' }
+    return res
+  },
 
   onAiStream: (handler) => {
     aiStreamListeners.add(handler)

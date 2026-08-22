@@ -129,6 +129,8 @@ interface RibbonProps {
   onSave: () => void
   onSaveAs: () => void
   showAi: boolean
+  /** BR-006: control mode hides every AI assistant surface (genoffice-dsh-control) */
+  hideAi?: boolean
   onToggleAi: () => void
   section: SectionSettings | null
   onSection: (next: SectionSettings) => void
@@ -596,6 +598,7 @@ function RibbonInner({
   onSave,
   onSaveAs,
   showAi,
+  hideAi = false,
   onToggleAi,
   section,
   onSection,
@@ -2091,7 +2094,8 @@ function RibbonInner({
           </div>
         ) : tab === 'home' ? (
           <>
-            {/* ---- Genspark AI (first slot: entry + one-click AI actions) ---- */}
+            {/* ---- Genspark AI (first slot: entry + one-click AI actions); BR-006: hidden in control mode ---- */}
+            {!hideAi && (
             <div className="ribbon-group">
               <div className="ribbon-group-items">
                 <button
@@ -2198,6 +2202,7 @@ function RibbonInner({
               </div>
               <div className="ribbon-group-label">Genspark AI</div>
             </div>
+            )}
 
             <div className="ribbon-sep" />
 
@@ -3027,6 +3032,7 @@ function RibbonInner({
             onZoom={onZoom}
             onZoomFit={onZoomFit}
             showAi={showAi}
+            hideAi={hideAi}
             onToggleAi={onToggleAi}
             darkCanvas={darkCanvas}
             onDarkCanvas={onDarkCanvas}

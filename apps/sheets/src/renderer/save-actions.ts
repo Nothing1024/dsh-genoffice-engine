@@ -4,8 +4,16 @@
  * with the two-phase split when structural changes entangle additions.
  * Extracted from App.tsx; the App component passes a SaveContext built fresh
  * per call so refs and state never go stale.
+ *
+ * `buildSavePayload` is the shared assembler — the control-mode export path
+ * (control.ts) uses the same payload so write-back bytes always match what
+ * a normal ⌘S would produce (INV-005).
  */
-import type { WorkbookFile, WorkbookFilterState } from '../shared/desktop-api'
+import type {
+  WorkbookFile,
+  WorkbookFilterState,
+  WorkbookSaveRequest,
+} from '../shared/desktop-api'
 import {
   isSheetRemoved,
   toSaveChartEdits,
@@ -39,21 +47,24 @@ export interface SaveContext {
   openLazyWorkbook: (opened: WorkbookFile) => void
 }
 
+/** Assembled save request plus the split-save bookkeeping (held-back pieces). */
+export interface SavePayloadBundle {
+  payload: Omit<WorkbookSaveRequest, 'mode'>
+  splitSave: boolean
+  heldPivots: ReturnType<typeof toSavePivotAdds>
+  heldTables: ReturnType<typeof toSaveTableAdds>
+  heldNames: ReturnType<typeof collectDefinedNamesState>
+}
+
 /**
- * mode 'recovery': assemble the very same payload but hand it to the
- * crash-recovery writer instead of the save pipeline — no dialogs, no status
- * messages, no session swap, the opened file untouched.
+ * Assemble the saveWorkbookEdits payload from the current journal + Univer
+ * state. Returns null when there is nothing to save (BR-008: no edits →
+ * no write). Throws when the filter snapshot fails (caller surfaces the
+ * localized message).
  */
-export async function handleSave(
-  ctx: SaveContext,
-  mode: 'save' | 'save-as' | 'recovery',
-  quiet = false,
-): Promise<void> {
+export async function buildSavePayload(ctx: SaveContext): Promise<SavePayloadBundle | null> {
   const state = ctx.lazyWorkbookRef.current
-  if (!state) {
-    if (mode !== 'recovery') ctx.setMessage(t('appDemoNoSave'))
-    return
-  }
+  if (!state) return null
   const edits = toSaveEdits(state.editJournal)
   const structuralOps = toSaveStructuralOps(state.editJournal)
   const chartEdits = toSaveChartEdits(state.editJournal)
@@ -63,15 +74,7 @@ export async function handleSave(
   const pivotAdditions = toSavePivotAdds(state.editJournal)
   const sheetOps = toSaveSheetOps(state.editJournal)
   const hyperlinkEdits = toSaveHyperlinkEdits(state.editJournal)
-  let filterStates: WorkbookFilterState[]
-  try {
-    filterStates = collectFilterStates(ctx.univerRef.current, state)
-  } catch (error: unknown) {
-    const failed = error instanceof Error ? error.message : t('appFilterSnapshotFailed')
-    ctx.setMessage(failed)
-    if (mode !== 'recovery' && !quiet) showToast(failed, 'error')
-    return
-  }
+  const filterStates = collectFilterStates(ctx.univerRef.current, state)
   const cfStates = collectCfStates(ctx.univerRef.current, state)
   const dvStates = collectDvStates(ctx.univerRef.current, state)
   const sheetProtections = [...state.editJournal.sheetProtection]
@@ -122,13 +125,7 @@ export async function handleSave(
       ...heldPivots.flatMap((pivot) => [pivot.sheetId, pivot.sourceSheetId]),
       ...heldTables.map((table) => table.sheetId),
     ].some((sheetId) => addedSheetIds.has(sheetId))
-    if (strandedHeld) {
-      if (mode !== 'recovery') {
-        ctx.setMessage(t('appSaveHeldStranded'))
-        if (!quiet) showToast(t('appSaveHeldStranded'), 'error')
-      }
-      return
-    }
+    if (strandedHeld) throw new Error(t('appSaveHeldStranded'))
   }
   const total =
     edits.length +
@@ -148,10 +145,7 @@ export async function handleSave(
     visualEdits.length +
     tableAdditions.length +
     pivotAdditions.length
-  if (total === 0 && mode !== 'save-as') {
-    if (mode !== 'recovery') ctx.setMessage(t('appNoEditsToSave'))
-    return
-  }
+  if (total === 0) return null
   // Sheet ops rebuild workbook.xml's tab list, so the save needs the final
   // on-screen order.
   const sheetOrder =
@@ -162,54 +156,18 @@ export async function handleSave(
           ?.getSheets()
           .map((sheet) => sheet.getSheetId()) ?? [])
   if (sheetOps.length > 0 && sheetOrder.length === 0) {
-    if (mode !== 'recovery') {
-      ctx.setMessage(t('appSheetOrderReadFailed'))
-      if (!quiet) showToast(t('appSheetOrderReadFailed'), 'error')
-    }
-    return
+    throw new Error(t('appSheetOrderReadFailed'))
   }
-  const payload = {
-    sessionId: state.file.sessionId,
-    mode: mode === 'recovery' ? ('save' as const) : mode,
-    edits,
-    structuralOps,
-    chartEdits,
-    visualEdits,
-    visualAdditions,
-    tableAdditions,
-    pivotAdditions,
-    sheetOps,
-    sheetOrder,
-    filterStates,
-    hyperlinkEdits,
-    cfStates,
-    dvStates,
-    pageSetupStates,
-    noteStates,
-    pivotCacheRefreshPaths,
-    pivotRefreshUpdates,
-    sheetProtections,
-    sparklineAdditions: toSaveSparklineAdds(state.editJournal),
-    formulaValues,
-    definedNamesState,
-  }
-  if (mode === 'recovery') {
-    // Best-effort; a failure only means this tick's copy is skipped
-    await window.desktopApi.writeWorkbookRecovery(payload).catch(() => ({ ok: false }))
-    return
-  }
-  try {
-    ctx.setMessage(t('appSavingEdits', { count: total }))
-    const result = await window.desktopApi.saveWorkbookEdits({
+  return {
+    payload: {
       sessionId: state.file.sessionId,
-      mode,
       edits,
       structuralOps,
       chartEdits,
       visualEdits,
       visualAdditions,
-      tableAdditions: splitSave && heldTables.length > 0 ? [] : tableAdditions,
-      pivotAdditions: splitSave && heldPivots.length > 0 ? [] : pivotAdditions,
+      tableAdditions,
+      pivotAdditions,
       sheetOps,
       sheetOrder,
       filterStates,
@@ -223,7 +181,80 @@ export async function handleSave(
       sheetProtections,
       sparklineAdditions: toSaveSparklineAdds(state.editJournal),
       formulaValues,
-      definedNamesState: splitSave ? null : definedNamesState,
+      definedNamesState,
+    },
+    splitSave,
+    heldPivots,
+    heldTables,
+    heldNames,
+  }
+}
+
+/**
+ * mode 'recovery': assemble the very same payload but hand it to the
+ * crash-recovery writer instead of the save pipeline — no dialogs, no status
+ * messages, no session swap, the opened file untouched.
+ */
+export async function handleSave(
+  ctx: SaveContext,
+  mode: 'save' | 'save-as' | 'recovery',
+  quiet = false,
+): Promise<void> {
+  const state = ctx.lazyWorkbookRef.current
+  if (!state) {
+    if (mode !== 'recovery') ctx.setMessage(t('appDemoNoSave'))
+    return
+  }
+  let bundle: SavePayloadBundle | null
+  try {
+    bundle = await buildSavePayload(ctx)
+  } catch (error: unknown) {
+    const failed = error instanceof Error ? error.message : t('appSaveFailed')
+    if (mode !== 'recovery') ctx.setMessage(failed)
+    if (mode !== 'recovery' && !quiet) showToast(failed, 'error')
+    return
+  }
+  if (!bundle) {
+    if (mode !== 'recovery') ctx.setMessage(t('appNoEditsToSave'))
+    return
+  }
+  const { payload, splitSave, heldPivots, heldTables, heldNames } = bundle
+  const total =
+    payload.edits.length +
+    payload.structuralOps.length +
+    payload.chartEdits.length +
+    payload.sheetOps.length +
+    payload.filterStates.length +
+    payload.hyperlinkEdits.length +
+    payload.cfStates.length +
+    payload.dvStates.length +
+    payload.pageSetupStates.length +
+    payload.noteStates.length +
+    payload.pivotCacheRefreshPaths.length +
+    payload.pivotRefreshUpdates.length +
+    payload.sheetProtections.length +
+    payload.visualAdditions.length +
+    payload.visualEdits.length +
+    payload.tableAdditions.length +
+    payload.pivotAdditions.length +
+    payload.sparklineAdditions.length +
+    payload.formulaValues.length +
+    (payload.definedNamesState === null ? 0 : 1)
+  if (mode === 'recovery') {
+    // Best-effort; a failure only means this tick's copy is skipped
+    await window.desktopApi
+      .writeWorkbookRecovery({ ...payload, mode: 'save' })
+      .catch(() => ({ ok: false }))
+    return
+  }
+  try {
+    ctx.setMessage(t('appSavingEdits', { count: total }))
+    const result = await window.desktopApi.saveWorkbookEdits({
+      ...payload,
+      mode,
+      tableAdditions: splitSave && heldTables.length > 0 ? [] : payload.tableAdditions,
+      pivotAdditions: splitSave && heldPivots.length > 0 ? [] : payload.pivotAdditions,
+      definedNamesState: splitSave ? null : payload.definedNamesState,
     })
     if (ctx.lazyWorkbookRef.current !== state) return
     if (result.canceled) {

@@ -2336,7 +2336,7 @@ function DeckProgressCard({ progress }: { progress: DeckProgressSnapshot }) {
 }
 
 /** Survey card: options clickable per question (single/multi), with "decide for me" and "Other (fill in)". */
-function ClarifyCard({
+export function ClarifyCard({
   questions,
   onSubmit,
   onSkip,

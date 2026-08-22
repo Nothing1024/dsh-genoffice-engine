@@ -151,6 +151,7 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
   }
   return (
     <>
+      {!rb.hideAi && (
       <Group label="Genspark AI">
         <button
           className={`rb-big ai-entry${aiOpen ? ' active' : ''}`}
@@ -202,6 +203,7 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
           <span>{t('aiImageBtn')}</span>
         </button>
       </Group>
+      )}
       <div className="ribbon-sep" />
       <Group label={t('ribbonGroupClipboard')}>
         <button

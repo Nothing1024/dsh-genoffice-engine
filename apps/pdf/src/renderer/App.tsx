@@ -6,6 +6,7 @@ import type {
   ReactNode,
   RefObject,
 } from 'react'
+import type { SavePdfRequest } from '../shared/ipc'
 // legacy build: the modern build relies on new APIs like Math.sumPrecise that the current
 // Electron V8 lacks, making embedded font parsing fail and whole pages render as garbled raw char codes
 import { GlobalWorkerOptions, TextLayer, getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
@@ -13,6 +14,7 @@ import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
 import { AiPanel, GensparkMark } from './ai/AiPanel'
 import type { PdfAiDeps } from './ai/tools'
+import { initControlMode, CONTROL_MODE } from './control'
 import {
   MARKUP_COLORS,
   geomDispSize,
@@ -2974,8 +2976,7 @@ export default function App() {
   const aiApi: PdfAiDeps = {
     doc: () => doc,
     fileName: () => fileName,
-    pageCount: () => sizes.length,
-    currentPage: () => (visList[currentPage - 1] ?? 0) + 1,
+    pageCount: () => sizes.length,    currentPage: () => (visList[currentPage - 1] ?? 0) + 1,
     readOnly: () => readOnly,
     outline: () => outline,
     searchIndex: getSearchIndex,
@@ -3078,6 +3079,24 @@ export default function App() {
       }
     },
   }
+
+  // Control-mode adapter (genoffice-dsh-office): registers the executor and
+  // serves tool/context/export over the relay control plane (BR-001/BR-003).
+  // Non-control loads return null — zero side effects (INV-001). The deps and
+  // save-request builders are mirrored through refs so call-time state is
+  // always the latest render's.
+  const aiApiRef = useRef<PdfAiDeps | null>(null)
+  aiApiRef.current = aiApi
+  const buildSaveRequestRef = useRef<(() => SavePdfRequest | null) | null>(null)
+  buildSaveRequestRef.current = () =>
+    filePath ? { path: filePath, ...editsPayload() } : null
+  useEffect(() => {
+    const handle = initControlMode({
+      getDeps: () => aiApiRef.current,
+      getSaveRequest: () => buildSaveRequestRef.current?.() ?? null,
+    })
+    return () => handle?.close()
+  }, [])
 
   /** Internal destination of a Link annotation → jump to that page */
   const goToDest = async (dest: unknown) => {
@@ -3522,6 +3541,7 @@ export default function App() {
           {ribbonTab === 'home' && (
             <>
               {/* ---- Genspark AI (first slot: entry + one-click AI actions, docs parity) ---- */}
+              {!CONTROL_MODE && (
               <div className="ribbon-group">
                 <div className="ribbon-group-items">
                   <button
@@ -3560,6 +3580,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              )}
               <div className="ribbon-sep" />
               {markupGroup}
               <div className="ribbon-sep" />
@@ -3832,7 +3853,10 @@ export default function App() {
       />
       <div className="app-main">
         {/* dock wrapper animates the width between panel and rail (docs-style 180ms ease);
-            the panel stays mounted while collapsed so the chat history survives */}
+            the panel stays mounted while collapsed so the chat history survives.
+            CONTROL_MODE must skip the whole dock — an empty .ai-dock still
+            occupies --ai-panel-width (360px) and leaves a blank column. */}
+        {!CONTROL_MODE && (
         <div className={`ai-dock${aiCollapsed ? ' collapsed' : ''}`}>
           {aiCollapsed && (
             <button
@@ -3845,6 +3869,7 @@ export default function App() {
           )}
           <AiPanel api={aiApi} preset={aiPreset} onCollapse={() => setAiCollapsed(true)} />
         </div>
+        )}
         <div className="app-content">
           <div className="pdf-body">
             {sidebar === 'outline' && outline && (

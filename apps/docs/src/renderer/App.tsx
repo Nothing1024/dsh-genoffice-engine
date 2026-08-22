@@ -129,6 +129,7 @@ import {
   type PendingNumbering,
 } from './doc-state'
 import {
+  buildDocBytes,
   exportPdf as exportPdfImpl,
   loadFile as loadFileImpl,
   newFile as newFileImpl,
@@ -136,6 +137,7 @@ import {
   writeRecoveryCopy as writeRecoveryCopyImpl,
   type FileActionContext,
 } from './file-actions'
+import { initControlMode, CONTROL_MODE, CONTROL_PATH } from './control'
 import {
   allocateListNumId as allocateListNumIdImpl,
   continueNumbering as continueNumberingImpl,
@@ -1092,6 +1094,26 @@ export function App() {
   // editorRef: lets the handlePaste closure (the useEditor config exists before the instance) reach the instance
   useEffect(() => {
     editorRef.current = editor
+  }, [editor])
+
+  // Control mode (genoffice-dsh-control): register the executor with the
+  // relay once the editor exists; non-control loads skip entirely (INV-001).
+  // The exported bytes reuse the save pipeline (buildDocBytes) — the control
+  // path never re-packages from disk (INV-005).
+  useEffect(() => {
+    if (!editor) return
+    const handle = initControlMode({
+      getEditor: () => editorRef.current,
+      exportBytes: async () => {
+        const bytes = await buildDocBytes(fileCtxRef.current)
+        if (!bytes) return null
+        const name =
+          fileCtxRef.current.doc?.fileName ?? CONTROL_PATH?.split('/').pop() ?? 'document.docx'
+        return { bytes, name }
+      },
+    })
+    return () => handle?.close()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- control mode arms once per editor instance
   }, [editor])
 
   /** Pasted list items lacking a numId (schema default null; saving would lose list semantics):
@@ -2686,6 +2708,7 @@ export function App() {
         styles={ribbonStyles}
         docDefaults={doc?.parsed.docDefaults}
         showAi={showAi}
+        hideAi={CONTROL_MODE}
         section={sections[activeSection]?.settings ?? section}
         activeSection={sections.length > 1 ? activeSection : null}
         pageColor={pageColor}
@@ -2722,7 +2745,7 @@ export function App() {
       />
 
       <div className="app-main">
-        {doc && (
+        {doc && !CONTROL_MODE && (
           <div className={`ai-dock${showAi ? '' : ' collapsed'}`}>
             {/* always mounted: collapse must not drop state or in-flight runs */}
             <AiPanel

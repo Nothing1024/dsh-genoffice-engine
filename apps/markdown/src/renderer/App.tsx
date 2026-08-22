@@ -14,6 +14,7 @@ import { buildExtensions } from './editor/extensions'
 import { buildSlashItems } from './editor/slashCommand'
 import type { SlashController, SlashMenuState } from './editor/slashCommand'
 import { setImageBaseDir } from './editor/localImage'
+import { initControlMode, CONTROL_MODE, CONTROL_PATH } from './control'
 import { Ribbon } from './components/Ribbon'
 import { SlashMenu, type SlashMenuHandle } from './components/SlashMenu'
 import { TableMenu } from './components/TableMenu'
@@ -136,6 +137,28 @@ export default function App() {
   })
   editorRef.current = editor
   filePathRef.current = filePath
+
+  // Control mode (genoffice-dsh-control): register the executor with the
+  // relay once the editor exists; non-control loads skip entirely (INV-001).
+  // Export reuses the save serialization (serializeDocText + getMarkdown) —
+  // never a re-parse of the disk file (INV-005).
+  useEffect(() => {
+    if (!editor) return
+    const handle = initControlMode({
+      getEditor: () => editorRef.current,
+      exportBytes: async () => {
+        const current = editorRef.current
+        if (!current || statusRef.current !== 'ready') return null
+        const body = current.getMarkdown()
+        const text = serializeDocText(envelopeRef.current, body)
+        const name =
+          filePathRef.current?.split('/').pop() ?? CONTROL_PATH?.split('/').pop() ?? 'document.md'
+        return { bytes: new TextEncoder().encode(text), name }
+      },
+    })
+    return () => handle?.close()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- control mode arms once per editor instance
+  }, [editor])
 
   useEffect(() => {
     setImageBaseDir(filePath ? dirOf(filePath) : null)
@@ -374,6 +397,7 @@ export default function App() {
         frontmatterOpen={fmOpen}
         onToggleFrontmatter={() => setFmOpen((v) => !v)}
         aiOpen={aiOpen}
+        hideAi={CONTROL_MODE}
         onToggleAi={() => setAiOpen((v) => !v)}
         onAiPreset={(text) => {
           setAiOpen(true)
@@ -382,6 +406,7 @@ export default function App() {
       />
       {status === 'loading' && <div className="center-note">{t('loading')}</div>}
       <div className="app-main" style={status === 'ready' ? undefined : { display: 'none' }}>
+        {!CONTROL_MODE && (
         <div className={`ai-dock${aiOpen ? '' : ' collapsed'}`}>
           {!aiOpen && (
             <button
@@ -402,6 +427,7 @@ export default function App() {
             />
           )}
         </div>
+        )}
         <div className="editor-scroll" ref={scrollRef}>
           <div className="doc-page">
             {fmOpen && <FrontmatterPanel value={fmText} onChange={onFrontmatterChange} />}

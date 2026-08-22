@@ -37,6 +37,7 @@ import {
   type LazyWorkbookState,
   type UniverRuntime,
 } from './univer-state'
+import { initControlMode } from './control'
 import {
   applyAiPivotAdd,
   applyAiTableAdd,
@@ -1165,6 +1166,13 @@ export function App(): React.JSX.Element {
     })
     loadSnapshotIntoUniver(runtime, initialSnapshot, 'new-workbook', 'Untitled')
     univerRef.current = runtime
+    // Control-mode adapter (genoffice-dsh-office): registers the executor and
+    // serves tool/context/export over the relay control plane (BR-001/BR-003).
+    // Non-control loads return null — zero side effects (INV-001).
+    const controlHandle = initControlMode({
+      getDeps: () => (lazyWorkbookRef.current ? sheetsSkillDeps() : null),
+      getSaveContext: () => saveContext(),
+    })
     // live theme switching: main.tsx updates data-theme first (its listener
     // registered at bootstrap), so reading the attribute here is safe; the
     // matchMedia listener covers OS appearance flips while in system mode
@@ -2032,6 +2040,7 @@ export function App(): React.JSX.Element {
     return () => {
       unsubscribeMenu()
       unsubscribeCloseSave()
+      controlHandle?.close()
       offThemeChanged?.()
       prefersDark.removeEventListener('change', applyUniverDark)
       dateTextDisposable.dispose()

@@ -1441,10 +1441,22 @@ export function formatSlideDump(slide: RenderSlide): string {
   return `Canvas ${slide.widthPx}×${slide.heightPx}px\n${parts.join('\n---\n') || '(no elements on this page)'}${colorNote}`
 }
 
-export function createSlidesSkill(access: DeckAccess): AgentSkill {
+/** Module-level cache: persists SkillState across tool calls for the same document path.
+ * Without this, control.ts recreates SkillState on every call and htmlGenerated is always
+ * false — permanently triggering blockScratchBuild on blank decks (BR-015 workaround).
+ */
+const skillStateCache = new Map<string, SkillState>()
+/** Test helper — clears the state cache so test cases don't leak htmlGenerated across runs. */
+export function clearSkillStateCache(): void { skillStateCache.clear() }
+
+
+export function createSlidesSkill(access: DeckAccess, docPath?: string): AgentSkill {
   // The HTML pipeline was already used in this conversation → later calls without an explicit mode default to append.
   // Safety net for when the AI ignores the "pass all pages at once" constraint: separate calls no longer overwrite each other (P0-1).
-  const state: SkillState = { htmlGenerated: false }
+  const cacheKey = docPath ?? ''
+  const existing = cacheKey ? skillStateCache.get(cacheKey) : undefined
+  const state: SkillState = existing ?? { htmlGenerated: false }
+  if (cacheKey && !existing) skillStateCache.set(cacheKey, state)
   return {
     id: 'slides',
     systemPrompt: AGENT_SYSTEM_PROMPT,

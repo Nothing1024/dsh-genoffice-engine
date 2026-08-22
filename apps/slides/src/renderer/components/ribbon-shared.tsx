@@ -271,6 +271,8 @@ export function Group({
 }
 
 export interface Props {
+  /** control mode: hide all AI entries (BR-006) */
+  hideAi?: boolean
   hasDoc: boolean
   /** True when no slide has real content — the one-click AI actions grey out then */
   deckEmpty: boolean
@@ -543,6 +545,7 @@ export interface Props {
 /** Ribbon locals + props handed to the extracted tab components; rebuilt every render. */
 export interface RibbonTabCtx extends Pick<
   Props,
+  | 'hideAi'
   | 'aiOpen'
   | 'brushMode'
   | 'canDistribute'

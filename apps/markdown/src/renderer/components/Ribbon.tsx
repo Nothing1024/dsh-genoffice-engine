@@ -33,6 +33,8 @@ interface Props {
   frontmatterOpen: boolean
   onToggleFrontmatter: () => void
   aiOpen: boolean
+  /** BR-006: control mode hides every AI assistant surface (genoffice-dsh-control) */
+  hideAi?: boolean
   onToggleAi: () => void
   onAiPreset: (instruction: string) => void
 }
@@ -151,6 +153,7 @@ export function Ribbon({
   frontmatterOpen,
   onToggleFrontmatter,
   aiOpen,
+  hideAi = false,
   onToggleAi,
   onAiPreset,
 }: Props) {
@@ -264,6 +267,7 @@ export function Ribbon({
       </div>
 
       <div className="ribbon-body">
+        {!hideAi && (
         <div className="ribbon-group">
           <div className="ribbon-group-items">
             <button
@@ -299,6 +303,7 @@ export function Ribbon({
             ))}
           </div>
         </div>
+        )}
 
         <div className="rb-sep" />
 

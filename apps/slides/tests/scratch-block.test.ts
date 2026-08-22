@@ -1,6 +1,6 @@
 /** Hard guard against "building from scratch by hand": calling add_text_box/add_shape/add_smartart on an empty deck should be refused and redirected to generate_deck. */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createSlidesSkill, type DeckAccess } from '../src/renderer/ai/slides-skill'
+import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest'
+import { createSlidesSkill, clearSkillStateCache, type DeckAccess } from '../src/renderer/ai/slides-skill'
 import type { RenderSlide, PlacedBox, ShapeRenderNode } from '@genoffice/pptx-render'
 import type { AgentToolCall } from '../src/shared/ipc'
 
@@ -91,9 +91,13 @@ const call = (name: string): AgentToolCall => ({
   },
 })
 
+let addElementSpy: MockedFunction<() => Promise<{ slide: RenderSlide; sourceId: string }>>
+
 beforeEach(() => {
+  clearSkillStateCache()
+  addElementSpy = vi.fn(async () => ({ slide: blankDeck, sourceId: 'e1' }))
   ;(window as any).slidesApi = {
-    addElement: vi.fn(async () => ({ slide: blankDeck, sourceId: 'e1' })),
+    addElement: addElementSpy,
     addSmartArt: vi.fn(async () => ({ slide: blankDeck, sourceId: 's1' })),
   }
 })
@@ -139,5 +143,59 @@ describe('anti hand-building from scratch', () => {
     })
     const r = await skill.executeTool!(call('add_text_box'))
     expect(r.isError).toBeUndefined()
+  })
+  it('state persists across createSlidesSkill instances when docPath matches (BR-015)', async () => {
+    const docPath = '/tmp/test-state-persist.pptx'
+    const access = {
+      ...mkAccess([blankDeck]),
+      retryBackoffMs: 0,
+      isCloudPageGenEnabled: async () => true,
+      generatePageCloud: async () => ({ ok: true, marker: 'cloudpptx:/tmp/x.pptx' }),
+    } as unknown as DeckAccess
+
+    // Call 1: generate_deck on skill instance A — sets htmlGenerated=true in cached state
+    const skillA = createSlidesSkill(access, docPath)
+    await skillA.executeTool!({
+      id: 't',
+      name: 'generate_deck',
+      input: {
+        core_hook: 'h',
+        style: 's',
+        pages: [{ title: 'T', brief: 'b', layout: 'data', image_queries: [] }],
+      },
+    })
+
+    // Call 2: add_text_box on a NEW skill instance B (same docPath) — must see htmlGenerated=true
+    const skillB = createSlidesSkill(mkAccess([blankDeck]), docPath)
+    const r = await skillB.executeTool!(call('add_text_box'))
+    expect(r.isError).toBeUndefined()
+    expect(addElementSpy).toHaveBeenCalledOnce()
+  })
+
+  it('state does NOT persist across instances when docPath differs', async () => {
+    const access = {
+      ...mkAccess([blankDeck]),
+      retryBackoffMs: 0,
+      isCloudPageGenEnabled: async () => true,
+      generatePageCloud: async () => ({ ok: true, marker: 'cloudpptx:/tmp/x.pptx' }),
+    } as unknown as DeckAccess
+
+    // generate_deck on path A
+    const skillA = createSlidesSkill(access, '/tmp/doc-a.pptx')
+    await skillA.executeTool!({
+      id: 't',
+      name: 'generate_deck',
+      input: {
+        core_hook: 'h',
+        style: 's',
+        pages: [{ title: 'T', brief: 'b', layout: 'data', image_queries: [] }],
+      },
+    })
+
+    // add_text_box on path B — different doc, fresh state → guard fires
+    const skillB = createSlidesSkill(mkAccess([blankDeck]), '/tmp/doc-b.pptx')
+    const r = await skillB.executeTool!(call('add_text_box'))
+    expect(r.isError).toBe(true)
+    expect(r.output).toContain('generate_deck')
   })
 })

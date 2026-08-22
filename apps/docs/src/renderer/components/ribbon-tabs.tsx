@@ -838,6 +838,8 @@ interface ViewTabProps {
   onZoom: (zoom: number) => void
   onZoomFit: (mode: 'width' | 'page') => void
   showAi: boolean
+  /** BR-006: control mode hides every AI assistant surface (genoffice-dsh-control) */
+  hideAi?: boolean
   onToggleAi: () => void
   darkCanvas: boolean
   onDarkCanvas: (v: boolean) => void
@@ -863,6 +865,7 @@ export function ViewTab({
   onZoom,
   onZoomFit,
   showAi,
+  hideAi = false,
   onToggleAi,
   darkCanvas,
   onDarkCanvas,
@@ -1021,6 +1024,7 @@ export function ViewTab({
 
       <div className="ribbon-group">
         <div className="ribbon-group-items">
+          {!hideAi && (
           <button
             className={`rb-big ${showAi ? 'active' : ''}`}
             title={t('ribbonAiPanelTip')}
@@ -1031,6 +1035,7 @@ export function ViewTab({
             </span>
             <span>{t('ribbonAiPanel')}</span>
           </button>
+          )}
           <button
             className={`rb-big ${darkCanvas ? 'active' : ''}`}
             title={t('ribbonDarkModeTip')}

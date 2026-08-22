@@ -740,6 +740,7 @@ export function Ribbon({
   onZoom,
   showThumbs,
   onToggleThumbs,
+  hideAi = false,
   aiOpen,
   onToggleAi,
   onAiPreset,
@@ -1222,6 +1223,7 @@ export function Ribbon({
   )
 
   const tabCtx: RibbonTabCtx = {
+    hideAi,
     aiOpen,
     brushMode,
     canDistribute,

@@ -54,6 +54,7 @@ npm run web               # 构建（shell + docs + markdown）+ 启动 → http
   Markdown→docx 导出 = 另存对话框 ✅；混合纸张分组合并导出暂不支持 |
 | 附件 | 主进程 fs | 浏览器文件选择/拖放；docx/pptx/xlsx/txt 文本提取在浏览器内完成（PDF 暂不支持） |
 | 主题 / 语言 | app-settings.json | localStorage（跨标签页 storage 事件自动联动） |
+| **控制模式（DSH 原生集成）** | — | `?control=1` 时：隐藏 AI dock/快捷按钮，注册控制执行器；DSH agent 经 relay 控制面驱动编辑器实时编辑，显式写回原文件（见下节） |
 
 ## 本机文件 → 网页版
 
@@ -123,6 +124,36 @@ GENOFFICE_WEB_FILES_ROOT=/srv/genoffice-files node web/server.mjs
 启用后 `GET /api/files?path=<relpath>` 只允许访问该根目录内的文件（`..` 越权返回 403），
 配合 `?open=server:<relpath>` 使用。默认**禁用**，不配置环境变量时该接口不可用。
 
+## 控制模式（DSH 原生集成，genoffice-dsh-control）
+
+`/docs/` 与 `/markdown/` 支持 `?control=1` 查询参数进入**控制模式**：DSH agent 通过
+`docx_*` / `markdown_*` 工具（16 个，注册于 DSH 插件侧）经 relay 控制面驱动页面内编辑器
+实时执行块级编辑，并可显式写回原文件。控制模式下页面内嵌 AI 助手整体隐藏（AI 大脑归
+DSH）。不带 `control=1` 时行为与普通网页版完全一致（INV-001）。
+
+控制面端点（全部 loopback-only，详见栈契约 `contracts/control-api.md`）：
+
+| 端点 | 用途 |
+|---|---|
+| `GET /api/control/stream?docId=<sha256(绝对路径)>` | SSE 下行：`hello` 注册确认 / `ping` 保活 / `tool` / `context` / `export` |
+| `POST /api/control/notify` | 上行：工具结果 / 上下文 / 导出字节回传 |
+| `POST /api/control/<app>/<docId>/context` | 文档上下文（块索引/预览/选区） |
+| `POST /api/control/<app>/<docId>/tool` | 工具调用（`{call:{id,name,input}}`）→ `{ok, execution}` |
+| `POST /api/control/<app>/<docId>/export` | 触发导出并原子写回原路径 |
+| `POST /api/file` | 写回（`{path, base64, expectedMtimeMs?}`；tmp+rename；mtime 冲突拒绝） |
+
+实现位于：
+
+- `web/server.mjs` — 控制面（执行器注册表、SSE、notify、context/tool/export、写回）；
+- `apps/{docs,markdown}/src/renderer/control.ts` — 控制适配器（`control=1` 解析、注册/注销、
+  事件处理、导出复用保存管线）；
+- `apps/{docs,markdown}/src/renderer/App.tsx` + `components/Ribbon.tsx` — 控制模式下条件渲染
+  隐藏 AI dock / Genspark AI 按钮 / AI 快捷按钮（`hideAi` prop）。
+
+写回安全：`POST /api/file` 仅 loopback 来源（伪造 Host → 403）；编辑工具只改页面内状态，
+写回仅由显式动作（`*_save` 工具 / 插件 tab「写入磁盘」按钮）触发；`expectedMtimeMs` 与磁盘
+不一致时拒绝写回（外部修改冲突保护，原文件不变）。
+
 ## AI（BYOK）配置
 
 网页版不使用 Genspark 账号登录（设备码 + Cloudflare 会话只能在服务端跑）。改为自带
@@ -138,7 +169,7 @@ Base URL）→ 保存。密钥只存本浏览器 localStorage，请求由浏览�
 
 `web/server.mjs` 零依赖（Node ≥ 22 内置 fetch），同时负责静态托管与浏览器做不了的
 能力。不启动它，编辑器本身（含本地文件、AI 直连）仍完全可用，仅联网搜索/图片搜索/图片
-抓取会提示"需要中继服务"。
+抓取/Genspark 生图与媒体分析会提示"需要中继服务"。
 
 ## 如何为其他 app 做 Web 化
 

@@ -13,6 +13,9 @@
  *   POST /api/search/web      { query, maxResults } → DuckDuckGo results
  *   POST /api/search/image    { query, maxResults } → Bing image results
  *   POST /api/fetch-image     { url }               → { base64, mime }
+ *   POST /api/generate-image  { prompt, ... }       → { url } via Genspark gsk (no browser egress)
+ *   POST /api/analyze-media   { mediaUrls, requirements } → { text } via Genspark gsk
+ *   GET  /api/gsk-status      → { available, email? }
  *   GET  /api/fetch-file?url= { url }               → remote file bytes (CORS-free)
  *   GET  /api/files?path=     { path }              → file from GENOFFICE_WEB_FILES_ROOT
  *                                                     (only enabled when the env var is set;
@@ -22,8 +25,9 @@
  *         node web/server.mjs    (serve only, expects web-dist to exist)
  */
 import { createServer } from 'node:http'
+import { execFile } from 'node:child_process'
 import { readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { extname, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
@@ -231,6 +235,230 @@ async function readJson(req) {
   const raw = Buffer.concat(chunks).toString('utf8')
   if (!raw) return {}
   return JSON.parse(raw)
+}
+
+// ── Genspark (gsk) via CLI or tool_cli HTTP — browser never dials genspark.ai ──
+
+const GSK_TOOL_CLI_BASE = 'https://www.genspark.ai/api/tool_cli'
+const GSK_GENERATE_TIMEOUT_MS = 600_000
+const GSK_DOWNLOAD_TIMEOUT_MS = 60_000
+
+function asRecord(v) {
+  return typeof v === 'object' && v !== null ? v : {}
+}
+
+function firstItem(v) {
+  return Array.isArray(v) ? v[0] : undefined
+}
+
+function gskApiKey() {
+  if (process.env.GSK_API_KEY) return process.env.GSK_API_KEY
+  try {
+    const configPath = join(homedir(), '.genspark-tool-cli', 'config.json')
+    if (!existsSync(configPath)) return ''
+    const config = JSON.parse(readFileSync(configPath, 'utf8'))
+    return config.api_key ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function resolveGskEntry() {
+  if (process.env.GSK_CLI_PATH) return process.env.GSK_CLI_PATH
+  const packed = join(ROOT, 'node_modules/@genspark/cli/dist/index.js')
+  return existsSync(packed) ? packed : null
+}
+
+function parseGskOutput(stdout) {
+  const trimmed = String(stdout).trim()
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    /* fall through */
+  }
+  const lines = trimmed.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (line.startsWith('{') || line.startsWith('[')) {
+      try {
+        return JSON.parse(lines.slice(i).join('\n'))
+      } catch {
+        continue
+      }
+    }
+  }
+  throw new Error(`No JSON found in gsk output: ${trimmed.slice(0, 300)}`)
+}
+
+function parseToolCliNdjson(text) {
+  const lines = String(text).trim().split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (!line.startsWith('{')) continue
+    try {
+      const obj = JSON.parse(line)
+      if (obj && typeof obj === 'object' && 'status' in obj) return obj
+    } catch {
+      continue
+    }
+  }
+  throw new Error(`No result line in tool_cli response: ${String(text).slice(0, 300)}`)
+}
+
+function parseGskGeneratedImage(raw) {
+  const data = asRecord(asRecord(raw).data ?? raw)
+  const img = asRecord(firstItem(data.generated_images ?? data.images ?? []))
+  const url = firstItem(img.image_urls_nowatermark) ?? firstItem(img.image_urls) ?? img.url ?? ''
+  if (!url) {
+    throw new Error(`gsk image generation returned no result: ${JSON.stringify(raw).slice(0, 200)}`)
+  }
+  return { url: String(url), taskId: String(img.task_id ?? '') }
+}
+
+function extractGskText(raw) {
+  const data = asRecord(raw).data ?? raw
+  if (typeof data === 'string') return data
+  if (data && typeof data === 'object') {
+    for (const key of ['analysis', 'analysis_result', 'result', 'content', 'text', 'answer', 'transcript']) {
+      const v = data[key]
+      if (typeof v === 'string' && v.trim()) return v
+    }
+  }
+  return JSON.stringify(data ?? raw)
+}
+
+function runGsk(args, timeoutMs) {
+  const entry = resolveGskEntry()
+  const key = gskApiKey()
+  if (!entry) return Promise.reject(new Error('@genspark/cli is not installed'))
+  if (!key) return Promise.reject(new Error('Genspark 未登录（设置 GSK_API_KEY 或运行 gsk login）'))
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [entry, ...args, '--output', 'json'],
+      {
+        timeout: timeoutMs,
+        maxBuffer: 32 * 1024 * 1024,
+        env: { ...process.env, GSK_API_KEY: key, ELECTRON_RUN_AS_NODE: '1' },
+      },
+      (err, stdout, stderr) => {
+        if (err) {
+          const errText = (stderr || '').toString().trim().slice(0, 500)
+          reject(errText ? new Error(`${err.message} | stderr: ${errText}`) : err)
+          return
+        }
+        try {
+          const result = parseGskOutput(String(stdout))
+          const rec = asRecord(result)
+          if (rec.status && rec.status !== 'ok') {
+            reject(new Error(`gsk returned an error: ${rec.message ?? rec.status}`))
+            return
+          }
+          resolve(result)
+        } catch (parseErr) {
+          reject(parseErr)
+        }
+      },
+    )
+  })
+}
+
+async function toolCliPost(path, body, timeoutMs) {
+  const key = gskApiKey()
+  if (!key) throw new Error('Genspark 未登录（设置 GSK_API_KEY 或运行 gsk login）')
+  const resp = await fetch(`${GSK_TOOL_CLI_BASE}${path}`, {
+    method: 'POST',
+    headers: {
+      'X-Api-Key': key,
+      'Content-Type': 'application/json',
+      'X-Agent-Type': 'genoffice',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  const text = await resp.text()
+  if (!resp.ok) throw new Error(`tool_cli ${path} HTTP ${resp.status}: ${text.slice(0, 200)}`)
+  const result = parseToolCliNdjson(text)
+  if (result.status !== 'ok') {
+    throw new Error(`tool_cli ${path} failed: ${result.message ?? result.status}`)
+  }
+  return result.data
+}
+
+async function gskResolveDownloadUrl(url) {
+  if (!url.includes('/api/files/')) return url
+  try {
+    if (resolveGskEntry()) {
+      const raw = asRecord(await runGsk(['download', url], GSK_DOWNLOAD_TIMEOUT_MS))
+      const downloadUrl = asRecord(raw.data).download_url ?? raw.download_url
+      return downloadUrl ? String(downloadUrl) : url
+    }
+    const dl = asRecord(await toolCliPost('/file/download', { file_wrapper_url: url }, GSK_DOWNLOAD_TIMEOUT_MS))
+    return dl.download_url ? String(dl.download_url) : url
+  } catch {
+    return url
+  }
+}
+
+async function generateImageViaGsk(op) {
+  const prompt = String(op?.prompt ?? '').trim()
+  if (!prompt) return { error: 'prompt must not be empty' }
+  if (!gskApiKey()) {
+    return { error: 'Genspark 未登录（设置 GSK_API_KEY 或运行 gsk login）' }
+  }
+  try {
+    let raw
+    if (resolveGskEntry()) {
+      const args = ['img', prompt]
+      if (op.model) args.push('-m', String(op.model))
+      if (Array.isArray(op.referenceImageUrls) && op.referenceImageUrls.length) {
+        args.push('--image_urls', ...op.referenceImageUrls.map(String))
+      }
+      if (op.aspectRatio) args.push('--aspect_ratio', String(op.aspectRatio))
+      if (op.imageSize) args.push('--image_size', String(op.imageSize))
+      raw = await runGsk(args, GSK_GENERATE_TIMEOUT_MS)
+    } else {
+      const body = { prompt }
+      if (op.model) body.model = String(op.model)
+      if (Array.isArray(op.referenceImageUrls) && op.referenceImageUrls.length) {
+        body.image_urls = op.referenceImageUrls.map(String)
+      }
+      if (op.aspectRatio) body.aspect_ratio = String(op.aspectRatio)
+      if (op.imageSize) body.image_size = String(op.imageSize)
+      raw = { data: await toolCliPost('/img', body, GSK_GENERATE_TIMEOUT_MS) }
+    }
+    const result = parseGskGeneratedImage(raw)
+    result.url = await gskResolveDownloadUrl(result.url)
+    return { url: result.url }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+async function analyzeMediaViaGsk(op) {
+  const mediaUrls = Array.isArray(op?.mediaUrls) ? op.mediaUrls.map(String).filter(Boolean) : []
+  const requirements = String(op?.requirements ?? '').trim()
+  if (!mediaUrls.length) return { error: 'mediaUrls must not be empty' }
+  if (!requirements) return { error: 'requirements must not be empty' }
+  if (!gskApiKey()) {
+    return { error: 'Genspark 未登录（设置 GSK_API_KEY 或运行 gsk login）' }
+  }
+  try {
+    let raw
+    if (resolveGskEntry()) {
+      raw = await runGsk(
+        ['media-analyze', '--media_urls', ...mediaUrls, '--requirements', requirements],
+        GSK_GENERATE_TIMEOUT_MS,
+      )
+    } else {
+      raw = { data: await toolCliPost('/media-analyze', { media_urls: mediaUrls, requirements }, GSK_GENERATE_TIMEOUT_MS) }
+    }
+    const text = extractGskText(raw)
+    if (!text) return { error: 'Analysis failed' }
+    return { text }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 // ── search backends ─────────────────────────────────────────────
@@ -808,6 +1036,18 @@ async function handleApi(req, res, pathname, body, url) {
     } catch (e) {
       return json(res, 200, { error: e.message })
     }
+  }
+
+  if (req.method === 'GET' && pathname === '/api/gsk-status') {
+    return json(res, 200, { available: !!gskApiKey() })
+  }
+
+  if (req.method === 'POST' && pathname === '/api/generate-image') {
+    return json(res, 200, await generateImageViaGsk(body))
+  }
+
+  if (req.method === 'POST' && pathname === '/api/analyze-media') {
+    return json(res, 200, await analyzeMediaViaGsk(body))
   }
 
   if (req.method === 'GET' && pathname === '/api/open/stream') {
