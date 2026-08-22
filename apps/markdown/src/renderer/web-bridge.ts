@@ -7,7 +7,6 @@
  * so files opened on the home screen / in docs show up here and vice versa.
  */
 import {
-  AI_PROVIDERS,
   defaultAiSettings,
   resolveAiSettings,
   streamForProvider,
@@ -434,6 +433,8 @@ const markdownApi: MarkdownApi = {
   readImage: async (): Promise<ImageData | null> => null,
 
   onExportRequest: () => () => {},
+  onPrintRequest: () => () => {},
+  onChromePressed: () => () => {},
 
   exportDocx: async (request: ExportDocxRequest): Promise<ExportResult> => {
     const bytes = Uint8Array.from(atob(request.base64), (c) => c.charCodeAt(0))
@@ -542,10 +543,12 @@ const markdownApi: MarkdownApi = {
         error?: string
       }
       if (data.method === 'error') throw new Error(data.error ?? 'search failed')
-      return { results: data.results }
+      return { results: data.results, method: data.method }
     } catch (e) {
       return {
         results: [],
+        method: 'error',
+        error: e instanceof Error ? e.message : String(e),
         answer: `联网搜索不可用（需要本地中继服务）：${e instanceof Error ? e.message : String(e)}`,
       }
     }
@@ -732,5 +735,3 @@ if (typeof window !== 'undefined') {
   window.projectApi = projectApi
   installFileDrop()
 }
-
-export const WEB_PROVIDERS = AI_PROVIDERS

@@ -549,8 +549,25 @@ export function webEditBackground(
   const slides = session.opened.deck.slides
   const targets = op.slideIndex === -1 ? slides : [slides[op.slideIndex]].filter(Boolean)
   if (targets.length === 0) return null
+  if (op.kind !== 'solid' && op.kind !== 'gradient') {
+    console.warn(`[web-slides] background kind "${op.kind}" is not available in the web version`)
+    return null
+  }
   pushHistory(session)
-  for (const s of targets) setSlideBackground(s!, op.color)
+  for (const s of targets) {
+    if (op.kind === 'solid') {
+      setSlideBackground(session.opened, s!, op.color)
+    } else {
+      setSlideBackground(session.opened, s!, {
+        stops: [
+          { pos: 0, color: op.from },
+          { pos: 100000, color: op.to },
+        ],
+        angle: op.angleDeg,
+        radial: op.radial,
+      })
+    }
+  }
   session.fitWidthPx = op.fitWidthPx
   return buildAllRenderSlides(session.opened, op.fitWidthPx)
 }

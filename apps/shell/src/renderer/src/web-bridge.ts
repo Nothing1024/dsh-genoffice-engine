@@ -15,6 +15,7 @@
  *
  * This file is only included by the web build (vite.web.config.ts).
  */
+import { defaultAiSettings } from '@genoffice/ai-provider'
 import type { AccountLoginEvent, AccountStatus, CloudProjectsSnapshot, HomeApi, ProjectHomeApi, ProjectSummaryEntry, RecentEntry, RecentPage, RecentQuery, RenameResult, TimelineEntryItem, UiLanguage, UiTheme } from '../../shared/home-api'
 import type { TabsApi, TabSummary } from '../../shared/tabs-api'
 
@@ -292,6 +293,7 @@ const aiOffice: HomeApi = {
   newSheet: async () => notifyUnsupported('xlsx'),
   newSlide: async () => notifyUnsupported('pptx'),
   newMarkdown: async () => openWebApp('markdown'),
+  newPdf: async () => notifyUnsupported('pdf'),
 
   removeRecent: async (paths) => {
     for (const path of paths) await idbDelete(STORE_HANDLES, path)
@@ -391,12 +393,16 @@ const aiOffice: HomeApi = {
   getAppVersion: async () => '0.1.0-web',
 
   onboardingSeen: async () => true,
-  setOnboardingSeen: async () => {},
+  setOnboardingSeen: async () => true,
 
   getTheme: async () => readTheme(),
   setTheme: async (theme) => {
     localStorage.setItem(THEME_KEY, theme)
   },
+  getAnalyticsEnabled: async () => false,
+  setAnalyticsEnabled: async () => false,
+  getDefaultSaveDir: async () => '',
+  pickDefaultSaveDir: async () => null,
   onThemeChanged: (handler) => {
     themeListeners.add(handler)
     return () => themeListeners.delete(handler)
@@ -405,12 +411,31 @@ const aiOffice: HomeApi = {
   openGenTeam: async () => {
     window.open('https://genteam.ai', '_blank', 'noopener')
   },
+  openCreditUsage: async () => {
+    console.warn('[web-shell] openCreditUsage is not available in the web version')
+  },
+  openGitHubRepo: async () => {
+    window.open('https://github.com/genspark-ai/genoffice', '_blank', 'noopener')
+  },
+  githubStars: async () => null,
+  starPromptShouldShow: async () => ({ show: false, docOpens: 0 }),
+  starPromptAction: async () => {},
 
   cloudProjectsCached: async (): Promise<CloudProjectsSnapshot | null> => null,
   cloudProjectsSync: async (): Promise<CloudProjectsSnapshot | null> => null,
   openCloudProject: async (projectUrl) => {
     window.open(`https://www.genspark.ai${projectUrl}`, '_blank', 'noopener')
   },
+
+  getAiSettings: async () => defaultAiSettings(),
+  setAiSettings: async () => {
+    console.warn('[web-shell] setAiSettings is not wired in the web version')
+  },
+  getAiProviders: () => [],
+  testAiSettings: async () => ({
+    ok: false,
+    error: 'AI settings are not available in the web version',
+  }),
 }
 
 // theme sync across tabs (storage events fire in other same-origin tabs)
@@ -498,6 +523,8 @@ const aiOfficeTabs: TabsApi = {
   showNewMenu: async () => {},
   reorder: async () => {},
   onChanged: () => () => {},
+  notifyChromePressed: () => {},
+  onChromePressed: () => () => {},
 }
 
 // ────────────────────────────────────────────────────────────

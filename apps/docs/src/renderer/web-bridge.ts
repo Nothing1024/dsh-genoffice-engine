@@ -6,16 +6,14 @@
  *
  *   - open/save documents  → File System Access API (fallback: <input>/download)
  *   - recent files, recovery copies, chat history → IndexedDB
- *   - theme / language / AI settings → localStorage
- *   - AI streaming → @genoffice/ai-provider runs directly in the browser
- *     (BYOK providers; Genspark login needs the desktop app / relay server)
+ *   - theme / language / AI settings → localStorage (inert INV-001 fallback;
+ *     control=1 uses the DSH agent, not in-browser BYOK)
  *   - web/image search, image fetch → optional local relay server (web/server.mjs)
  *
  * This file is only included by the web build (vite.web.config.ts); the desktop
  * build never sees it.
  */
 import {
-  AI_PROVIDERS,
   chatForProvider,
   defaultAiSettings,
   resolveAiSettings,
@@ -24,8 +22,6 @@ import {
 import type {
   AiChatRequest,
   AiChatResponse,
-  AiProviderConfig,
-  AiProviderId,
   AiSettings,
   AiStreamChunk,
   AiStreamRequest,
@@ -503,6 +499,8 @@ const desktop: DesktopApi = {
     return () => window.removeEventListener('storage', handler as never)
   },
 
+  onChromePressed: () => () => {},
+
   openDocx: async () => {
     if (typeof window.showOpenFilePicker === 'function') {
       try {
@@ -535,6 +533,20 @@ const desktop: DesktopApi = {
     if (rec) await persistRecord(path, { ...rec, accessedAt: Date.now() })
     return { path, name: opened.name, data: opened.data, hash: await sha256Hex(opened.data) }
   },
+
+  openDocxDecrypt: async () => {
+    console.warn('[web-docs] openDocxDecrypt is not supported in the web version')
+    return { ok: false as const, reason: 'unsupported' as const, error: '网页版不支持打开加密文档' }
+  },
+
+  setDocPassword: async () => {
+    console.warn('[web-docs] setDocPassword is not supported in the web version')
+    return { ok: false }
+  },
+
+  docPasswordIntentRevision: async () => 0,
+
+  discardDocPasswordIntents: async () => ({ ok: true }),
 
   consumePendingOpenDocx: async () => {
     return await consumePendingOpenDocxImpl()
@@ -659,6 +671,8 @@ const desktop: DesktopApi = {
     return { base64: await fileToBase64(file), mime, name: file.name }
   },
 
+  fontMetrics: async () => null,
+
   getAiSettings: async () => readAiSettings(),
   setAiSettings: async (settings) => {
     localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(settings))
@@ -666,6 +680,7 @@ const desktop: DesktopApi = {
 
   print: async () => {
     window.print()
+    return { ok: true }
   },
 
   exportPdf: async () => {
@@ -1048,7 +1063,9 @@ async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; nam
 async function openTarget(target: string): Promise<OpenFileResult | null> {
   // synthetic id → local file (handle/bytes in IndexedDB)
   if (target.startsWith('/webdoc/')) {
-    return await desktop.openDocxPath(target)
+    const result = await desktop.openDocxPath(target)
+    if (!result || 'needsPassword' in result) return null
+    return result
   }
   // remote / data: / server: → pull bytes through the relay and open as a
   // local (bytes) document
@@ -1193,7 +1210,3 @@ if (typeof window !== 'undefined') {
   window.projectApi = projectApi
   installFileDrop()
 }
-
-// make AI_PROVIDERS metadata reachable for the web settings UI
-export const WEB_PROVIDERS = AI_PROVIDERS
-export type { AiProviderConfig, AiProviderId }

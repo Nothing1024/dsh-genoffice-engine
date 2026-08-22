@@ -207,7 +207,10 @@ const pdfApi: PdfApi = {
     return renderPagePreviewPng(opened.bytes, request)
   },
 
-  extractPages: async () => ({ ok: true, canceled: true }),
+  extractPages: async () => {
+    console.warn('[web-pdf] extractPages is not supported in the web version')
+    return { ok: false as const, error: 'extractPages is not supported in the web version' }
+  },
 
   insertPdf: async () => ({ ok: true, canceled: true }),
 
@@ -269,6 +272,7 @@ const pdfApi: PdfApi = {
     error: 'cropPages is not supported in the web version',
   }),
   convertOffice: async () => {
+    console.warn('[web-pdf] convertOffice is not supported in the web version')
     throw new Error('PDF conversion to Word/Excel/PowerPoint is not supported in the web version')
   },
   listSavedSignatures: async () => [],

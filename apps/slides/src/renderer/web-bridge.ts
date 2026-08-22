@@ -218,6 +218,7 @@ const menuListeners = new Set<(command: MenuCommand) => void>()
 const closeSaveListeners = new Set<() => void>()
 const aiStreamListeners = new Set<(chunk: AiStreamChunk) => void>()
 const themeListeners = new Set<(theme: UiTheme) => void>()
+const historyChangedListeners = new Set<(state: { canUndo: boolean; canRedo: boolean }) => void>()
 
 // ── explicit not-available stub (防呆: never silent) ────────────────────
 
@@ -474,6 +475,12 @@ const slidesApi: SlidesApi = {
     themeListeners.add(handler)
     return () => themeListeners.delete(handler)
   },
+  onChromePressed: () => () => {},
+  setShowFullScreen: async () => {
+    console.warn('[web-slides] setShowFullScreen is not available in the web version')
+  },
+  privateFontFaces: async () => [],
+  privateFontData: async () => null,
 
   openPptx: async (fitWidthPx) => {
     const target = openPathFromUrl()
@@ -515,6 +522,10 @@ const slidesApi: SlidesApi = {
   cloudGenStatus: async () => ({ enabled: false }),
 
   cloudGeneratePage: async () => ({ ok: false, error: '网页版暂不支持云端生成' }),
+  localGeneratePage: async () => {
+    console.warn('[web-slides] localGeneratePage is not available in the web version')
+    return { ok: false, error: '网页版暂不支持本地单页生成' }
+  },
 
   editText: async (op: EditTextOp) => {
     const session = getWebSession()
@@ -608,6 +619,12 @@ const slidesApi: SlidesApi = {
     endHistoryBatch(session)
     return null
   },
+  applyEditScript: async () => notAvailable('applyEditScript'),
+  applyTxn: async () => notAvailable('applyTxn'),
+  onHistoryChanged: (handler) => {
+    historyChangedListeners.add(handler)
+    return () => historyChangedListeners.delete(handler)
+  },
   aiSnapshotRestore: async () => notAvailable('aiSnapshotRestore'),
   editTableStyle: async (op: EditTableStyleOp) => {
     const session = getWebSession()
@@ -699,15 +716,36 @@ const slidesApi: SlidesApi = {
     if (!session) return null
     const slide = session.opened.deck.slides[op.slideIndex]
     if (!slide) return null
-    const picked = await pickImageFile()
-    if (!picked) return null
+    let bytes: Uint8Array
+    let ext: string
+    if (op.source) {
+      bytes = Uint8Array.from(atob(op.source.base64), (c) => c.charCodeAt(0))
+      ext = op.source.ext
+    } else {
+      const picked = await pickImageFile()
+      if (!picked) return null
+      bytes = picked.bytes
+      ext = picked.ext
+    }
     pushHistory(session)
-    if (!setElementImageFill(session.opened, slide, op.sourceId, picked.bytes, picked.ext)) {
-      session.undoStack.pop()
-      return null
+    const tile = op.mode === 'tile'
+    let mediaPath: string | null = null
+    for (const target of op.targets) {
+      const source = mediaPath ? { mediaPath } : { bytes, ext }
+      const landed = setElementImageFill(session.opened, slide, target.sourceId, source, {
+        tile,
+        ...(target.groupId ? { groupId: target.groupId } : {}),
+      })
+      if (!landed) {
+        session.undoStack.pop()
+        return null
+      }
+      mediaPath = landed
     }
     return rebuildSlide(session, op.slideIndex)
   },
+  changeShape: async () => notAvailable('changeShape'),
+  setShapeAdjust: async () => notAvailable('setShapeAdjust'),
   setTextAnchor: async (op) => {
     const session = getWebSession()
     if (!session) return null
