@@ -15,10 +15,11 @@ describe('docThemeCss', () => {
     expect(css).toContain('.doc-page h1')
   })
 
-  it('emits the accent color for headings and the ribbon accent variable', () => {
+  it('exposes the ribbon accent without coloring headings that do not declare a color', () => {
     const css = docThemeCss(null, { accent1: '90C226' })
     expect(css).toContain('--theme-accent:#90C226')
-    expect(css).toContain('color:#90C226')
+    expect(css).not.toContain('color:#90C226')
+    expect(css).not.toContain('.doc-page h1')
   })
 
   it('is empty without a theme, so document CSS stays authoritative', () => {
@@ -51,30 +52,30 @@ describe('docLineFactor — CJK factor source', () => {
 
   it("Normal's declared EA face wins over docDefaults", () => {
     const parsed = parsedWith({ font: 'Noto Sans KR', fontAscii: 'Calibri' }, 'SimSun')
-    expect(docLineFactor(parsed, true)).toBe(1.3)
+    expect(docLineFactor(parsed, true)).toBe(1.3029)
   })
 
   it('a Latin-only Normal (font === fontAscii) does not override the docDefaults EA font', () => {
     const parsed = parsedWith({ font: 'Calibri', fontAscii: 'Calibri' }, 'SimSun')
-    expect(docLineFactor(parsed, true)).toBe(1.3)
+    expect(docLineFactor(parsed, true)).toBe(1.3029)
   })
 
   it('falls back to the SimSun-class factor without any declared EA font', () => {
-    expect(docLineFactor(parsedWith(undefined), true)).toBe(1.3)
+    expect(docLineFactor(parsedWith(undefined), true)).toBe(1.3029)
   })
 
   it('a same-slot Korean Normal (Malgun in both slots) still wins for the kr factor', () => {
     ;(globalThis as { CSS?: unknown }).CSS ??= { escape: (s: string) => s }
     const parsed = parsedWith({ font: 'Malgun Gothic', fontAscii: 'Malgun Gothic' }, 'Batang')
-    expect(docStyleCss(parsed)).toContain('--doc-line-factor-kr:1.73')
-    expect(docLineFactor(parsed, true)).toBe(1.73)
+    expect(docStyleCss(parsed)).toContain('--doc-line-factor-kr:1.7371')
+    expect(docLineFactor(parsed, true)).toBe(1.7371)
   })
 
   it('kr factor skips a Latin-only Normal and reads the docDefaults EA font', () => {
     // node test env has no CSS.escape
     ;(globalThis as { CSS?: unknown }).CSS ??= { escape: (s: string) => s }
     const parsed = parsedWith({ font: 'Calibri', fontAscii: 'Calibri' }, 'Malgun Gothic')
-    expect(docStyleCss(parsed)).toContain('--doc-line-factor-kr:1.73')
+    expect(docStyleCss(parsed)).toContain('--doc-line-factor-kr:1.7371')
   })
 })
 
@@ -96,6 +97,32 @@ describe('docStyleCss — paragraph spacing fallback', () => {
     const rule = blockRule(docStyleCss(parsedWith({ spaceAfterTwips: 200, spaceBeforeTwips: 40 })))
     expect(rule).toContain('margin-top:2.0pt')
     expect(rule).toContain('margin-bottom:10.0pt')
+  })
+})
+
+describe('docStyleCss — typed line grid', () => {
+  const parsedWithSectPr = (sectPr: string): ParsedDocFull => {
+    ;(globalThis as { CSS?: unknown }).CSS ??= { escape: (s: string) => s }
+    return {
+      styles: new Map(),
+      docDefaults: {},
+      blocks: [{ docxIndex: 0, originalXml: `<w:p><w:pPr>${sectPr}</w:pPr></w:p>` }],
+    } as unknown as ParsedDocFull
+  }
+
+  it('declares --doc-line-grid per element for uniform typed grids', () => {
+    const css = docStyleCss(
+      parsedWithSectPr('<w:sectPr><w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>'),
+    )
+    expect(css).toContain(
+      '.doc-page, .doc-page * { --doc-line-grid:round(up, calc(var(--doc-line-factor,1.2) * 1em - var(--doc-grid-pitch,0.0001px) * 0.001), var(--doc-grid-pitch,0.0001px)) }',
+    )
+  })
+
+  it('grid-less docs get no --doc-line-grid declaration, so line heights stay unitless', () => {
+    const css = docStyleCss(parsedWithSectPr('<w:sectPr></w:sectPr>'))
+    expect(css).not.toContain('--doc-line-grid:')
+    expect(css).toContain('line-height:var(--doc-line-grid,var(--doc-line-factor,1.2))')
   })
 })
 

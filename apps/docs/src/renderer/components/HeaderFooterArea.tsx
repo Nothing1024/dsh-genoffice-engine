@@ -7,7 +7,7 @@ import {
   type Run,
 } from '@genoffice/docx-engine'
 import { useI18n } from '../i18n/locale'
-import { hfUsesLegacyHash } from '../editor/hf-dom'
+import { hfTabSegments, hfUsesLegacyHash, paraBorderCss } from '../editor/hf-dom'
 import { cssDualFontFamily, cssFontFamily } from '../line-metrics'
 
 export interface HfValue {
@@ -30,6 +30,32 @@ function runStyle(run: Run): React.CSSProperties {
   if (run.sizeHalfPoints) style.fontSize = `${run.sizeHalfPoints / 2}pt`
   if (run.font && run.fontAscii) style.fontFamily = cssDualFontFamily(run.fontAscii, run.font)
   else if (run.font || run.fontAscii) style.fontFamily = cssFontFamily((run.font ?? run.fontAscii)!)
+  if (run.caps === 'all') style.textTransform = 'uppercase'
+  else if (run.caps === 'small') style.fontVariantCaps = 'small-caps'
+  return style
+}
+
+/** document content colors (w:shd / w:pBdr), theme-independent; mirrors makeGapHfEl */
+function paraStyle(para: HfParagraph): React.CSSProperties {
+  const style: React.CSSProperties = {}
+  if (para.bidi) style.direction = 'rtl'
+  if (para.align) {
+    style.textAlign =
+      para.align === 'left' || para.align === 'center' || para.align === 'right'
+        ? para.align
+        : 'justify'
+  }
+  // frame placement wins over the paragraph's own jc (mirrors makeGapHfEl)
+  if (para.frameXAlign) style.textAlign = para.frameXAlign
+  if (para.shadingFill) style.backgroundColor = `#${para.shadingFill}`
+  if (para.borders) {
+    const line = (side: 't' | 'b' | 'l' | 'r') => paraBorderCss(para.borderLines?.[side])
+    if (para.borders.includes('t')) style.borderTop = line('t')
+    if (para.borders.includes('b')) style.borderBottom = line('b')
+    if (para.borders.includes('l')) style.borderLeft = line('l')
+    if (para.borders.includes('r')) style.borderRight = line('r')
+    style.padding = '1px 4px'
+  }
   return style
 }
 
@@ -145,7 +171,7 @@ export function HeaderFooterArea({
   return (
     <div
       className={`page-hf page-hf-${kind}${editing ? ' page-hf-editing' : ''}`}
-      title={
+      data-tip={
         readOnly
           ? undefined
           : t(kind === 'header' ? 'appDblclickEditHeader' : 'appDblclickEditFooter') +
@@ -159,20 +185,32 @@ export function HeaderFooterArea({
         if (!readOnly && !editing) setEditing(true)
       }}
     >
-      {images && images.length > 0 && (
-        <div className="page-hf-images" contentEditable={false}>
-          {images.map((img, i) => (
-            <img
-              key={i}
-              src={img.dataUrl}
-              alt=""
-              draggable={false}
-              style={{
-                ...(img.widthPx ? { width: img.widthPx } : {}),
-                ...(img.heightPx ? { height: img.heightPx } : {}),
-              }}
-            />
-          ))}
+      {images && images.some((im) => !im.floating) && (
+        <div
+          className="page-hf-images"
+          contentEditable={false}
+          style={
+            images.find((im) => !im.floating)?.align === 'right'
+              ? { justifyContent: 'flex-end' }
+              : images.find((im) => !im.floating)?.align === 'center'
+                ? { justifyContent: 'center' }
+                : undefined
+          }
+        >
+          {images
+            .filter((img) => !img.floating)
+            .map((img, i) => (
+              <img
+                key={i}
+                src={img.dataUrl}
+                alt=""
+                draggable={false}
+                style={{
+                  ...(img.widthPx ? { width: img.widthPx } : {}),
+                  ...(img.heightPx ? { height: img.heightPx } : {}),
+                }}
+              />
+            ))}
         </div>
       )}
       {editing ? (
@@ -217,6 +255,8 @@ function HfContent({
                 className="page-hf-cell"
                 style={{
                   ...(cell.widthPct ? { width: `${cell.widthPct}%` } : {}),
+                  // document content color (w:shd), theme-independent
+                  ...(cell.fill ? { backgroundColor: `#${cell.fill}` } : {}),
                   ...(cell.align
                     ? {
                         textAlign:
@@ -227,37 +267,81 @@ function HfContent({
                     : {}),
                 }}
               >
-                {cell.runs.map((run, k) => (
-                  <span key={k} style={runStyle(run)}>
-                    {display(run.text)}
-                  </span>
+                {/* one block line per cell paragraph (mirrors makeGapHfEl) */}
+                {(cell.paras.length > 0 ? cell.paras : [[]]).map((runs, k) => (
+                  <div key={k} className="page-hf-cell-para">
+                    {runs.length === 0 ? ' ' : null}
+                    {runs.map((run, l) => (
+                      <span key={l} style={runStyle(run)}>
+                        {run.image && (
+                          <img
+                            className="page-hf-cell-img"
+                            src={run.image.dataUrl}
+                            alt=""
+                            draggable={false}
+                            style={{
+                              ...(run.image.widthPx ? { width: run.image.widthPx } : {}),
+                              ...(run.image.heightPx ? { height: run.image.heightPx } : {}),
+                            }}
+                          />
+                        )}
+                        {display(run.text)}
+                      </span>
+                    ))}
+                  </div>
                 ))}
               </div>
             ))}
           </div>
         ) : (
-          <div
-            key={i}
-            className="page-hf-para"
-            style={{
-              ...(para.bidi ? { direction: 'rtl' as const } : {}),
-              ...(para.align
-                ? {
-                    textAlign:
-                      para.align === 'left' || para.align === 'center' || para.align === 'right'
-                        ? para.align
-                        : ('justify' as const),
-                  }
-                : {}),
-            }}
-          >
-            {para.runs.length === 0 ? ' ' : null}
-            {para.runs.map((run, j) => (
-              <span key={j} style={runStyle(run)}>
-                {display(run.text)}
-              </span>
-            ))}
-          </div>
+          (() => {
+            const tabbed = hfTabSegments(para)
+            if (!tabbed) {
+              return (
+                <div
+                  key={i}
+                  className={`page-hf-para${para.frameXAlign ? ' page-hf-frame' : ''}`}
+                  style={paraStyle(para)}
+                >
+                  {para.runs.length === 0 ? ' ' : null}
+                  {para.runs.map((run, j) => (
+                    <span key={j} style={runStyle(run)}>
+                      {display(run.text)}
+                    </span>
+                  ))}
+                </div>
+              )
+            }
+            return (
+              <div
+                key={i}
+                className={`page-hf-para page-hf-tabbed${para.frameXAlign ? ' page-hf-frame' : ''}`}
+                style={{
+                  ...paraStyle(para),
+                  ...(tabbed.minHeightPt ? { minHeight: `${tabbed.minHeightPt}pt` } : {}),
+                }}
+              >
+                {tabbed.lead.map((run, j) => (
+                  <span key={j} style={runStyle(run)}>
+                    {display(run.text)}
+                  </span>
+                ))}
+                {tabbed.segments.map((seg, k) => (
+                  <span
+                    key={`t${k}`}
+                    className={`page-hf-tabseg page-hf-tabseg-${seg.anchor}`}
+                    style={{ left: 'px' in seg.left ? seg.left.px : `${seg.left.pct}%` }}
+                  >
+                    {seg.runs.map((run, j) => (
+                      <span key={j} style={runStyle(run)}>
+                        {display(run.text)}
+                      </span>
+                    ))}
+                  </span>
+                ))}
+              </div>
+            )
+          })()
         ),
       )}
     </>

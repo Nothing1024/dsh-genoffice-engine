@@ -84,6 +84,36 @@ describe('textbox editing', () => {
     })
   })
 
+  it('extracts w:pStyle of textbox paragraphs so document style CSS reaches them', async () => {
+    const styled = TEXTBOX_PARAGRAPH.replace(
+      '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>',
+      '<w:p><w:pPr><w:pStyle w:val="KeyPoint"/><w:jc w:val="center"/></w:pPr>',
+    )
+    const doc = await parseDocx(await buildDocx({ bodyXml: styled }))
+    const box = doc.blocks[0].textboxes?.[0]
+    expect(box?.paras[0].styleId).toBeUndefined()
+    expect(box?.paras[1].styleId).toBe('KeyPoint')
+  })
+
+  it('keeps the anchor paragraph text sharing its paragraph with a textbox as strayRuns', async () => {
+    const withHeading = TEXTBOX_PARAGRAPH.replace(
+      '<w:p><w:r><mc:AlternateContent',
+      '<w:p><w:pPr><w:pStyle w:val="SectionHeading"/></w:pPr><w:r><mc:AlternateContent',
+    ).replace(
+      '</mc:AlternateContent></w:r></w:p>',
+      '</mc:AlternateContent></w:r><w:r><w:t>Objective</w:t></w:r></w:p>',
+    )
+    const doc = await parseDocx(await buildDocx({ bodyXml: withHeading }))
+    const block = doc.blocks[0]
+    expect(block.type).toBe('passthrough')
+    expect(block.textboxes).toHaveLength(1)
+    expect(block.strayRuns?.map((r) => r.text).join('')).toBe('Objective')
+    expect(block.strayStyleId).toBe('SectionHeading')
+    expect(block.previewText).toContain('Objective')
+    // untouched block still saves its original bytes
+    expect(block.originalXml).toBe(withHeading)
+  })
+
   it('pins the height of an auto-fit box: drops spAutoFit and round-trips fixed', async () => {
     const autoFitXml = TEXTBOX_PARAGRAPH.replace(
       '<wps:txbx>',
@@ -161,7 +191,7 @@ describe('textbox editing', () => {
       '<w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t xml:space="preserve">red part</w:t></w:r>',
     )
     expect(out).toContain(
-      '<w:r><w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr><w:t xml:space="preserve"> bold part</w:t></w:r>',
+      '<w:r><w:rPr><w:b/><w:bCs/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr><w:t xml:space="preserve"> bold part</w:t></w:r>',
     )
   })
 
@@ -178,7 +208,7 @@ describe('textbox editing', () => {
       [null, para({ runs: [{ text: 'STILL', bold: true }] })],
     ])
     expect(kept).toContain(
-      '<w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">STILL</w:t></w:r>',
+      '<w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">STILL</w:t></w:r>',
     )
 
     // align null strips the centered jc from the second paragraph
@@ -186,7 +216,7 @@ describe('textbox editing', () => {
       [null, para({ runs: [{ text: 'LEFT', bold: true }], align: null })],
     ])
     expect(removed).toContain(
-      '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">LEFT</w:t></w:r></w:p>',
+      '<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">LEFT</w:t></w:r></w:p>',
     )
   })
 
@@ -203,7 +233,7 @@ describe('textbox editing', () => {
     ])
     // new paragraph reuses the centered pPr of the last original
     expect(out).toContain(
-      '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">line3</w:t></w:r></w:p>',
+      '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">line3</w:t></w:r></w:p>',
     )
     // empty paragraph keeps pPr only
     expect(out).toContain('<w:p><w:pPr><w:jc w:val="center"/></w:pPr></w:p>')

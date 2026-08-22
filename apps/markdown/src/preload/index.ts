@@ -35,6 +35,11 @@ const api: MarkdownApi = {
     ipcRenderer.on(MARKDOWN_CHANNELS.exportRequest, listener)
     return () => ipcRenderer.removeListener(MARKDOWN_CHANNELS.exportRequest, listener)
   },
+  onPrintRequest: (handler) => {
+    const listener = () => handler()
+    ipcRenderer.on(MARKDOWN_CHANNELS.printRequest, listener)
+    return () => ipcRenderer.removeListener(MARKDOWN_CHANNELS.printRequest, listener)
+  },
   exportDocx: (request) => ipcRenderer.invoke(MARKDOWN_CHANNELS.exportDocx, request),
   exportPdf: (request) => ipcRenderer.invoke(MARKDOWN_CHANNELS.exportPdf, request),
   getLanguage: () => ipcRenderer.invoke(MARKDOWN_CHANNELS.getLanguage),
@@ -48,6 +53,11 @@ const api: MarkdownApi = {
     const listener = (_e: Electron.IpcRendererEvent, theme: UiTheme) => handler(theme)
     ipcRenderer.on(MARKDOWN_CHANNELS.themeChanged, listener)
     return () => ipcRenderer.removeListener(MARKDOWN_CHANNELS.themeChanged, listener)
+  },
+  onChromePressed: (handler) => {
+    const listener = () => handler()
+    ipcRenderer.on('app:chrome-pressed', listener)
+    return () => ipcRenderer.removeListener('app:chrome-pressed', listener)
   },
   getAiSettings: () => ipcRenderer.invoke(AI_CHANNELS.getSettings),
   aiStream: (request) => ipcRenderer.invoke(AI_CHANNELS.stream, request),

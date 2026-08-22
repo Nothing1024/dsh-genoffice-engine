@@ -29,6 +29,16 @@ export interface TabsApi {
   reorder(id: string, toIndex: number): Promise<void>
   /** subscribe to tab list changes (open/close/activate/title updates); returns unsubscribe */
   onChanged(handler: (tabs: TabSummary[]) => void): () => void
+  /**
+   * fire-and-forget: a pointerdown landed on the shell chrome (tab strip).
+   * Document tabs are sibling WebContentsViews that see neither the event nor
+   * a focus change, so the shell relays it for them to dismiss popovers.
+   */
+  notifyChromePressed(): void
+  /** the main-process broadcast that notifyChromePressed (and a window drag)
+   * triggers; the shell's own popovers subscribe so a title-bar drag — which
+   * produces no DOM event — still dismisses them */
+  onChromePressed(handler: () => void): () => void
 }
 
 export const TABS_CHANNELS = {
@@ -39,4 +49,5 @@ export const TABS_CHANNELS = {
   showNewMenu: 'tabs:show-new-menu',
   reorder: 'tabs:reorder',
   changed: 'tabs:changed',
+  chromePressed: 'tabs:chrome-pressed',
 } as const

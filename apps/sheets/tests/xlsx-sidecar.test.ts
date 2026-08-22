@@ -304,6 +304,7 @@ describe('XLSX Rust sidecar', () => {
                     hidden: z.boolean(),
                     outlineLevel: z.number().optional(),
                     collapsed: z.boolean().optional(),
+                    styleIndex: z.number().optional(),
                   }),
                 ),
                 freeze: z
@@ -353,6 +354,7 @@ describe('XLSX Rust sidecar', () => {
         { startColumn: 1, endColumn: 1, width: 0, hidden: true },
         { startColumn: 2, endColumn: 2, width: 24, hidden: false },
         { startColumn: 3, endColumn: 3, hidden: false, outlineLevel: 2, collapsed: true },
+        { startColumn: 4, endColumn: 5, hidden: false, styleIndex: 2 },
       ])
       expect(opened.sheets[0]).toMatchObject({
         hidden: false,
@@ -366,6 +368,7 @@ describe('XLSX Rust sidecar', () => {
         bold: true,
         fontColor: '#9C0006',
         fillColor: '#FFC7CE',
+        numberFormat: '#,##0.0',
       })
       expect(opened.sheets[0]?.tables).toEqual([
         {
@@ -373,10 +376,14 @@ describe('XLSX Rust sidecar', () => {
           headerRowCount: 1,
           showRowStripes: true,
           showColumnStripes: false,
+          name: 'Table1',
+          columns: ['Item', 'B', 'C', 'D'],
           styleName: 'TableStyleMedium2',
           headerFill: '#4472C4',
           headerFontColor: '#FFFFFF',
           stripeFill: '#DAE3F3',
+          totalRowBorderColor: '#4472C4',
+          totalRowBorderStyle: 'double',
         },
       ])
       expect(opened.styles[1]).toMatchObject({
@@ -393,6 +400,7 @@ describe('XLSX Rust sidecar', () => {
         wrapText: true,
         fontColor: '#4472C4',
         numberFormat: '0%',
+        textRotation: 90,
         borderLeft: { style: 'thin', color: '#FF0000' },
         borderTop: { style: 'medium', color: '#4472C4' },
         borderBottom: { style: 'double' },
@@ -400,6 +408,7 @@ describe('XLSX Rust sidecar', () => {
       expect(opened.styles[2]).toMatchObject({
         fontColor: '#993366',
         fillColor: '#F8CBAD',
+        textRotation: 255,
       })
 
       let result = workbookRangeResultSchema.parse(
@@ -422,7 +431,7 @@ describe('XLSX Rust sidecar', () => {
       expect(result.indexingComplete).toBe(true)
       expect(result.merges).toEqual([{ startRow: 0, startColumn: 0, endRow: 0, endColumn: 1 }])
       expect(result.rows).toEqual([
-        { row: 0, height: 30, hidden: false },
+        { row: 0, height: 30, customHeight: true, hidden: false, styleIndex: 2 },
         { row: 1, hidden: true },
         { row: 2, hidden: false, outlineLevel: 1 },
       ])
@@ -460,9 +469,13 @@ describe('XLSX Rust sidecar', () => {
       expect(result.conditionalRules[1]).toMatchObject({
         ruleType: 'dataBar',
         priority: 2,
-        cfvos: [{ kind: 'min' }, { kind: 'max' }],
+        // The x14 twin's autoMin/autoMax refine the 2006 min/max cfvos.
+        cfvos: [{ kind: 'autoMin' }, { kind: 'autoMax' }],
         colors: ['#638EC6'],
         showValue: false,
+        negativeColor: '#FF0000',
+        negativeSameAsPositive: false,
+        gradient: false,
       })
       expect(result.conditionalRules[2]).toMatchObject({
         ruleType: 'iconSet',
@@ -596,11 +609,11 @@ async function buildStructureFixture(): Promise<Buffer> {
       </borders>
       <cellXfs count="3">
         <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
-        <xf numFmtId="9" fontId="1" fillId="0" borderId="1"><alignment horizontal="center" wrapText="1"/></xf>
-        <xf numFmtId="0" fontId="2" fillId="2" borderId="0"/>
+        <xf numFmtId="9" fontId="1" fillId="0" borderId="1"><alignment horizontal="center" wrapText="1" textRotation="90"/></xf>
+        <xf numFmtId="0" fontId="2" fillId="2" borderId="0"><alignment textRotation="255"/></xf>
       </cellXfs>
       <dxfs count="1">
-        <dxf><font><b/><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+        <dxf><font><b/><color rgb="FF9C0006"/></font><numFmt numFmtId="165" formatCode="#,##0.0"/><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
       </dxfs>
     </styleSheet>`,
   )
@@ -619,9 +632,10 @@ async function buildStructureFixture(): Promise<Buffer> {
         <col min="2" max="2" width="0" hidden="1" customWidth="1"/>
         <col min="3" max="3" width="24" customWidth="1"/>
         <col min="4" max="4" outlineLevel="2" collapsed="1"/>
+        <col min="5" max="6" style="2"/>
       </cols>
       <sheetData>
-        <row r="1" ht="30" customHeight="1"><c r="A1" t="inlineStr" s="1"><is><t>Merged</t></is></c></row>
+        <row r="1" ht="30" customHeight="1" s="2" customFormat="1"><c r="A1" t="inlineStr" s="1"><is><t>Merged</t></is></c></row>
         <row r="2" hidden="1"><c r="A2"><v>5</v></c></row>
         <row r="3" outlineLevel="1"><c r="A3" s="2"><v>7</v></c><c r="B3" t="s"><v>0</v></c></row>
         <row r="4"><c r="A4" t="inlineStr"><is><t>Link</t></is></c><c r="B4" t="e"><v>#VALUE!</v></c><c r="C4" t="inlineStr"><is><r><rPr><b/></rPr><t>In</t></r><r><t>line</t></r></is></c><c r="D4"><v>not-a-number</v></c></row>
@@ -633,6 +647,8 @@ async function buildStructureFixture(): Promise<Buffer> {
         <cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>6</formula></cfRule>
         <cfRule type="dataBar" priority="2">
           <dataBar showValue="0"><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar>
+          <extLst><ext uri="{B025F937-C7B1-47D3-B67F-A62EFF666E3E}"
+            xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:id>{TEST-DB-1}</x14:id></ext></extLst>
         </cfRule>
         <cfRule type="iconSet" priority="3">
           <iconSet iconSet="3Arrows" showValue="0"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67" gte="0"/></iconSet>
@@ -642,6 +658,20 @@ async function buildStructureFixture(): Promise<Buffer> {
         <dataValidation type="list" allowBlank="1" sqref="C2:C3"><formula1>"Yes,No"</formula1></dataValidation>
       </dataValidations>
       <hyperlinks><hyperlink ref="A4" r:id="rId1"/></hyperlinks>
+      <extLst><ext uri="{78C0D931-6437-407d-A8EE-F0AAD7539E65}"
+        xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+        <x14:conditionalFormattings>
+          <x14:conditionalFormatting xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">
+            <x14:cfRule type="dataBar" id="{TEST-DB-1}">
+              <x14:dataBar minLength="0" maxLength="100" gradient="0" negativeBarColorSameAsPositive="0">
+                <x14:cfvo type="autoMin"/><x14:cfvo type="autoMax"/>
+                <x14:negativeFillColor rgb="FFFF0000"/><x14:axisColor rgb="FF000000"/>
+              </x14:dataBar>
+            </x14:cfRule>
+            <xm:sqref>A2:A3</xm:sqref>
+          </x14:conditionalFormatting>
+        </x14:conditionalFormattings>
+      </ext></extLst>
     </worksheet>`,
   )
   zip.file(

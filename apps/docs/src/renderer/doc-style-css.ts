@@ -1,13 +1,25 @@
-import type { ParsedDocFull, StyleDisplay, ThemeColors, ThemeFonts } from '@genoffice/docx-engine'
 import {
+  readSections,
+  type ParsedDocFull,
+  type StyleDisplay,
+  type ThemeColors,
+  type ThemeFonts,
+} from '@genoffice/docx-engine'
+import {
+  cjkDeclaredLineFactor,
   cssDualFontFamily,
   cssFontFamily,
+  cssGridLineBase,
+  cssGridLineExpr,
+  cssGridSpacingPt,
   cssLineHeight,
+  isCjkFontName,
   krLineFactor,
   lineHeightFactor,
   textHasCjk,
   isKoreanFontName,
 } from './line-metrics'
+import { docGridPitchPt } from './pagination'
 
 /**
  * CSS for the document theme (Design ▸ Themes / Fonts / Colors). Kept separate from
@@ -32,10 +44,9 @@ export function docThemeCss(
     rules.push(`${headings} { font-family:${cssFontFamily(fonts.major)} }`)
   }
   if (colors?.accent1) {
-    // Heading color + the accent variable the ribbon's style presets already read
+    // Keep the live accent available to ribbon presets. Heading text itself must
+    // come from its DOCX style; a theme palette alone does not make headings blue.
     rules.push(`.doc-page { --theme-accent:#${colors.accent1} }`)
-    const headings = [1, 2, 3, 4].map((n) => `.doc-page h${n}`).join(', ')
-    rules.push(`${headings} { color:#${colors.accent1} }`)
   }
   return rules.join('\n')
 }
@@ -57,17 +68,35 @@ export function docHasCjk(parsed: ParsedDocFull): boolean {
  * line height). Recomputed live while editing via App's liveDocCjk.
  */
 export function docLineFactor(parsed: ParsedDocFull, hasCjk: boolean): number {
+  return hasCjk ? docCjkFactor(parsed) : lineHeightFactor(docBodyFont(parsed) ?? 'Calibri')
+}
+
+/** CJK line-height factor of the document's East Asian face (feeds --doc-line-factor-cjk:
+ *  per-paragraph script overrides resolve CJK paragraphs through this var). */
+export function docCjkFactor(parsed: ParsedDocFull): number {
+  // cjkDeclaredLineFactor first: missing Noto/Source Han variants take the
+  // Word-probed substitution factor, same truth as per-paragraph overrides
+  const factor = (f: string) => cjkDeclaredLineFactor(f) ?? lineHeightFactor(f)
   // Normal's EA face wins over docDefaults (a Normal declaring e.g. Noto KR must
-  // not fall back to the SimSun 1.3 factor). font === fontAscii means only a
+  // not fall back to the SimSun factor). font === fontAscii means only a
   // Latin slot was declared (StyleDisplay.font is EA-first) — not an EA choice.
   const normal = defaultParaDisplay(parsed)
   const normalEa =
     normal?.font && (normal.font !== normal.fontAscii || isKoreanFontName(normal.font))
       ? normal.font
       : undefined
-  return hasCjk
-    ? lineHeightFactor(normalEa ?? parsed.docDefaults?.eastAsiaFont ?? 'SimSun')
-    : lineHeightFactor(docBodyFont(parsed) ?? 'Calibri')
+  if (normalEa && !normal?.eaSlotEmpty) return factor(normalEa)
+  const dd = parsed.docDefaults
+  if (dd?.eastAsiaFont && !dd.eaSlotEmpty) return factor(dd.eastAsiaFont)
+  // An empty EA theme slot can still use a CJK-capable Latin theme face.
+  // Japanese templates commonly put Yu Mincho or Yu Gothic in the Latin
+  // slots, and LibreOffice lays undeclared CJK out with that face.
+  // A Latin theme face (Calibri…) can't render CJK, so the lang backfill wins.
+  const themeLatin = parsed.themeFonts?.minor
+  if ((normal?.eaSlotEmpty || dd?.eaSlotEmpty) && themeLatin && isCjkFontName(themeLatin)) {
+    return factor(themeLatin)
+  }
+  return factor(normalEa ?? dd?.eastAsiaFont ?? 'SimSun')
 }
 
 /** the w:default="1" paragraph style's display (Word's baseline for un-styled paragraphs) */
@@ -88,6 +117,20 @@ export function docBodyFont(parsed: ParsedDocFull): string | undefined {
 
 export function docStyleCss(parsed: ParsedDocFull): string {
   const rules: string[] = []
+  // typed line grid: auto/multiple line heights resolve --doc-line-grid to a
+  // grid-snapped length instead of the unitless factor (cssGridLineBase).
+  // Declared on every element so per-paragraph --doc-line-factor /
+  // --doc-grid-pitch overrides re-substitute; same uniform-grid condition as
+  // App.tsx's .doc-page --doc-grid-pitch injection.
+  if (docGridPitchPt(readSections(parsed)) != null) {
+    rules.push(`.doc-page, .doc-page * { --doc-line-grid:${cssGridLineExpr()} }`)
+  }
+  // settings.xml w:autoHyphenation: Word breaks words at line ends document-wide.
+  // Chromium hyphenates only under an explicit lang; file-actions sets it on the
+  // editor root from docDefaults w:lang.
+  if (parsed.autoHyphenation) {
+    rules.push('.doc-page { hyphens:auto; -webkit-hyphens:auto }')
+  }
   const dd = parsed.docDefaults
   // Word applies the w:default="1" paragraph style (Normal) to every paragraph
   // without a w:pStyle, so its display merges into the document baseline here
@@ -99,6 +142,9 @@ export function docStyleCss(parsed: ParsedDocFull): string {
     // at parse time + live decorations in LineFactorExtension).
     const factor = docLineFactor(parsed, docHasCjk(parsed))
     decls.push(`--doc-line-factor:${factor}`)
+    // CJK paragraphs resolve their per-paragraph factor through this var
+    // (paraLineFactorCss); value follows the document's East Asian face
+    decls.push(`--doc-line-factor-cjk:${docCjkFactor(parsed)}`)
     // Latin factor for per-paragraph overrides (blockAttrs): pure-Western paragraphs
     // follow the body font's real single-line metric instead of a flat 1.2
     decls.push(`--doc-line-factor-latin:${lineHeightFactor(docBodyFont(parsed) ?? 'Calibri')}`)
@@ -124,21 +170,26 @@ export function docStyleCss(parsed: ParsedDocFull): string {
     if (color) decls.push(`color:#${color}`)
     if (normal?.bold ?? dd?.bold) decls.push('font-weight:600')
     if (normal?.italic ?? dd?.italic) decls.push('font-style:italic')
+    // default style's w:jc reaches unstyled paragraphs (explicit w:jc and
+    // [data-style] alignment both override this inherited baseline)
+    if (normal?.align && normal.align !== 'left') decls.push(`text-align:${normal.align}`)
     const lh =
       cssLineHeight(normal?.lineRule, normal?.lineRawTwips, normal?.lineSpacing) ??
       cssLineHeight(dd?.lineRule, dd?.lineRawTwips, dd?.lineSpacing)
-    decls.push(`line-height:${lh ?? `calc(${factor} * 1)`}`)
+    // fallback references the var (not the resolved number) so per-paragraph
+    // script factors and docGrid snapping re-evaluate on each block
+    decls.push(`line-height:${lh ?? cssGridLineBase()}`)
     rules.push(`.doc-page { ${decls.join(';')} }`)
     // Word's fallback when neither Normal nor docDefaults declares w:spacing is 0
     // (the static stylesheet's 8pt guess inflated undeclared docs, table cells worst);
     // declared per block so --doc-line-factor set inline on a paragraph re-evaluates
     // the line-height var (it wouldn't through inheritance)
     const blockSel =
-      '.doc-page p, .doc-page .doc-li, .doc-page h1, .doc-page h2, .doc-page h3, .doc-page h4, .doc-page h5, .doc-page h6'
+      '.doc-page p, .doc-page .doc-li, .doc-page h1, .doc-page h2, .doc-page h3, .doc-page h4, .doc-page h5, .doc-page h6, .doc-page .doc-protected-field'
     const blockDecls = [
-      `margin-top:${((normal?.spaceBeforeTwips ?? dd?.spaceBeforeTwips ?? 0) / 20).toFixed(1)}pt`,
-      `margin-bottom:${((normal?.spaceAfterTwips ?? dd?.spaceAfterTwips ?? 0) / 20).toFixed(1)}pt`,
-      `line-height:${lh ?? `calc(${factor} * 1)`}`,
+      `margin-top:${cssGridSpacingPt((normal?.spaceBeforeTwips ?? dd?.spaceBeforeTwips ?? 0) / 20)}`,
+      `margin-bottom:${cssGridSpacingPt((normal?.spaceAfterTwips ?? dd?.spaceAfterTwips ?? 0) / 20)}`,
+      `line-height:${lh ?? cssGridLineBase()}`,
     ]
     rules.push(`${blockSel} { ${blockDecls.join(';')} }`)
     // Normal's first-line indent applies to plain body paragraphs (not lists —
@@ -156,6 +207,14 @@ export function docStyleCss(parsed: ParsedDocFull): string {
     if (info.type !== 'table' || !t) continue
     const sel = `.doc-page table[data-tbl-style="${CSS.escape(info.styleId)}"]`
     if (t.fill) rules.push(`${sel} td, ${sel} th { background:#${t.fill} }`)
+    // whole-table rPr beats the document baseline inside the table (Word's
+    // table-style layer sits above docDefaults/Normal for unstyled cell text)
+    {
+      const decls: string[] = []
+      if (t.wholeTable?.sizeHalfPoints) decls.push(`font-size:${t.wholeTable.sizeHalfPoints / 2}pt`)
+      if (t.wholeTable?.italic) decls.push('font-style:italic')
+      if (decls.length > 0) rules.push(`${sel} td, ${sel} th { ${decls.join(';')} }`)
+    }
     // band1 = first data row after the header → even nth-child when a header row exists
     if (t.band1Fill) {
       rules.push(`${sel} tr:nth-child(even) td { background:#${t.band1Fill} }`)
@@ -168,21 +227,31 @@ export function docStyleCss(parsed: ParsedDocFull): string {
       if (t.firstRow.fill) decls.push(`background:#${t.firstRow.fill}`)
       if (t.firstRow.bold) decls.push('font-weight:600')
       if (t.firstRow.color) decls.push(`color:#${t.firstRow.color}`)
+      if (t.firstRow.sizeHalfPoints) decls.push(`font-size:${t.firstRow.sizeHalfPoints / 2}pt`)
       if (decls.length > 0)
         rules.push(`${sel} tr:first-child td, ${sel} tr:first-child th { ${decls.join(';')} }`)
     }
-    if (t.paraSpacing) {
+    {
       // Word precedence: paragraph style (Normal) > table style pPr > docDefaults —
       // emit only the table-style values Normal doesn't declare itself
       const ps = t.paraSpacing
       const decls: string[] = []
-      if (ps.beforeTwips !== undefined && normal?.spaceBeforeTwips === undefined)
-        decls.push(`margin-top:${(ps.beforeTwips / 20).toFixed(1)}pt`)
-      if (ps.afterTwips !== undefined && normal?.spaceAfterTwips === undefined)
-        decls.push(`margin-bottom:${(ps.afterTwips / 20).toFixed(1)}pt`)
-      const psLh = cssLineHeight(ps.lineRule, ps.lineRawTwips, ps.lineSpacing)
+      if (ps?.beforeTwips !== undefined && normal?.spaceBeforeTwips === undefined)
+        decls.push(`margin-top:${cssGridSpacingPt(ps.beforeTwips / 20)}`)
+      if (ps?.afterTwips !== undefined && normal?.spaceAfterTwips === undefined)
+        decls.push(`margin-bottom:${cssGridSpacingPt(ps.afterTwips / 20)}`)
+      const psLh = cssLineHeight(ps?.lineRule, ps?.lineRawTwips, ps?.lineSpacing)
       const normalLh = cssLineHeight(normal?.lineRule, normal?.lineRawTwips, normal?.lineSpacing)
       if (psLh && !normalLh) decls.push(`line-height:${psLh}`)
+      if (t.paraJc && t.paraJc !== 'left' && t.paraJc !== 'start' && normal?.align === undefined) {
+        const align =
+          t.paraJc === 'center'
+            ? 'center'
+            : t.paraJc === 'right' || t.paraJc === 'end'
+              ? 'right'
+              : 'justify'
+        decls.push(`text-align:${align}`)
+      }
       if (decls.length > 0) {
         rules.push(
           `${sel} td p, ${sel} th p, ${sel} td .doc-li, ${sel} th .doc-li { ${decls.join(';')} }`,
@@ -211,21 +280,31 @@ export function docStyleCss(parsed: ParsedDocFull): string {
             : cssFontFamily(d.font)
         }`,
       )
+      // style-declared EA face re-anchors the CJK line factor for its paragraphs
+      // (runs without their own fonts resolve --doc-line-factor-cjk through this);
+      // an empty-theme-slot backfill is not a document choice and stays silent
+      if (!d.eaSlotEmpty && (d.font !== d.fontAscii || isCjkFontName(d.font))) {
+        decls.push(`--doc-line-factor-cjk:${lineHeightFactor(d.font)}`)
+      }
     } else if (d.fontAscii) {
       decls.push(`font-family:${cssFontFamily(d.fontAscii)}`)
     }
     if (d.charSpacingTwips) decls.push(`letter-spacing:${d.charSpacingTwips / 20}pt`)
+    if (d.caps === 'all') decls.push('text-transform:uppercase')
+    else if (d.caps === 'small') decls.push('font-variant-caps:small-caps')
     const styleLh = cssLineHeight(d.lineRule, d.lineRawTwips, d.lineSpacing)
     if (styleLh) decls.push(`line-height:${styleLh}`)
     if (d.spaceBeforeTwips !== undefined)
-      decls.push(`margin-top:${(d.spaceBeforeTwips / 20).toFixed(1)}pt`)
+      decls.push(`margin-top:${cssGridSpacingPt(d.spaceBeforeTwips / 20)}`)
     if (d.spaceAfterTwips !== undefined)
-      decls.push(`margin-bottom:${(d.spaceAfterTwips / 20).toFixed(1)}pt`)
+      decls.push(`margin-bottom:${cssGridSpacingPt(d.spaceAfterTwips / 20)}`)
     if (d.indentRightTwips)
       decls.push(`margin-inline-end:${(d.indentRightTwips / 20).toFixed(1)}pt`)
     if (d.indentFirstLineTwips)
       decls.push(`text-indent:${(d.indentFirstLineTwips / 20).toFixed(1)}pt`)
     if (d.align) decls.push(`text-align:${d.align}`)
+    // style-level paragraph shading (explicit pPr w:shd is inline style and wins)
+    if (d.shadingFill) decls.push(`background-color:#${d.shadingFill}`)
     // the static sheet guesses italic for h4-h6 (Word's built-in defaults);
     // a real style definition without w:i means upright
     if (info.headingLevel && info.headingLevel >= 4 && !d.italic) decls.push('font-style:normal')
@@ -245,8 +324,10 @@ export function docStyleCss(parsed: ParsedDocFull): string {
     // between them (ListParagraph/ListBullet carry this — Word lists are tight)
     if (d.contextualSpacing) {
       const s = `[data-style="${CSS.escape(info.styleId)}"]`
-      rules.push(`.doc-page ${s}:has(+ ${s}) { margin-bottom:0 }`)
-      rules.push(`.doc-page ${s} + ${s} { margin-top:0 }`)
+      // !important so blockAttrs' inline margins (direct w:spacing) can't win:
+      // Word swallows adjacent same-style spacing regardless of its source
+      rules.push(`.doc-page ${s}:has(+ ${s}) { margin-bottom:0 !important }`)
+      rules.push(`.doc-page ${s} + ${s} { margin-top:0 !important }`)
     }
   }
   return rules.join('\n')

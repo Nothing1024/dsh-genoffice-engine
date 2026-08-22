@@ -264,9 +264,19 @@ const desktopApi: DesktopApi = {
     throw new Error('readLocalImage is unavailable in the web version')
   },
 
+  onChromePressed: () => () => {},
+
   captureScreenSources: async (): Promise<ScreenSourcesResult> => ({ status: 'denied', sources: [] }),
 
   captureScreenSource: async (): Promise<ScreenCaptureResult | null> => null,
+
+  beginSaveEditsTransfer: async () => {
+    throw new Error('Chunked save-edits transfer is unavailable in the web version')
+  },
+  sendSaveEditsChunk: async () => {
+    throw new Error('Chunked save-edits transfer is unavailable in the web version')
+  },
+  abortSaveEditsTransfer: async () => {},
 
   saveWorkbookEdits: async (request: WorkbookSaveRequest): Promise<WorkbookSaveResult> => {
     if (!opened) throw new Error('No workbook open')
@@ -310,6 +320,9 @@ const desktopApi: DesktopApi = {
 
   reportCloseSaveResult: () => {},
 
+  onRecoveryPrompt: () => () => {},
+  replyRecoveryPrompt: () => {},
+
   consumeNewBlankWorkbook: async () => {
     if (blankConsumed) return false
     blankConsumed = true
@@ -340,6 +353,10 @@ const desktopApi: DesktopApi = {
   aiGskLogin: async () => {
     window.open('https://www.genspark.ai', '_blank', 'noopener')
   },
+
+  imageSearch: async () => ({ images: [], method: 'error', error: 'image search is unavailable in the web version' }),
+  generateImage: async () => ({ error: 'image generation is unavailable in the web version' }),
+  fetchImage: async () => null,
 
   webSearch: async (query, maxResults) => {
     const res = await relay<{ results: Array<{ title: string; url: string; snippet: string }>; method: string; error?: string }>(

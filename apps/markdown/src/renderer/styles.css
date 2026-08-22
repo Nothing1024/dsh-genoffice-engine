@@ -12,10 +12,10 @@
   --md-code-inline-bg: rgb(129 139 152 / 14%);
   --md-table-header-bg: #f6f8fa;
   --md-ai-changed: rgb(255 213 79 / 40%);
-  --md-selection: rgb(59 130 246 / 10%);
-  --md-text-selection: rgb(56 108 255 / 32%);
-  --md-focus: #3b82f6;
-  --md-node-outline: rgb(59 130 246 / 60%);
+  --md-selection: color-mix(in srgb, var(--accent) 10%, transparent);
+  --md-text-selection: color-mix(in srgb, var(--accent) 32%, transparent);
+  --md-focus: var(--accent);
+  --md-node-outline: color-mix(in srgb, var(--accent) 60%, transparent);
   --md-focus-ring: rgb(35 36 37 / 20%);
   --md-focus-ring-blue: rgb(74 141 246 / 30%);
   --md-error: #c62828;
@@ -27,6 +27,8 @@
   --md-shimmer-hi: #d9d9d9;
   --md-pop-shadow: 0 8px 24px rgb(0 0 0 / 18%);
   --md-tip-shadow: 0 4px 6px rgb(0 0 0 / 10%);
+  /* same paper shadow as the pdf app's --pdf-shadow-page */
+  --md-page-shadow: 0 1px 4px rgb(0 0 0 / 18%);
 }
 
 [data-theme='dark'] {
@@ -39,10 +41,10 @@
   --md-code-inline-bg: rgb(129 139 152 / 22%);
   --md-table-header-bg: #282c32;
   --md-ai-changed: rgb(255 213 79 / 28%);
-  --md-selection: rgb(74 158 255 / 20%);
-  --md-text-selection: rgb(74 158 255 / 40%);
-  --md-focus: #4a9eff;
-  --md-node-outline: rgb(74 158 255 / 70%);
+  --md-selection: color-mix(in srgb, var(--accent) 20%, transparent);
+  --md-text-selection: color-mix(in srgb, var(--accent) 40%, transparent);
+  --md-focus: var(--accent);
+  --md-node-outline: color-mix(in srgb, var(--accent) 70%, transparent);
   --md-focus-ring: rgb(228 228 228 / 25%);
   --md-focus-ring-blue: rgb(74 158 255 / 40%);
   --md-error: #f28b82;
@@ -54,6 +56,7 @@
   --md-shimmer-hi: #d0d0d0;
   --md-pop-shadow: 0 8px 24px rgb(0 0 0 / 50%);
   --md-tip-shadow: 0 4px 6px rgb(0 0 0 / 35%);
+  --md-page-shadow: 0 1px 4px rgb(0 0 0 / 18%);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -67,10 +70,10 @@
     --md-code-inline-bg: rgb(129 139 152 / 22%);
     --md-table-header-bg: #282c32;
     --md-ai-changed: rgb(255 213 79 / 28%);
-    --md-selection: rgb(74 158 255 / 20%);
-    --md-text-selection: rgb(74 158 255 / 40%);
-    --md-focus: #4a9eff;
-    --md-node-outline: rgb(74 158 255 / 70%);
+    --md-selection: color-mix(in srgb, var(--accent) 20%, transparent);
+    --md-text-selection: color-mix(in srgb, var(--accent) 40%, transparent);
+    --md-focus: var(--accent);
+    --md-node-outline: color-mix(in srgb, var(--accent) 70%, transparent);
     --md-focus-ring: rgb(228 228 228 / 25%);
     --md-focus-ring-blue: rgb(74 158 255 / 40%);
     --md-error: #f28b82;
@@ -82,11 +85,30 @@
     --md-shimmer-hi: #d0d0d0;
     --md-pop-shadow: 0 8px 24px rgb(0 0 0 / 50%);
     --md-tip-shadow: 0 4px 6px rgb(0 0 0 / 35%);
+    --md-page-shadow: 0 1px 4px rgb(0 0 0 / 18%);
   }
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* UI CJK fonts per language, same table as the docs/slides chrome
+ * (documentElement.lang is set at bootstrap and on switch) */
+:root {
+  --ui-cjk: 'PingFang SC', 'Microsoft YaHei';
+}
+
+:root:lang(ja) {
+  --ui-cjk: 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', 'Yu Gothic', 'Meiryo';
+}
+
+:root:lang(ko) {
+  --ui-cjk: 'Apple SD Gothic Neo', 'Malgun Gothic';
+}
+
+:root:lang(zh-TW) {
+  --ui-cjk: 'PingFang TC', 'Microsoft JhengHei';
 }
 
 html,
@@ -97,11 +119,24 @@ body,
 }
 
 body {
+  /* same UI stack as the docs/slides chrome ('Segoe UI' first + per-language
+     CJK token) so shared toolbar controls measure identically across apps */
   font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', sans-serif;
+    'Segoe UI',
+    -apple-system,
+    BlinkMacSystemFont,
+    var(--ui-cjk),
+    sans-serif;
   color: var(--text);
   background: var(--surface-subtle);
+  /* grayscale AA like the docs/sheets/slides/pdf chrome — macOS subpixel
+     rendering paints the same weight visibly heavier */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* buttons follow the chrome font instead of the UA default, like docs */
+button {
+  font-family: inherit;
 }
 
 .app {
@@ -122,6 +157,8 @@ body {
 .editor-scroll {
   flex: 1;
   overflow-y: auto;
+  /* same canvas backdrop as the slides workspace; the doc page stays white */
+  background: var(--canvas);
 }
 
 .doc-page {
@@ -130,7 +167,7 @@ body {
   margin: 0 auto;
   padding: 40px 72px 120px;
   background: var(--surface);
-  box-shadow: 0 0 0 1px var(--border-subtle);
+  box-shadow: var(--md-page-shadow);
 }
 
 .status-bar {
@@ -312,7 +349,17 @@ body {
   align-items: center;
   gap: 2px;
   padding: 5px 10px 0;
+  /* docs/slides size this row with their menu tabs (13px semibold labels,
+     7/6 padding + 2.5px underline ⇒ 39px measured); markdown has no menu
+     tabs, so pin the row so the toolbar bottom edge lines up across tabs */
+  min-height: 39px;
   -webkit-app-region: drag;
+}
+
+/* While a popover is open the row must deliver presses (drag regions swallow
+   them), so outside-press dismissal can see presses on the blank band */
+html.genoffice-popover-open .ribbon-tabs {
+  -webkit-app-region: no-drag;
 }
 
 .ribbon-tabs button,
@@ -323,17 +370,26 @@ body {
 /* the toolbar row below the QAT row (old single-row ribbon) */
 .ribbon-body {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 10px;
-  flex-wrap: wrap;
+  /* stretch like the docs ribbon: groups fill the band and the tall AI
+     buttons top-align at the same size/position as docs */
+  align-items: stretch;
+  /* band metrics shared with the docs/slides/pdf ribbons; no row gap — groups
+     own their spacing (2px 4px padding) exactly like the docs/slides ribbons */
+  padding: 6px 12px;
+  /* HARD-fixed height like the other editors' ribbons, so switching shell tabs
+     never shifts the toolbar's bottom edge (no wrap-driven growth) */
+  height: 80px;
+  /* groups never shrink, so a narrow window scrolls the row inside the ribbon
+     instead of spilling controls out of reach (matching the docs ribbon). The
+     .rb-link-pop dropdown is position: fixed + anchor-positioned, so this
+     clip cannot cut it off */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
 
-.rb-group {
-  display: flex;
-  align-items: center;
-  /* 3px inline gap, same as the docs/sheets inline tool rows */
-  gap: 3px;
+.ribbon-body::-webkit-scrollbar {
+  display: none;
 }
 
 .rb-sep {
@@ -341,7 +397,8 @@ body {
   flex-shrink: 0;
   align-self: stretch;
   background: var(--border);
-  margin: 6px;
+  /* 2px matches the groups' vertical padding — same inset as docs/slides */
+  margin: 2px 6px;
 }
 
 .rb-spacer {
@@ -422,22 +479,25 @@ body {
 
 .autosave-text {
   font-size: 11px;
-  color: var(--text-muted);
+  /* same ink as the docs/slides autosave label */
+  color: var(--text-dim);
   white-space: nowrap;
 }
 
-/* 28×30 inline box + suite-wide toolbar states (ink/hover/neutral selected
- * plate, no brand color) — same as the docs/sheets/slides/pdf toolbars */
+/* inline toolbar button + suite-wide states (ink/hover/neutral selected
+ * plate, no brand color) — same metrics as the docs/slides .rb-icon
+ * (28px min box, 30px tall, 3px radius, 15px letterform glyphs) */
 .rb-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
+  min-width: 28px;
   height: 30px;
-  /* kill the UA button padding — it squeezes the 20px svg flex item */
-  padding: 0;
+  padding: 0 4px;
+  white-space: nowrap;
   border: none;
-  border-radius: 4px;
+  border-radius: 3px;
+  font-size: 15px;
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
@@ -464,6 +524,8 @@ body {
   flex-direction: column;
   justify-content: center;
   padding: 2px 4px;
+  /* groups never shrink below content, same as the docs/slides ribbons */
+  flex-shrink: 0;
 }
 
 .ribbon-group-items {
@@ -495,6 +557,11 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--text-primary);
+  /* same icon-row box as docs: full button width with horizontal bleed */
+  align-self: stretch;
+  border-radius: 4px;
+  padding: 3px 4px;
+  margin: 0 -4px;
 }
 
 .rb-big:disabled {
@@ -527,37 +594,43 @@ body {
 }
 
 /* typographic letterform glyphs (B/I/U/S): 15px/600 like the docs inline row */
-.rb-glyph {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1;
-}
-
 .rb-mono {
   font-family: 'SF Mono', Menlo, Consolas, monospace;
   font-size: 11.5px;
 }
 
-.rb-style {
-  height: 28px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 4px;
-  background: var(--surface);
-  color: var(--text-primary);
-  font-size: 13px;
-  padding: 0 6px;
+/* block-style picker (shared @genoffice/ui gs-dd dropdown): same box as the
+ * docs/slides font pickers (28px tall, 3px radius, 13px label, 7px inline
+ * padding, strong border) */
+.rb-style.gs-dd {
   min-width: 108px;
 }
 
+.rb-style .gs-dd-btn {
+  height: 28px;
+  padding: 0 7px;
+  border-color: var(--color-border-strong);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+/* Anchor for the link popover, which is position: fixed so it escapes the
+   ribbon-body scroll clip while tracking its trigger (same pattern as the
+   docs ribbon dropdowns) */
 .rb-link-anchor {
   position: relative;
   display: inline-flex;
+  anchor-name: --rb-link-anchor;
+  anchor-scope: --rb-link-anchor;
 }
 
 .rb-link-pop {
-  position: absolute;
-  top: 32px;
-  left: 0;
+  position: fixed;
+  position-anchor: --rb-link-anchor;
+  top: calc(anchor(bottom) + 2px);
+  left: anchor(left);
+  position-try-fallbacks: flip-inline;
+  position-visibility: anchors-visible;
   z-index: 30;
   display: flex;
   gap: 6px;
@@ -575,6 +648,7 @@ body {
   border-radius: 5px;
   padding: 0 8px;
   font-size: 12.5px;
+  outline: none;
 }
 
 .rb-link-pop button {
@@ -586,6 +660,11 @@ body {
   font-size: 12.5px;
   padding: 0 10px;
   cursor: pointer;
+}
+
+.rb-link-pop button:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* ---- slash menu ---- */
@@ -658,12 +737,26 @@ body {
 
 .doc-editor ul[data-type='taskList'] li > label {
   flex: 0 0 auto;
-  margin-top: 0.35em;
+  display: flex;
+  align-items: center;
+  /* match the first line box (16px x 1.75) so the checkbox centers on it */
+  height: 1.75em;
+  margin-top: 0.15em;
   user-select: none;
+}
+
+.doc-editor ul[data-type='taskList'] li > label input[type='checkbox'] {
+  margin: 0;
 }
 
 .doc-editor ul[data-type='taskList'] li > div {
   flex: 1;
+}
+
+/* the task text lives in li > div > p, so the generic `li > p` list
+ * override misses it and it keeps the full 0.6em paragraph margin */
+.doc-editor ul[data-type='taskList'] li > div > p {
+  margin: 0.15em 0;
 }
 
 .doc-editor ul[data-type='taskList'] li[data-checked='true'] > div {
@@ -1514,36 +1607,6 @@ body {
   box-shadow: 0 0 0 3px var(--md-focus-ring-blue);
 }
 
-/* Tooltip: dark pill under the button, 0.3s hover delay */
-.ai-msg-tool-btn::after {
-  content: attr(data-tip);
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  translate: -50% 0;
-  margin-top: 6px;
-  padding: 4px 8px;
-  background: var(--color-btn-primary);
-  color: var(--color-btn-primary-text);
-  font-size: 12px;
-  line-height: 1.5;
-  border-radius: 10px;
-  box-shadow: 0 4px 6px var(--md-shadow-soft);
-  white-space: nowrap;
-  pointer-events: none;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.15s ease;
-  transition-delay: 0s;
-  z-index: 10;
-}
-
-.ai-msg-tool-btn:hover::after {
-  opacity: 1;
-  visibility: visible;
-  transition-delay: 0.3s;
-}
-
 .ai-msg-tool-btn:active {
   filter: brightness(0.88);
   transform: scale(0.98);
@@ -1644,8 +1707,8 @@ body {
     box-shadow var(--transition-fast);
 }
 
-/* textarea: 15px / 21px fixed line-height, auto-grow band
- * (resting height matches the other AI panels, 25% taller than default) */
+/* textarea: 16px / 24px fixed line-height, same text spec as the slides
+ * composer; auto-grow band (resting height matches the other AI panels) */
 .ai-input-box textarea {
   display: block;
   width: 100%;
@@ -1654,10 +1717,9 @@ body {
   background: none;
   border-radius: var(--radius-16) var(--radius-16) 0 0;
   padding: 12px 14px 4px;
-  font-size: 15px;
-  font-weight: 500;
+  font-size: 16px;
   font-family: inherit;
-  line-height: 21px;
+  line-height: 24px;
   outline: none;
   color: var(--color-text-primary);
   min-height: 64px;
@@ -1947,11 +2009,11 @@ body {
   opacity: 1;
 }
 
-.md-codeblock-lang {
+/* language picker (shared @genoffice/ui gs-dd dropdown), sized like the copy
+   button beside it */
+.md-codeblock-lang .gs-dd-btn {
   height: 22px;
-  border: 1px solid var(--border-strong);
   border-radius: 5px;
-  background: var(--surface);
   color: var(--text-secondary);
   font-size: 11.5px;
   padding: 0 4px;
@@ -1966,6 +2028,7 @@ body {
   font-size: 11.5px;
   padding: 0 8px;
   cursor: pointer;
+  outline: none;
 }
 
 .md-codeblock-copy:hover {
@@ -1998,44 +2061,6 @@ body {
   background: transparent;
   color: var(--text);
   cursor: pointer;
-}
-
-/* fast tooltip: dark pill under the button (icon-only buttons need a quick label) */
-.tm-btn[data-tip]::after,
-.md-gutter-btn[data-tip]::after {
-  content: attr(data-tip);
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  translate: -50% 0;
-  margin-top: 8px;
-  padding: 4px 8px;
-  background: var(--color-btn-primary);
-  color: var(--color-btn-primary-text);
-  font-size: 12px;
-  line-height: 1.4;
-  border-radius: 8px;
-  box-shadow: var(--md-tip-shadow);
-  white-space: nowrap;
-  pointer-events: none;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.15s ease;
-  transition-delay: 0s;
-  z-index: 50;
-}
-
-.tm-btn[data-tip]:hover::after {
-  opacity: 1;
-  visibility: visible;
-  transition-delay: 0.15s;
-}
-
-/* the gutter is passed on the way to other targets — show its hint a bit later */
-.md-gutter-btn[data-tip]:hover::after {
-  opacity: 1;
-  visibility: visible;
-  transition-delay: 0.45s;
 }
 
 .tm-btn:hover {
@@ -2126,5 +2151,122 @@ body {
 }
 
 .md-block-menu-item.danger:hover {
+  background: var(--danger-bg);
+}
+
+/* ---- math (KaTeX) nodes & LaTeX edit popover ---- */
+
+.tiptap-mathematics-render {
+  border-radius: 5px;
+}
+
+span.tiptap-mathematics-render {
+  display: inline-block;
+  padding: 0 2px;
+}
+
+div.tiptap-mathematics-render {
+  padding: 8px 12px;
+  margin: 0.5em 0;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.tiptap-mathematics-render--editable {
+  cursor: pointer;
+}
+
+.tiptap-mathematics-render--editable:hover {
+  background: var(--hover);
+}
+
+.tiptap-mathematics-render.ProseMirror-selectednode {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* KaTeX parse failure: show the raw source in the code font */
+.tiptap-mathematics-render.block-math-error,
+.tiptap-mathematics-render.inline-math-error {
+  color: var(--danger);
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+}
+
+.md-math-pop {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 400px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 10px 32px var(--md-shadow-color);
+}
+
+.md-math-input {
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 8px;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.md-math-input:focus {
+  border-color: var(--accent);
+}
+
+.md-math-preview {
+  display: flex;
+  /* `safe` keeps the start edge reachable when a tall formula scrolls */
+  align-items: safe center;
+  justify-content: safe center;
+  min-height: 36px;
+  max-height: 40vh;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--hover);
+  overflow: auto;
+}
+
+.md-math-preview-empty {
+  display: none;
+}
+
+.md-math-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.md-math-actions button {
+  height: 26px;
+  border: none;
+  border-radius: 5px;
+  font-size: 12.5px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.md-math-apply {
+  background: var(--color-btn-primary);
+  color: var(--color-btn-primary-text);
+}
+
+.md-math-delete {
+  background: transparent;
+  color: var(--danger);
+}
+
+.md-math-delete:hover {
   background: var(--danger-bg);
 }

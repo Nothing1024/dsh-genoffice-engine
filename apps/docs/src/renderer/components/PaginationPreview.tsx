@@ -8,6 +8,7 @@ import type {
 } from '@genoffice/docx-engine'
 import {
   appendEndnotesBlock,
+  appendFloatSpillBlock,
   assignSections,
   effectiveBottomPx,
   effectiveHfRefs,
@@ -16,6 +17,7 @@ import {
   liveSections,
   measureBlocks,
   pageNumbers,
+  sectionBidi,
   sectionColGeom,
   sectionFirstPages,
   sectionGeoms,
@@ -27,9 +29,10 @@ import {
   type PageSlice,
   type SectionHfHeights,
 } from '../pagination'
-import { estimateHfHeight, FOOTNOTE_SEPARATOR_H } from '../line-metrics'
+import { estimateHfHeight, hfHeaderGeom, FOOTNOTE_SEPARATOR_H } from '../line-metrics'
 import { toRoman } from '../note-format'
 import { useI18n } from '../i18n/locale'
+import { hfFloatPagePos } from '../editor/hf-dom'
 import { HeaderFooterArea } from './HeaderFooterArea'
 
 const twipsToPx = (twips: number) => (twips / 1440) * 96
@@ -56,7 +59,27 @@ const CLONE_PRUNE_BUDGET = 150_000
 /** window slack around a page (px): keeps neighbours whose floats/overflow bleed into the page */
 const CLONE_PRUNE_PAD = 2000
 
-/** pruned clone for one page window: blocks intersecting [from-pad, to+pad] verbatim, pruned runs as spacers (exported for tests) */
+/**
+ * Canvas block → clone HTML. Phantom table rows (page-gap / repeated-header
+ * widgets) are removed and rowspans restored to their source values
+ * (data-base-rowspan): the canvas grows rowspans to bridge the phantom rows,
+ * but the clone hides/drops them, so the grown spans would swallow real rows.
+ */
+function cloneBlockHtml(el: HTMLElement): string {
+  if (!el.querySelector('tr.page-gap, tr.page-repeat-header, [data-base-rowspan]')) {
+    return el.outerHTML
+  }
+  const tmp = el.cloneNode(true) as HTMLElement
+  for (const tr of Array.from(tmp.querySelectorAll('tr.page-gap, tr.page-repeat-header'))) {
+    tr.remove()
+  }
+  for (const td of Array.from(tmp.querySelectorAll('[data-base-rowspan]'))) {
+    td.setAttribute('rowspan', td.getAttribute('data-base-rowspan')!)
+  }
+  return tmp.outerHTML
+}
+
+/** pruned clone for one page window: blocks intersecting [from-pad, to+pad] verbatim, pruned runs as spacers */
 export function prunedCloneHtml(kids: CloneChild[], from: number, to: number): string {
   const lo = from - CLONE_PRUNE_PAD
   const hi = to + CLONE_PRUNE_PAD
@@ -80,9 +103,9 @@ export function prunedCloneHtml(kids: CloneChild[], from: number, to: number): s
       pruned = false
     }
     parts.push(c.html)
-    // zero markers advance the flow position too (a spacer may have been
-    // emitted before them); skipping them leaves `base` stale and the next
-    // spacer re-adds the distance already consumed, shifting content down
+    // zero-height markers anchor positions too: skipping them here made every
+    // following marker's spacer re-span the full distance from the last real
+    // block, inflating the clone flow (blank pages past the drift)
     lastKept = c
   }
   return parts.join('')
@@ -117,31 +140,37 @@ export interface HfSet {
 export function PaginationPreview({
   section,
   sections,
+  delSectBreaks,
   hfParts,
   colFlow,
+  colMode,
   zoom,
   hf,
   watermark,
-  pageColor,
   blockMetaOf,
   pageFootnotesOf,
   endnoteItems,
   sectionHfOverride,
+  clearPageGaps,
   onExportPdf,
   onClose,
+  suppressEscape,
 }: {
   /** Canvas geometry (final section): for the measurement origin / clone width */
   section: SectionSettings
   /** All sections: for per-page paper geometry (empty array = single section per `section`) */
   sections: SectionInfo[]
+  /** section-break paragraphs whose mark is a tracked deletion (no break in markup views) */
+  delSectBreaks?: Set<number>
   /** rId → header/footer parts (multi-section picks by each section's references) */
   hfParts: Record<string, HfPartInfo>
   /** Canvas column-flow geometry (non-null when the canvas column CSS is active): shared by the measuring state / clone wrap width */
   colFlow: { cols: number; colWidthPx: number; gapPx: number } | null
+  /** canvas column mode: 'uniform' = whole-page CSS multicol, 'mixed' = per-block layout decorations */
+  colMode: 'none' | 'uniform' | 'mixed'
   zoom: number
   hf: HfSet
   watermark: string | null
-  pageColor: string | null
   /** docxIndex → parse-layer pagination constraints (keepNext/widow/table-row flags) */
   blockMetaOf?: BlockMetaOf
   /** Per-page footnote collection (referencing page → entry list), for page-bottom rendering */
@@ -150,8 +179,18 @@ export function PaginationPreview({
   endnoteItems?: PageNoteItem[]
   /** Multi-section: unsaved per-section header/footer edit overrides (default variant) */
   sectionHfOverride?: (sectionIndex: number, kind: 'header' | 'footer') => HeaderFooter | null
+  /**
+   * Clears the canvas page-gap decorations before the snapshot measure. In-table
+   * gap/repeated-header widgets are extra <tr>s that consume rowspan slots, so a
+   * vMerge-heavy table measures with collapsed columns (exploding row heights)
+   * while they are present; the canvas rebuilds them on its next debounced
+   * remeasure after the snapshot.
+   */
+  clearPageGaps?: () => void
   onExportPdf: () => void
   onClose: () => void
+  /** While true (e.g. the print dialog is stacked on top), Escape must not close the preview */
+  suppressEscape?: boolean
 }) {
   const { t } = useI18n()
   const [slices, setSlices] = useState<PageSlice[]>([])
@@ -170,7 +209,7 @@ export function PaginationPreview({
   // canvas content-area top = effective top margin after header push-down (matches --page-pad)
   const canvasMTop = effectiveTopPx(
     section,
-    estimateHfHeight(hf.header, canvasContentW, hf.images?.header),
+    estimateHfHeight(hf.header, canvasContentW, hf.images?.header, hfHeaderGeom(section)),
   )
   /** Settings of the page's section (single-section documents fall back to the canvas geometry) */
   const settingsOf = (slice: PageSlice): SectionSettings =>
@@ -179,13 +218,23 @@ export function PaginationPreview({
   useEffect(() => {
     const pm = document.querySelector('.editor-scroll .ProseMirror') as HTMLElement | null
     if (!pm) return
+    clearPageGaps?.()
     const factor = zoom / 100
-    // switch the columned canvas to the single-flow measuring state (CSS columns off, width = column width), matching engine column-flow coordinates
-    if (colFlow) pm.classList.add('measuring-columns')
+    // switch the columned canvas to the single-flow measuring state (uniform: CSS columns
+    // off, width = column width; mixed: block translates off), matching engine column-flow
+    // coordinates. vAlign documents carry the same visual translates on the canvas
+    // (vAlignShiftSpecs) and the preview applies its own vOffset, so they must be
+    // neutralized here too or the shifted rects double-apply.
+    const measureNeutralize =
+      colMode !== 'none' ||
+      section.vAlign === 'center' ||
+      section.vAlign === 'bottom' ||
+      sections.some((s) => s.settings.vAlign === 'center' || s.settings.vAlign === 'bottom')
+    if (measureNeutralize) pm.classList.add('measuring-columns')
     try {
       const origin = pm.getBoundingClientRect().top + canvasMTop * factor
-      const { blocks, totalHeight } = measureBlocks(pm, origin, factor)
-      const live = liveSections(sections, blocks)
+      const { blocks, totalHeight, floats, sectBreaks } = measureBlocks(pm, origin, factor)
+      const live = liveSections(sections, blocks, sectBreaks, delSectBreaks)
       setSecs(live)
       if (live.length > 0) assignSections(blocks, live)
       const withEndnotes = appendEndnotesBlock(
@@ -194,7 +243,13 @@ export function PaginationPreview({
         endnoteItems ?? [],
         FOOTNOTE_SEPARATOR_H,
       )
-      const flowH = withEndnotes?.totalHeight ?? totalHeight
+      // floating boxes below the flow end still need pages to land on
+      const flowWithFloats = appendFloatSpillBlock(
+        blocks,
+        withEndnotes?.totalHeight ?? totalHeight,
+        floats,
+      )
+      const flowH = flowWithFloats ?? withEndnotes?.totalHeight ?? totalHeight
       setEndnotesTop(withEndnotes?.top ?? null)
       let computed: PageSlice[]
       if (live.length > 0) {
@@ -220,18 +275,21 @@ export function PaginationPreview({
             return i === live.length - 1 ? hf.images?.[kind] : undefined
           }
           return {
-            headerPx: estimateHfHeight(pick('header'), w, imagesOf('header')),
+            headerPx: estimateHfHeight(pick('header'), w, imagesOf('header'), hfHeaderGeom(set)),
             footerPx: estimateHfHeight(pick('footer'), w, imagesOf('footer')),
           }
         })
         const geoms = sectionGeoms(live, hfHs)
-        // when the canvas column CSS is inactive, measure as full-width single flow; the geometry drops column flow to match
-        if (!colFlow) for (const g of geoms) if (g.cols) g.cols = undefined
+        // when the canvas column layout is inactive, measure as full-width single flow; the geometry drops column flow to match
+        if (colMode === 'none') for (const g of geoms) if (g.cols) g.cols = undefined
         computed = sliceWithLineSplit(blocks, geoms, flowH, factor, blockMetaOf)
       } else {
         const contentH =
           twipsToPx(section.pageHeight) -
-          effectiveTopPx(section, estimateHfHeight(hf.header, canvasContentW, hf.images?.header)) -
+          effectiveTopPx(
+            section,
+            estimateHfHeight(hf.header, canvasContentW, hf.images?.header, hfHeaderGeom(section)),
+          ) -
           effectiveBottomPx(section, estimateHfHeight(hf.footer, canvasContentW, hf.images?.footer))
         computed = sliceWithLineSplit(
           blocks,
@@ -258,7 +316,7 @@ export function PaginationPreview({
         let gapAccum = 0
         for (const el of kidEls) {
           const rect = el.getBoundingClientRect()
-          if (el.classList.contains('page-gap')) {
+          if (el.classList.contains('page-gap') || el.classList.contains('page-float-host')) {
             gapAccum += rect.height
             continue
           }
@@ -270,7 +328,7 @@ export function PaginationPreview({
           const h = (rect.height - innerGap) / factor
           gapAccum += innerGap
           metas.push({
-            html: el.outerHTML,
+            html: cloneBlockHtml(el),
             vTop,
             vBottom: vTop + h,
             mt: parseFloat(cs.marginTop) || 0,
@@ -282,16 +340,20 @@ export function PaginationPreview({
         setHtml('')
       } else {
         setCloneKids(null)
-        setHtml(pm.innerHTML)
+        setHtml(Array.from(pm.children, (c) => cloneBlockHtml(c as HTMLElement)).join(''))
       }
     } finally {
-      if (colFlow) pm.classList.remove('measuring-columns')
+      if (measureNeutralize) pm.classList.remove('measuring-columns')
     }
     // snapshot: measure once on open; deps intentionally empty
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
+    // stopPropagation cannot shield this window-level listener from the print
+    // dialog's own Escape handler (same target, same phase), so the dialog
+    // suppresses it via prop while it is stacked on top
+    if (suppressEscape) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
@@ -300,7 +362,7 @@ export function PaginationPreview({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [onClose])
+  }, [onClose, suppressEscape])
 
   const multiSection = secs.length > 1
   const effRefs = useMemo(() => effectiveHfRefs(secs), [secs])
@@ -391,7 +453,7 @@ export function PaginationPreview({
         <span className="pv-title">{t('appPaginationPreview')}</span>
         <span className="pv-count">{t('appTotalPagesN', { n: slices.length })}</span>
         <span className="pv-hint">{t('appPvHint')}</span>
-        <button className="pv-close" title={t('appPvExportTip')} onClick={onExportPdf}>
+        <button className="pv-close" data-tip={t('appPvExportTip')} onClick={onExportPdf}>
           {t('appExportPdf')}
         </button>
         <button className="pv-close" onClick={onClose}>
@@ -407,8 +469,14 @@ export function PaginationPreview({
           const pageH = pageBox.height
           const secContentW = pageBox.contentWidth
           // effective margins after this page's variant header/footer push-down (an over-tall header pushes the body down)
-          const mTop = effectiveTopPx(s, estimateHfHeight(parts.header, secContentW))
-          const mBottom = effectiveBottomPx(s, estimateHfHeight(parts.footer, secContentW))
+          const mTop = effectiveTopPx(
+            s,
+            estimateHfHeight(parts.header, secContentW, parts.headerImages, hfHeaderGeom(s)),
+          )
+          const mBottom = effectiveBottomPx(
+            s,
+            estimateHfHeight(parts.footer, secContentW, parts.footerImages),
+          )
           const contentH = pageH - mTop - mBottom
           // page vertical alignment (sectPr w:vAlign): content of non-full pages shifts down as a whole
           const usedH = Math.min(slice.end - slice.start, contentH)
@@ -430,11 +498,12 @@ export function PaginationPreview({
                   '--pv-page-h': `${pageH}px`,
                   '--page-w': `${pageW}px`,
                   '--page-h': `${pageH}px`,
+                  '--section-content-w': `${secContentW}px`,
                   '--header-dist': `${pageBox.headerDist}px`,
                   '--footer-dist': `${pageBox.footerDist}px`,
                   '--pv-mr': `${twipsToPx(s.marginRight)}px`,
+                  '--pv-ml': `${twipsToPx(s.marginLeft)}px`,
                   padding: `${mTop}px ${twipsToPx(s.marginRight)}px ${mBottom}px ${twipsToPx(s.marginLeft)}px`,
-                  background: pageColor ? `#${pageColor}` : undefined,
                 } as React.CSSProperties
               }
             >
@@ -443,11 +512,44 @@ export function PaginationPreview({
                   {watermark}
                 </div>
               )}
+              {(parts.headerImages ?? [])
+                .filter((img) => img.floating)
+                .map((img, k) => {
+                  // picture watermark (anchored image in the header): drawn once
+                  // per page behind the body (negative z-index; .pv-page isolates)
+                  const pos = hfFloatPagePos(img, {
+                    pageW,
+                    pageH,
+                    marginLeft: twipsToPx(s.marginLeft),
+                    marginRight: twipsToPx(s.marginRight),
+                    marginTop: mTop,
+                    marginBottom: mBottom,
+                    headerDist: pageBox.headerDist,
+                    sectMarginTop: twipsToPx(s.marginTop),
+                  })
+                  return (
+                    <img
+                      key={`wm${k}`}
+                      className="pv-watermark-img"
+                      src={img.dataUrl}
+                      alt=""
+                      aria-hidden="true"
+                      style={{
+                        left: pos.x,
+                        top: pos.y,
+                        transform: `translate(${pos.translateX}%, ${pos.translateY}%)`,
+                        ...(img.widthPx ? { width: img.widthPx } : {}),
+                        ...(img.heightPx ? { height: img.heightPx } : {}),
+                        ...(img.washout ? { filter: 'brightness(1.6) contrast(0.35)' } : {}),
+                      }}
+                    />
+                  )
+                })}
               {parts.header && (
                 <HeaderFooterArea
                   kind="header"
                   value={parts.header}
-                  images={parts.headerImages}
+                  images={parts.headerImages?.filter((img) => !img.floating)}
                   readOnly
                   onCommit={() => {}}
                   pageNo={pageNoText}
@@ -489,17 +591,32 @@ export function PaginationPreview({
                       ? slice.regions![ri + 1].top - region.top
                       : undefined
                   const multi = rg.cols > 1
+                  const rtl = multi && rSec != null && sectionBidi(rSec)
+                  const geo = rg as Partial<{ widths: number[]; gaps: number[] }> & typeof rg
+                  // per-column width/gap (w:equalWidth="0" lists differ per column);
+                  // gaps ride the columns as margins so unequal spaces work too
+                  const widthOf = (ci: number) =>
+                    multi ? (geo.widths?.[ci] ?? rg.colWidthPx) : undefined
+                  const gapAfter = (ci: number) =>
+                    multi && ci < region.columns.length - 1 ? (geo.gaps?.[ci] ?? rg.gapPx) : 0
                   return (
                     <div
                       key={ri}
                       className="pv-region"
-                      style={{ gap: rg.gapPx, ...(extent !== undefined ? { height: extent } : {}) }}
+                      style={{
+                        ...(extent !== undefined ? { height: extent } : {}),
+                        // RTL section (w:bidi): columns fill right-to-left
+                        ...(rtl ? { flexDirection: 'row-reverse' as const } : {}),
+                      }}
                     >
                       {region.columns.map((col, ci) => (
                         <div
                           key={ci}
                           className="pv-col"
-                          style={{ width: multi ? rg.colWidthPx : undefined }}
+                          style={{
+                            width: widthOf(ci),
+                            ...(rtl ? { marginLeft: gapAfter(ci) } : { marginRight: gapAfter(ci) }),
+                          }}
                         >
                           {col.repeatHeader && (
                             <div className="pv-clip" style={{ height: col.repeatHeader.height }}>
@@ -621,6 +738,9 @@ export function PaginationPreview({
                                     fontSize: run.sizeHalfPoints
                                       ? `${run.sizeHalfPoints / 2}pt`
                                       : undefined,
+                                    textTransform: run.caps === 'all' ? 'uppercase' : undefined,
+                                    fontVariantCaps:
+                                      run.caps === 'small' ? 'small-caps' : undefined,
                                   }}
                                 >
                                   {run.text}
@@ -670,6 +790,9 @@ export function PaginationPreview({
                                       fontSize: run.sizeHalfPoints
                                         ? `${run.sizeHalfPoints / 2}pt`
                                         : undefined,
+                                      textTransform: run.caps === 'all' ? 'uppercase' : undefined,
+                                      fontVariantCaps:
+                                        run.caps === 'small' ? 'small-caps' : undefined,
                                     }}
                                   >
                                     {run.text}
@@ -687,7 +810,7 @@ export function PaginationPreview({
                 <HeaderFooterArea
                   kind="footer"
                   value={parts.footer}
-                  images={parts.footerImages}
+                  images={parts.footerImages?.filter((img) => !img.floating)}
                   readOnly
                   onCommit={() => {}}
                   pageNo={pageNoText}

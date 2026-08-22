@@ -116,6 +116,17 @@ describe('generateTableModelXml', () => {
     expect(model.colWidthsPct?.map(Math.round)).toEqual([25, 35, 40])
   })
 
+  it('emits and round-trips the table left indent (w:tblInd, P17)', async () => {
+    const xml = generateTableModelXml({
+      colWidthsTwips: [2000, 2000],
+      indentTwips: 1300,
+      rows: [[{ paras: ['a'] }, { paras: ['b'] }]],
+    })
+    expect(xml).toContain('<w:tblInd w:w="1300" w:type="dxa"/>')
+    const parsed = await parseDocx(await buildDocx({ bodyXml: xml }))
+    expect(parsed.blocks[0].table!.indentTwips).toBe(1300)
+  })
+
   it('reuses the imported tblPr while regenerating rows and rich runs', async () => {
     const template =
       '<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/>' +
@@ -160,6 +171,31 @@ describe('generateTableModelXml', () => {
       font: 'Arial',
       sizeHalfPoints: 30,
     })
+  })
+
+  it('writes w:jc after w:tblW for an explicit alignment and round-trips it', async () => {
+    const xml = generateTableModelXml({
+      align: 'center',
+      rows: [[{ paras: ['a'] }, { paras: ['b'] }]],
+    })
+    expect(xml).toMatch(/<w:tblW[^>]*\/><w:jc w:val="center"\/>/)
+    const parsed = await parseDocx(await buildDocx({ bodyXml: xml }))
+    expect(parsed.blocks[0].table!.align).toBe('center')
+  })
+
+  it("align 'left' strips the original w:jc; undefined keeps it", () => {
+    const template =
+      '<w:tbl><w:tblPr><w:tblW w:w="8000" w:type="dxa"/><w:jc w:val="right"/></w:tblPr>' +
+      '<w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid>' +
+      '<w:tr><w:tc><w:p><w:r><w:t>Old</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+    const model = { rows: [[{ paras: ['New'] }]] }
+    expect(generateTableModelXml({ ...model, align: 'left' as const }, template)).not.toContain(
+      '<w:jc',
+    )
+    expect(generateTableModelXml(model, template)).toContain('<w:jc w:val="right"/>')
+    expect(generateTableModelXml({ ...model, align: 'center' as const }, template)).toContain(
+      '<w:jc w:val="center"/>',
+    )
   })
 })
 
@@ -256,5 +292,100 @@ describe('tblStyleId table style reference', () => {
     // undefined leaves it untouched
     const kept = generateTableModelXml({ rows: [[{ paras: ['x'] }]] }, orig)
     expect(kept).toContain('<w:tblStyle w:val="TableGrid"/>')
+  })
+})
+
+describe('cell paragraph properties survive a table rebuild', () => {
+  /** Word writes an RTL cell as w:bidi plus a LOGICAL w:jc: "left" means start, i.e. flush right. */
+  const RTL_TABLE =
+    '<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:bidiVisual/></w:tblPr>' +
+    '<w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>' +
+    '<w:tr>' +
+    '<w:tc><w:p><w:pPr><w:bidi/><w:jc w:val="left"/><w:spacing w:after="80"/>' +
+    '<w:ind w:left="120"/><w:shd w:val="clear" w:color="auto" w:fill="DDEEFF"/>' +
+    '</w:pPr><w:r><w:t>الاسم</w:t></w:r></w:p></w:tc>' +
+    '<w:tc><w:p><w:pPr><w:bidi/></w:pPr><w:r><w:t>القيمة</w:t></w:r></w:p></w:tc>' +
+    '</w:tr></w:tbl>'
+
+  const rebuild = async (tableXml: string) => {
+    const doc = await parseDocx(await buildDocx({ bodyXml: tableXml }))
+    const model = doc.blocks.find((b) => b.table)?.table
+    expect(model).toBeDefined()
+    return generateTableModelXml(model!)
+  }
+
+  it('keeps w:bidi and writes the logical w:jc back', async () => {
+    const out = await rebuild(RTL_TABLE)
+    expect(out.match(/<w:bidi\/>/g)).toHaveLength(2)
+    // parsed as visual "right", so Word's logical value on the way out is "left"
+    expect(out.match(/<w:jc w:val="[^"]*"\/>/g)).toEqual(['<w:jc w:val="left"/>'])
+  })
+
+  it('leaves a bidi cell that declared no alignment without one', async () => {
+    const out = await rebuild(RTL_TABLE)
+    // the second cell had w:bidi and no w:jc; dropping w:bidi would flip it from the RTL
+    // default (flush right) to the LTR default (flush left)
+    const second = out.slice(out.lastIndexOf('<w:tc>'))
+    expect(second).toContain('<w:bidi/>')
+    expect(second).not.toContain('<w:jc ')
+  })
+
+  it('keeps spacing, indent and shading', async () => {
+    const out = await rebuild(RTL_TABLE)
+    expect(out).toContain('<w:spacing w:after="80"/>')
+    expect(out).toContain('<w:ind w:left="120"/>')
+    expect(out).toContain('<w:shd w:val="clear" w:color="auto" w:fill="DDEEFF"/>')
+  })
+
+  it("does not stamp another paragraph's alignment onto one that declared none", async () => {
+    // mixed jc: no cell-level alignment, and the jc-less paragraph must stay that way
+    const out = await rebuild(
+      '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' +
+        '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:t>b</w:t></w:r></w:p>' +
+        '</w:tc></w:tr></w:tbl>',
+    )
+    expect(out.match(/<w:jc w:val="center"\/>/g)).toHaveLength(1)
+    const second = out.slice(out.lastIndexOf('<w:p>'))
+    expect(second).not.toContain('<w:jc ')
+  })
+
+  it('keeps a bidi paragraph free of alignment it never declared', async () => {
+    const out = await rebuild(
+      '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' +
+        '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:bidi/></w:pPr><w:r><w:t>عربي</w:t></w:r></w:p>' +
+        '</w:tc></w:tr></w:tbl>',
+    )
+    const second = out.slice(out.lastIndexOf('<w:p>'))
+    expect(second).toContain('<w:bidi/>')
+    expect(second).not.toContain('<w:jc ')
+  })
+
+  it("writes every paragraph's jc back when they all agree (cell.align set)", async () => {
+    const out = await rebuild(
+      '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' +
+        '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>b</w:t></w:r></w:p>' +
+        '</w:tc></w:tr></w:tbl>',
+    )
+    expect(out.match(/<w:jc w:val="center"\/>/g)).toHaveLength(2)
+  })
+})
+
+describe('trailing empty cell paragraph size survives regeneration', () => {
+  it('writes the empty paragraph and its w:sz back', async () => {
+    const doc = await parseDocx(
+      await buildDocx({
+        bodyXml:
+          '<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>' +
+          '<w:p><w:r><w:t>内容</w:t></w:r></w:p>' +
+          '<w:p><w:pPr><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr></w:p>' +
+          '</w:tc></w:tr></w:tbl>',
+      }),
+    )
+    const out = generateTableModelXml(doc.blocks[0].table!)
+    expect(out.match(/<w:p[\s>]|<w:p\/>/g)).toHaveLength(2)
+    expect(out).toContain('<w:pPr><w:rPr><w:sz w:val="2"/><w:szCs w:val="2"/></w:rPr></w:pPr>')
   })
 })

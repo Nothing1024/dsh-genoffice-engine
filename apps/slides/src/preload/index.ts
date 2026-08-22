@@ -4,6 +4,8 @@ import type { ProjectApi } from '@genoffice/project-store'
 import type {
   AddChartOp,
   AddElementOp,
+  ApplyEditScriptOp,
+  ApplyTxnOp,
   AddImageBytesOp,
   AddInkOp,
   AddMediaBytesOp,
@@ -55,6 +57,7 @@ import type {
   DesktopFilesApi,
   EditBackgroundOp,
   EditFillOp,
+  EditFillImageOp,
   EditStrokeOp,
   FlipElementOp,
   EditTextOp,
@@ -95,6 +98,14 @@ const api: SlidesApi = {
     ipcRenderer.on('app:theme-changed', listener)
     return () => ipcRenderer.removeListener('app:theme-changed', listener)
   },
+  onChromePressed: (handler) => {
+    const listener = () => handler()
+    ipcRenderer.on('app:chrome-pressed', listener)
+    return () => ipcRenderer.removeListener('app:chrome-pressed', listener)
+  },
+  setShowFullScreen: (on) => ipcRenderer.invoke('slides:show-fullscreen', on),
+  privateFontFaces: () => ipcRenderer.invoke('slides:private-font-faces'),
+  privateFontData: (id) => ipcRenderer.invoke('slides:private-font-data', id),
   openPptx: (fitWidthPx) => ipcRenderer.invoke('slides:open', fitWidthPx),
   openPptxPath: (path, fitWidthPx) => ipcRenderer.invoke('slides:open-path', path, fitWidthPx),
   consumePendingOpen: (fitWidthPx) => ipcRenderer.invoke('slides:consume-pending-open', fitWidthPx),
@@ -116,6 +127,8 @@ const api: SlidesApi = {
     width?: number
     height?: number
   }) => ipcRenderer.invoke('slides:cloud-page-generate', op),
+  localGeneratePage: (op: { specJson: string }) =>
+    ipcRenderer.invoke('slides:local-page-generate', op),
   editText: (op: EditTextOp) => ipcRenderer.invoke('slides:edit-text', op),
   setElementFont: (op: SetElementFontOp) => ipcRenderer.invoke('slides:set-element-font', op),
   setElementParagraphFormat: (op: SetElementParagraphFormatOp) =>
@@ -131,8 +144,16 @@ const api: SlidesApi = {
     ipcRenderer.invoke('slides:edit-picture-src-rect', op),
   editPictureOpacity: (op: EditPictureOpacityOp) =>
     ipcRenderer.invoke('slides:edit-picture-opacity', op),
-  editImageFill: (op: { slideIndex: number; sourceId: string }) =>
-    ipcRenderer.invoke('slides:edit-image-fill', op),
+  editImageFill: (op: EditFillImageOp) => ipcRenderer.invoke('slides:edit-image-fill', op),
+  changeShape: (op: { slideIndex: number; sourceId: string; prst: string; groupId?: string }) =>
+    ipcRenderer.invoke('slides:change-shape', op),
+  setShapeAdjust: (op: {
+    slideIndex: number
+    sourceId: string
+    adjust: Record<string, number>
+    groupId?: string
+    preview?: boolean
+  }) => ipcRenderer.invoke('slides:set-shape-adjust', op),
   setTextAnchor: (op: {
     slideIndex: number
     sourceId: string
@@ -238,6 +259,8 @@ const api: SlidesApi = {
     ipcRenderer.invoke('slides:native-clipboard', op),
   beginHistoryBatch: () => ipcRenderer.invoke('slides:history-batch-begin'),
   endHistoryBatch: () => ipcRenderer.invoke('slides:history-batch-end'),
+  applyEditScript: (op: ApplyEditScriptOp) => ipcRenderer.invoke('slides:apply-edit-script', op),
+  applyTxn: (op: ApplyTxnOp) => ipcRenderer.invoke('slides:apply-txn', op),
   aiSnapshotRestore: (id: number) => ipcRenderer.invoke('slides:ai-snapshot-restore', id),
   undo: () => ipcRenderer.invoke('slides:undo'),
   redo: () => ipcRenderer.invoke('slides:redo'),
@@ -253,6 +276,12 @@ const api: SlidesApi = {
     const listener = () => handler()
     ipcRenderer.on('slides:close-save-request', listener)
     return () => ipcRenderer.removeListener('slides:close-save-request', listener)
+  },
+  onHistoryChanged: (handler: (state: { canUndo: boolean; canRedo: boolean }) => void) => {
+    const listener = (_e: IpcRendererEvent, state: { canUndo: boolean; canRedo: boolean }) =>
+      handler(state)
+    ipcRenderer.on('slides:history-changed', listener)
+    return () => ipcRenderer.removeListener('slides:history-changed', listener)
   },
   reportCloseSaveResult: (ok: boolean) => ipcRenderer.send('slides:close-save-result', ok === true),
   setAutoSavePref: (on: boolean) => ipcRenderer.send('slides:autosave-pref', on === true),

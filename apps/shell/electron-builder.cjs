@@ -12,12 +12,31 @@
  * When the variable is unset (forks, PR smoke builds, plain local packaging)
  * the publish config is omitted: electron-builder then bakes no
  * app-update.yml into the app and in-app auto-update stays disabled.
+ *
+ * GENOFFICE_GA4_MEASUREMENT_ID / GENOFFICE_GA4_API_SECRET — GA4 Measurement
+ * Protocol credentials for anonymous usage analytics, injected the same way
+ * (CI secrets, or apps/shell/electron-builder.env locally). They are written
+ * into the packaged app's package.json via extraMetadata and read back by
+ * src/main/analytics.ts. When either is unset — every source/fork build —
+ * nothing is injected and the app runs with analytics fully disabled.
  */
 
+const { execFileSync } = require('node:child_process')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
 
 const updateUrl = process.env.GENOFFICE_UPDATE_URL
+const ga4MeasurementId = process.env.GENOFFICE_GA4_MEASUREMENT_ID
+const ga4ApiSecret = process.env.GENOFFICE_GA4_API_SECRET
+
+// GENOFFICE_MAC_X64=1 — opt into packaging the Intel (x64) dmg/zip alongside
+// arm64. Off by default: Intel packages must only ever ship signed with the
+// company certificate (planned dual-track pipeline), so the current release
+// pipeline stays arm64-only and never produces a personally-signed Intel
+// artifact. The downstream layout (feed archive name, GenOffice-intel.dmg
+// alias) keys off which dmgs exist, so flipping this flag is the single
+// switch.
+const includeMacX64 = process.env.GENOFFICE_MAC_X64 === '1'
 
 // The gsk CLI tree below is copied verbatim from node_modules, and the
 // nested commander path depends on npm's current hoisting layout — fail the
@@ -52,6 +71,30 @@ for (const rel of [
 // Runs from the beforePack hook, not at module load: gen-third-party-notices
 // requires this config to read extraResources, and the dist:* scripts run
 // notices before build:all, when the out dirs legitimately don't exist yet.
+// When the mac build packages BOTH arches (GENOFFICE_MAC_X64=1) its
+// extraResources entry is a single path shared by the two packs, so the
+// sidecar there must be a lipo fat binary — a host-arch-only build (the plain
+// `native:build` dev path) would silently ship an arm64 sidecar inside the
+// Intel dmg, where every workbook open fails. Runs from beforePack, dual-arch
+// mac packs only.
+function assertUniversalSidecar() {
+  const sidecar = join(__dirname, '../sheets/native/xlsx-engine/target/release/xlsx-sidecar')
+  if (!existsSync(sidecar)) {
+    throw new Error(
+      `mac extraResources source missing: ${sidecar} (run "npm run native:build:universal -w @genoffice/sheets" first)`,
+    )
+  }
+  const archs = execFileSync('lipo', ['-archs', sidecar], { encoding: 'utf8' }).trim().split(/\s+/)
+  for (const want of ['x86_64', 'arm64']) {
+    if (!archs.includes(want)) {
+      throw new Error(
+        `xlsx-sidecar is [${archs.join(', ')}] but both mac arch packages ship it — ` +
+          'run "npm run native:build:universal -w @genoffice/sheets" before packaging mac',
+      )
+    }
+  }
+}
+
 function assertModuleTreesPresent() {
   for (const rel of [
     '../docs/out',
@@ -187,7 +230,17 @@ const config = {
   ],
   npmRebuild: false,
   mac: {
-    target: ['dmg', 'zip'],
+    // Two separate arch packages (NOT universal): arm64 keeps the exact
+    // artifact names and update-feed entries it always had, x64 (opt-in via
+    // GENOFFICE_MAC_X64=1, see includeMacX64 above) adds Intel support with
+    // electron-builder's default arch-less names (GenOffice-<v>.dmg /
+    // GenOffice-<v>-mac.zip). Both zips land in one latest-mac.yml and
+    // electron-updater picks by process.arch. Dual-arch packs ship the same
+    // lipo fat xlsx-sidecar (see assertUniversalSidecar above).
+    target: [
+      { target: 'dmg', arch: includeMacX64 ? ['arm64', 'x64'] : ['arm64'] },
+      { target: 'zip', arch: includeMacX64 ? ['arm64', 'x64'] : ['arm64'] },
+    ],
     category: 'public.app-category.productivity',
     hardenedRuntime: true,
     gatekeeperAssess: false,
@@ -223,13 +276,15 @@ const config = {
   // reverse, needs a matching `cargo build --target` first.
   linux: {
     // AppImage (self-contained, any distro) + deb (apt install, pulls in the
-    // GTK/NSS runtime deps). Default artifact names are kept on purpose —
+    // GTK/NSS runtime deps) + rpm (dnf/zypper install on Fedora / RHEL /
+    // openSUSE). Default artifact names are kept on purpose —
     // GenOffice-<v>.AppImage / genoffice_<v>_amd64.deb — because the public
     // README download links and the already-published linux-v0.5.149 release
     // use them.
     target: [
       { target: 'AppImage', arch: ['x64'] },
       { target: 'deb', arch: ['x64'] },
+      { target: 'rpm', arch: ['x64'] },
     ],
     // deb control metadata; values match the manually published 0.5.149 deb
     // so apt sees the new packages as the same lineage. Homepage comes from
@@ -238,7 +293,12 @@ const config = {
     maintainer: 'Mainfunc, Inc. <team@genspark.ai>',
     vendor: 'Mainfunc, Inc. <team@genspark.ai>',
     category: 'Office',
-    icon: 'build/icon.png',
+    // Icon SET directory, not the single 1024px png: electron-builder does
+    // not resize a lone png, so deb/rpm would install only
+    // hicolor/1024x1024/apps/genoffice.png — a size absent from the hicolor
+    // theme index, leaving GNOME/KDE launchers on the generic fallback icon
+    // (genspark-ai/genoffice#90). The set ships every standard raster size.
+    icon: 'build/icons',
     // mac and win name the binary from productName; linux instead derives it
     // from package.json "name", and "@genoffice/shell" sanitizes to the
     // invalid "@genofficeshell". Setting it explicitly also makes the
@@ -272,12 +332,29 @@ const config = {
     artifactName: 'genoffice_${version}_${arch}.deb',
     packageName: 'genoffice',
   },
+  // Same "@genoffice/shell" naming problem as deb: spell the artifact name
+  // out (${arch} expands to the rpm arch string, x86_64) and pin the rpm
+  // Package name so dnf/zypper treat successive releases as upgrades of the
+  // same package. Like deb, rpm installs run no in-app updater — users
+  // upgrade with `dnf install ./<new>.rpm`. Packaging needs rpmbuild on the
+  // build host (the `rpm` apt package on Ubuntu; CI installs it).
+  //
+  // publish: null (explicit) keeps the rpm out of the electron-updater feed
+  // and off the CDN entirely: the rpm is a GitHub-Release download only, so
+  // latest-linux.yml keeps listing exactly what the CDN pipeline uploads
+  // (AppImage + deb) and the promote workflow needs no rpm alias.
+  rpm: {
+    artifactName: 'genoffice-${version}.${arch}.rpm',
+    packageName: 'genoffice',
+    publish: null,
+  },
   nsis: {
     oneClick: false,
     allowToChangeInstallationDirectory: true,
   },
-  beforePack: async () => {
+  beforePack: async (context) => {
     assertModuleTreesPresent()
+    if (context.electronPlatformName === 'darwin' && includeMacX64) assertUniversalSidecar()
   },
   dmg: {
     sign: true,
@@ -293,6 +370,17 @@ if (updateUrl) {
       channel: 'latest',
     },
   ]
+}
+
+// CI's "-c.extraMetadata.version=..." CLI override deep-merges with this
+// block, so both survive together in the packaged package.json.
+if (ga4MeasurementId && ga4ApiSecret) {
+  config.extraMetadata = {
+    genofficeAnalytics: {
+      measurementId: ga4MeasurementId,
+      apiSecret: ga4ApiSecret,
+    },
+  }
 }
 
 module.exports = config

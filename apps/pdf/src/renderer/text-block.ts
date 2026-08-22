@@ -13,6 +13,8 @@ export interface BlockLine {
   /** Baseline y */
   y: number
   fontSize: number
+  /** Width-weighted dominant pdf.js font id — lets the drag ghost read like the page */
+  font?: string
 }
 
 export interface TextBlock {
@@ -34,6 +36,7 @@ interface Frag {
   w: number
   h: number
   text: string
+  font?: string
 }
 
 const median = (nums: number[]): number => {
@@ -68,6 +71,18 @@ const dominant = (pairs: [size: number, weight: number][]): number => {
   return best
 }
 
+/** Estimated width of a line's first wrap-unit: CJK breaks after any character
+    (one em, two with a kinsoku pull-down), Latin carries the whole word to the
+    next line. 0.6 em per Latin char errs high on purpose so a ragged wrap
+    before a wide word never reads as a paragraph end. */
+function firstTokenWidth(text: string, fs: number): number {
+  const t = text.trimStart()
+  if (!t) return 0
+  if (/^[\u2e80-\u9fff\uf900-\ufaff]/.test(t)) return fs * 2
+  const token = /^\S+/.exec(t)![0]
+  return token.length * fs * 0.6
+}
+
 const buildLine = (seg: Frag[]): BlockLine => {
   let text = ''
   let x1 = Infinity
@@ -87,11 +102,21 @@ const buildLine = (seg: Frag[]): BlockLine => {
     x2 = Math.max(x2, f.x + f.w)
     y2 = Math.max(y2, f.y + f.h)
   }
+  const fontW = new Map<string, number>()
+  for (const f of seg) if (f.font) fontW.set(f.font, (fontW.get(f.font) ?? 0) + f.w)
+  let font: string | undefined
+  let fontBest = 0
+  for (const [name, w] of fontW)
+    if (w > fontBest) {
+      fontBest = w
+      font = name
+    }
   return {
     rect: [x1, y1, x2, y2],
     text,
     y: seg[0]!.y,
     fontSize: dominant(seg.map((f) => [f.h, f.w])),
+    ...(font ? { font } : {}),
   }
 }
 
@@ -101,13 +126,54 @@ interface Para {
   leads: number[]
 }
 
+/** Overflow guard for paragraph reflow commits. PDF has no layout flow, so lines
+    pushed past the block's bottom edge (`bottomPt`, same frame as `firstBaseline`)
+    would be drawn straight over whatever sits below. True = the reflow extends
+    below the block AND that space holds another block (or is unknown — `others`
+    undefined fails closed); growth into empty space stays allowed. `selfRect` is
+    the edited block's own entry in `others`, skipped when scanning. */
+export function reflowOverflows(
+  blk: { leftPt: number; firstBaseline: number; widthPt: number; bottomPt: number },
+  lineCount: number,
+  lineLeading: number,
+  fontSizePt: number,
+  others: { rect: [number, number, number, number] }[] | undefined,
+  selfRect: [number, number, number, number],
+): boolean {
+  const lastBaseline = blk.firstBaseline - (lineCount - 1) * lineLeading
+  // The block's own last baseline sits ~0.2 font sizes above the rect bottom
+  // (buildLine); half that absorbs float noise without passing a real extra line
+  if (lastBaseline >= blk.bottomPt - fontSizePt * 0.1) return false
+  if (!others) return true
+  const band = [
+    blk.leftPt,
+    lastBaseline - fontSizePt * 0.3,
+    blk.leftPt + blk.widthPt,
+    blk.bottomPt,
+  ] as const
+  return others.some((b) => {
+    const r = b.rect
+    if (
+      r[0] === selfRect[0] &&
+      r[1] === selfRect[1] &&
+      r[2] === selfRect[2] &&
+      r[3] === selfRect[3]
+    )
+      return false
+    return (
+      Math.min(r[2], band[2]) - Math.max(r[0], band[0]) > 1 &&
+      Math.min(r[3], band[3]) - Math.max(r[1], band[1]) > 1
+    )
+  })
+}
+
 export function groupPageBlocks(entry: PageEntry): TextBlock[] {
   const frags: Frag[] = []
   for (const it of entry.items) {
     if (it.rot || !(it.w > 0) || !(it.h > 0)) continue
     const text = entry.text.slice(it.start, it.end)
     if (!text.trim()) continue
-    frags.push({ x: it.x, y: it.y, w: it.w, h: it.h, text })
+    frags.push({ x: it.x, y: it.y, w: it.w, h: it.h, text, font: it.font })
   }
   if (frags.length === 0) return []
 
@@ -175,6 +241,41 @@ export function groupPageBlocks(entry: PageEntry): TextBlock[] {
       best.leads.push(best.lines[best.lines.length - 1]!.y - ln.y)
       best.lines.push(ln)
     } else open.push({ lines: [ln], leads: [] })
+  }
+
+  // Split after paragraph-final short lines: adjacent paragraphs that share
+  // leading, font size and x-extent (labeled footer paragraphs, stacked body
+  // paragraphs, list items) are indistinguishable by leading alone. A real wrap
+  // leaves at most the next line's first wrap-unit unfilled, so an internal
+  // line falling shorter than that is a paragraph end, not a wrapped line.
+  // Left-set text only: centered/right-set lines are ragged on the right by design.
+  for (let i = open.length - 1; i >= 0; i--) {
+    const p = open[i]!
+    if (p.lines.length < 2) continue
+    let x1 = Infinity
+    let x2 = -Infinity
+    for (const l of p.lines) {
+      x1 = Math.min(x1, l.rect[0])
+      x2 = Math.max(x2, l.rect[2])
+    }
+    const fs = dominant(p.lines.map((l) => [l.fontSize, l.rect[2] - l.rect[0]]))
+    if (inferAlign(p.lines, x1, x2, fs) !== 'left') continue
+    const parts: Para[] = []
+    let cur: Para = { lines: [p.lines[0]!], leads: [] }
+    for (let j = 1; j < p.lines.length; j++) {
+      const prev = p.lines[j - 1]!
+      const ln = p.lines[j]!
+      const shortfall = x2 - prev.rect[2]
+      if (shortfall > firstTokenWidth(ln.text, ln.fontSize) + ln.fontSize * 1.5) {
+        parts.push(cur)
+        cur = { lines: [ln], leads: [] }
+      } else {
+        cur.leads.push(p.leads[j - 1]!)
+        cur.lines.push(ln)
+      }
+    }
+    parts.push(cur)
+    if (parts.length > 1) open.splice(i, 1, ...parts)
   }
 
   // Re-split where an internal gap is an outlier against the paragraph's own

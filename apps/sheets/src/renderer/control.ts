@@ -294,6 +294,9 @@ export async function buildExportBytes(opts: ControlAdapterOptions): Promise<Uin
       sparklineAdditions: [],
       formulaValues: [],
       definedNamesState: heldNames,
+      themeState: null,
+      workbookProtectionState: null,
+      protectedRangeStates: [],
     })
     void after
   }

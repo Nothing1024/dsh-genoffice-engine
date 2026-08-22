@@ -178,15 +178,8 @@ export function IconClearFormat(props: IconProps) {
       <path d="M4.35 8.85l1.8-1.8" />
       {/* compact diagonal eraser at the lower right (the old diamond's spot), outline only, band facing the A */}
       <g transform="rotate(45 17.4 17.4)">
-        <rect
-          x="13.65"
-          y="14.7"
-          width="7.5"
-          height="5.4"
-          rx="0.75"
-          stroke="var(--ribbon-accent-2, #A33FB5)"
-        />
-        <path d="M15.75 14.7v5.4" stroke="var(--ribbon-accent-2, #A33FB5)" />
+        <rect x="13.05" y="14.25" width="8.7" height="6.3" rx="0.9" />
+        <path d="M15.6 14.25v6.3" />
       </g>
     </Svg>
   )
@@ -210,6 +203,26 @@ export function IconShrinkFont(props: IconProps) {
   )
 }
 
+/* Fluent-style sub/superscript: lowercase-x strokes + a stroked digit 2 in the
+   corner (replaces the old HTML x<sub>2</sub> text glyphs) */
+export function IconSuperscript(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4.05 9.9 12.45 19.5M12.45 9.9 4.05 19.5" />
+      <path d="M15.9 7.05a2.25 2.25 0 0 1 4.5 0c0 1.35-1.28 2.4-4.5 4.65h4.73" />
+    </Svg>
+  )
+}
+
+export function IconSubscript(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4.05 6.9 12.45 16.5M12.45 6.9 4.05 16.5" />
+      <path d="M15.9 14.85a2.25 2.25 0 0 1 4.5 0c0 1.35-1.28 2.4-4.5 4.65h4.73" />
+    </Svg>
+  )
+}
+
 /** Character spacing (MS-style): AV above a double-headed arrow */
 export function IconCharSpacing(props: IconProps) {
   return (
@@ -217,10 +230,7 @@ export function IconCharSpacing(props: IconProps) {
       <TextGlyph x={4} y={13.5} s={13}>
         AV
       </TextGlyph>
-      <path
-        d="M4.5 18.75 h15 M7.2 16.05 4.5 18.75 l2.7 2.7 M16.8 16.05 19.5 18.75 l-2.7 2.7"
-        stroke="var(--ribbon-accent, #2B7CD3)"
-      />
+      <path d="M4.5 18.75 h15 M7.2 16.05 4.5 18.75 l2.7 2.7 M16.8 16.05 19.5 18.75 l-2.7 2.7" />
     </Svg>
   )
 }
@@ -320,11 +330,48 @@ export function IconCopy(props: IconProps) {
   )
 }
 
+/** Shape style gallery: two offset rounded rects (context-menu quick bar) */
+export function IconShapeStyle(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4" y="5" width="11" height="9" rx="1.5" />
+      <rect x="9.5" y="10.5" width="10.5" height="8.5" rx="1.5" fill="var(--surface)" />
+    </Svg>
+  )
+}
+
+/** Paint bucket + drop (context-menu quick bar fill entry) */
+export function IconFillColor(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M 7.6 10.4 12.6 5.4 l 5.6 5.6 -6.3 6.3 a 1.4 1.4 0 0 1 -2 0 L 5.6 13 a 1.4 1.4 0 0 1 0 -2 z" />
+      <path d="M 12.6 5.4 10.9 3.7" />
+      <path
+        d="M 19.7 15.4 c 0.9 1.2 1.5 2.2 1.5 3 a 1.5 1.5 0 0 1 -3 0 c 0 -0.8 0.6 -1.8 1.5 -3 z"
+        fill="currentColor"
+        stroke="none"
+      />
+    </Svg>
+  )
+}
+
+/** Concentric squares suggesting an outline ring (context-menu quick bar outline entry) */
+export function IconOutlineColor(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4.5" y="4.5" width="15" height="15" rx="2" />
+      <rect x="9" y="9" width="6" height="6" rx="1" />
+    </Svg>
+  )
+}
+
 export function IconFormatPainter(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M 16.5 4 H 3.97 V 10.71 H 16.5 Z" />
-      <path d="M 16.51 7.13 H 20.53 V 14.33 L 9.79 15.72 V 21" />
+      <rect x="10.65" y="4.05" width="2.7" height="5.1" rx="1.35" />
+      <rect x="4.5" y="9.15" width="15" height="10.8" rx="1.5" />
+      <path d="M 4.5 13.35 H 19.5" />
+      <path d="M 9.3 16.35 V 18.15 M 14.7 16.35 V 18.15" />
     </Svg>
   )
 }
@@ -557,11 +604,23 @@ export function IconOrientation(props: IconProps) {
   )
 }
 
+/* landscape slide with a diagonal resize arrow — PowerPoint's Slide Size glyph */
 export function IconPageSize(props: IconProps) {
   return (
     <Svg {...props}>
-      <rect x="6.23" y="4.49" width="11.55" height="15.02" rx="0.92" />
-      <path d="M 9.11 12 h 5.78 M 12 9.11 v 5.78 M 10.5 10.5 9.11 9.11 m 5.78 0 -1.39 1.39 m 0 3 1.39 1.39 m -5.78 0 1.39 -1.39" />
+      <rect x="4.1" y="6.25" width="15.8" height="11.5" rx="0.92" />
+      <path d="M 8.8 8.8 L 15.2 15.2 M 11.4 8.8 h -2.6 v 2.6 M 12.6 15.2 h 2.6 v -2.6" />
+    </Svg>
+  )
+}
+
+/* stacked slides with a check on the front one — applied across the deck */
+export function IconApplyAll(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="9.1" y="5.25" width="10.2" height="7" rx="0.92" />
+      <rect x="4.7" y="9.15" width="12.2" height="9.6" rx="0.92" fill="var(--surface, #fff)" />
+      <path d="M 8 14.15 l 2.3 2.3 l 4.6 -4.6" />
     </Svg>
   )
 }
@@ -850,11 +909,17 @@ export function IconPageWidth(props: IconProps) {
   )
 }
 
-export function IconWholePage(props: IconProps) {
+/** View tab fit-to-window, mirroring Fluent's zoom-fit: a small content rect
+ *  framed by four edge chevrons. Deliberately arrow-free — inward/outward
+ *  arrows read as fullscreen, and the original page-with-plus as "new page". */
+export function IconFitWindow(props: IconProps) {
   return (
     <Svg {...props}>
-      <rect x="6.23" y="4.49" width="11.55" height="15.02" rx="0.92" />
-      <path d="M 9.11 12 h 5.78 M 12 9.11 v 5.78" />
+      <rect x="8.5" y="8.5" width="7" height="7" rx="1.5" />
+      <path d="M5.2 9.3 3.4 12l1.8 2.7" />
+      <path d="M18.8 9.3 20.6 12l-1.8 2.7" />
+      <path d="M9.3 5.2 12 3.4l2.7 1.8" />
+      <path d="M9.3 18.8 12 20.6l2.7-1.8" />
     </Svg>
   )
 }
@@ -1039,17 +1104,29 @@ export function IconGear(props: IconProps) {
 }
 
 /** collapse the right sidebar: panel outline + arrow pushing into it */
-export function IconSidebarCollapse(props: IconProps) {
+/** Collapse glyph for RIGHT-docked panes (Format/Animation/Comments) — exact mirror of
+ *  IconSidebarCollapseLeft so both sides share the Sheets-parity look (16-canvas,
+ *  1.2/1.3 stroke), self-contained for the same pinned-stroke reason. */
+export function IconSidebarCollapse({ size = 24 }: IconProps) {
   return (
-    <Svg {...props}>
-      <rect x="4.49" y="5.65" width="15.02" height="12.71" rx="1.16" />
-      <path d="M 14.89 5.65 v 12.71" />
-      <path d="M 6.8 12 h 5.08 M 9.92 9.57 12.35 12 l -2.43 2.43" />
-    </Svg>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1" />
+      <path d="M10.5 2.5v11" />
+      <path d="M3.5 8h4.4M6.2 5.9 8.3 8l-2.1 2.1" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
   )
 }
 
-/** Mirror of IconSidebarCollapse for the LEFT-docked AI panel (right panes keep the original).
+/** Mirror of IconSidebarCollapse for the LEFT-docked AI panel.
  *  Sheets-parity glyph (16-canvas, 1.2/1.3 stroke), self-contained so the shared
  *  Svg wrapper's 24-canvas pinned stroke doesn't alter its weight. */
 export function IconSidebarCollapseLeft({ size = 24 }: IconProps) {
@@ -1122,10 +1199,9 @@ function SvgRatio({ size = 24, children }: IconProps & { children: ReactNode }) 
 export function IconSave(props: IconProps) {
   return (
     <SvgRatio {...props}>
-      <path d="M3 4.5C3 3.67158 3.67158 3 4.5 3H17.1407L21 6.60325V19.5C21 20.3285 20.3285 21 19.5 21H4.5C3.67158 21 3 20.3285 3 19.5V4.5Z" />
-      <path d="M12.0042 3L12 6.6923C12 6.86225 11.7761 7 11.5 7H7.5C7.22385 7 7 6.86225 7 6.6923V3H12.0042Z" />
-      <path d="M7 13H17" />
-      <path d="M7 17H12.0042" />
+      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+      <path d="M17 21v-8H7v8" />
+      <path d="M7 3v5h8V3" />
     </SvgRatio>
   )
 }
@@ -1268,6 +1344,29 @@ export function IconPlayCurrent(props: IconProps) {
       <rect x="4.49" y="5.65" width="15.02" height="10.4" rx="0.92" />
       <path d="M 10.27 8.3 v 5.08 l 4.39 -2.54 z" fill="currentColor" stroke="none" />
       <path d="M 12 16.04 v 2.31 M 9.11 18.35 h 5.78" />
+    </Svg>
+  )
+}
+
+/** Status-bar play: solid triangle in a rounded square. The frame is nearly
+ *  the full viewBox — the monitor-and-stand ribbon glyph reads too small at
+ *  status-bar sizes */
+export function IconPlayBoxed(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4.2" y="4.2" width="15.6" height="15.6" rx="2" />
+      <path d="M 9.9 8.3 v 7.4 l 6.2 -3.7 z" fill="currentColor" stroke="none" />
+    </Svg>
+  )
+}
+
+/** Status-bar notes toggle: a note page with text lines (near-full viewBox,
+ *  same rationale as IconPlayBoxed at status-bar sizes) */
+export function IconNotes(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4.2" y="4.2" width="15.6" height="15.6" rx="2" />
+      <path d="M8 9.3h8M8 12.3h8M8 15.3h5" />
     </Svg>
   )
 }

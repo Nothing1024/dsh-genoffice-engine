@@ -21,12 +21,19 @@ const MAX_SNAPSHOTS = 20
 const TOOL_OUTPUT_MAX_CHARS = 2000
 
 function clampPanelWidth(w: number): number {
-  return Math.min(Math.max(w, PANEL_WIDTH_MIN), Math.min(720, Math.round(window.innerWidth * 0.6)))
+  // The viewport can be transiently tiny (a WebContentsView is 0×0 until the
+  // shell lays it out), so never let the ceiling drop below the minimum
+  const max = Math.max(PANEL_WIDTH_MIN, Math.min(720, Math.round(window.innerWidth * 0.6)))
+  return Math.min(Math.max(w, PANEL_WIDTH_MIN), max)
 }
 
 function loadPanelWidth(): number {
   const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY))
-  return Number.isFinite(saved) && saved > 0 ? clampPanelWidth(saved) : PANEL_WIDTH_DEFAULT
+  // static bounds only — clamping against the window here would bake a
+  // transiently small viewport into the restored preference
+  return Number.isFinite(saved) && saved > 0
+    ? Math.min(Math.max(saved, PANEL_WIDTH_MIN), 720)
+    : PANEL_WIDTH_DEFAULT
 }
 
 interface ToolActivity {
@@ -90,9 +97,14 @@ export function AiPanel({
   const chatRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stickToBottomRef = useRef(true)
-  const [panelWidth, setPanelWidth] = useState(loadPanelWidth)
+  // preferred = the user's chosen width (the only value persisted); panelWidth =
+  // what fits the current window. Deriving the display width from the preference
+  // means a transiently small window never permanently shrinks the panel.
+  const preferredWidthRef = useRef(loadPanelWidth())
+  const [panelWidth, setPanelWidth] = useState(() => clampPanelWidth(preferredWidthRef.current))
   const [resizing, setResizing] = useState(false)
   const asideRef = useRef<HTMLElement>(null)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
     const dock = asideRef.current?.closest('.ai-dock') as HTMLElement | null
@@ -243,6 +255,16 @@ export function AiPanel({
     })
   }
 
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loopRef.current?.cancel()
+      const editor = depsRef.current.getEditor()
+      if (editor) clearAiHighlights(editor)
+    }
+  }, [])
+
   // ── chat-history persistence: bind to the file, restore prior transcript ──
   useEffect(() => {
     const api = window.projectApi
@@ -331,8 +353,10 @@ export function AiPanel({
     void (async () => {
       try {
         settingsRef.current = await window.markdownApi.getAiSettings()
+        if (!mountedRef.current) return
         await loop.run(instruction)
       } catch (err) {
+        if (!mountedRef.current) return
         patchLast({
           streaming: false,
           text: err instanceof Error ? err.message : String(err),
@@ -369,8 +393,10 @@ export function AiPanel({
     setSnapshots((prev) => prev.filter((s) => s !== snapshot))
   }
 
+  // Re-derive the display width on window resize (max is 60% of the window);
+  // growing the window back restores the preferred width
   useEffect(() => {
-    const onResize = (): void => setPanelWidth((w) => clampPanelWidth(w))
+    const onResize = (): void => setPanelWidth(clampPanelWidth(preferredWidthRef.current))
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
@@ -386,7 +412,9 @@ export function AiPanel({
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
     const onMove = (ev: PointerEvent): void => {
-      setPanelWidth(clampPanelWidth(ev.clientX))
+      const w = clampPanelWidth(ev.clientX)
+      preferredWidthRef.current = w
+      setPanelWidth(w)
     }
     let done = false
     const cleanup = (): void => {
@@ -400,10 +428,7 @@ export function AiPanel({
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
       setResizing(false)
-      setPanelWidth((w) => {
-        localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(w)))
-        return w
-      })
+      localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(preferredWidthRef.current)))
     }
     resizeCleanupRef.current = cleanup
     window.addEventListener('pointermove', onMove)
@@ -441,12 +466,18 @@ export function AiPanel({
                 setBusy(false)
                 setChat([])
               }}
-              title={t('aiNewChat')}
+              data-tip={t('aiNewChat')}
+              aria-label={t('aiNewChat')}
             >
               <IconNewChat />
             </button>
           )}
-          <button className="ai-header-btn" onClick={onCollapse} title={t('aiCollapsePanel')}>
+          <button
+            className="ai-header-btn"
+            onClick={onCollapse}
+            data-tip={t('aiCollapsePanel')}
+            aria-label={t('aiCollapsePanel')}
+          >
             <IconCollapse />
           </button>
         </div>
@@ -586,7 +617,7 @@ export function AiPanel({
           </div>
           {snapshots.map((s, i) => (
             <div key={i} className="ai-version-row">
-              <span className="ai-version-label" title={s.label}>
+              <span className="ai-version-label" data-tip={s.label}>
                 <span className="ai-version-time">{s.time}</span>
                 {s.label}
               </span>
@@ -726,14 +757,14 @@ function ToolChipList({ tools }: { tools: ToolActivity[] }) {
                     <button
                       type="button"
                       className="ai-step-title clickable"
-                      title={tool.name}
+                      data-tip={tool.name}
                       aria-expanded={isOpen}
                       onClick={() => toggle(j)}
                     >
                       {tool.summary}
                     </button>
                   ) : (
-                    <span className="ai-step-title" title={tool.name}>
+                    <span className="ai-step-title" data-tip={tool.name}>
                       {tool.summary}
                     </span>
                   )}

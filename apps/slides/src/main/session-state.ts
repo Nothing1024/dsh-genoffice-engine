@@ -4,7 +4,7 @@
  * per-renderer sessions, snapshot undo/redo history, runtime paths, window
  * references, and RenderSlide rebuild helpers.
  */
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, webContents } from 'electron'
 import type { WebContents } from 'electron'
 import { join } from 'node:path'
 import { materializeSlide, type OpenedPptx, type Slide } from '@genoffice/pptx-engine'
@@ -15,6 +15,8 @@ import {
 } from '@genoffice/pptx-render'
 import { createSystemFontMetrics } from './fonts'
 import { tiffToPng } from './tiff-decode'
+import { neutralizeJpegOrientation } from './jpeg-orientation'
+import { displayMime } from './media-mime'
 
 export interface RuntimePaths {
   preloadPath: string
@@ -58,6 +60,8 @@ export interface Session {
   transformPreview?: boolean
   /** The part currently edited in master view (exception to the fidelity rule: only that part is written back) */
   masterEdit?: { partPath: string; slide: Slide } | null
+  /** A history-state notification is already queued for this session (coalesces per task) */
+  historyNotifyScheduled?: boolean
 }
 export const sessions = new Map<number, Session>()
 
@@ -94,12 +98,35 @@ function cloneSnapshot(snap: HistorySnapshot): HistorySnapshot {
   }
 }
 
+/**
+ * Tell the renderer whether undo/redo have anything to apply (drives the QAT
+ * button gray states). Deferred with setImmediate so no-op handlers that push
+ * a snapshot and then pop it back in the same turn report the settled state,
+ * and multiple stack changes per turn coalesce into one message.
+ */
+export function scheduleHistoryNotify(session: Session): void {
+  if (session.historyNotifyScheduled) return
+  session.historyNotifyScheduled = true
+  setImmediate(() => {
+    session.historyNotifyScheduled = false
+    for (const [id, s] of sessions) {
+      if (s !== session) continue
+      webContents.fromId(id)?.send('slides:history-changed', {
+        canUndo: session.undoStack.length > 0,
+        canRedo: session.redoStack.length > 0,
+      })
+      return
+    }
+  })
+}
+
 /** Call before an edit operation: push onto the undo stack and clear the redo stack. */
 export function pushHistory(session: Session): void {
   session.undoStack.push(takeSnapshot(session))
   trimHistory(session.undoStack)
   session.redoStack = []
   session.htmlPages = null
+  scheduleHistoryNotify(session)
 }
 
 /** Begin a nestable transaction. Individual edit handlers keep their normal rollback behavior. */
@@ -131,6 +158,7 @@ export function endHistoryBatch(session: Session): HistorySnapshot | null {
   session.undoStack.splice(batch.undoStart)
   session.undoStack.push(batch.before)
   trimHistory(session.undoStack)
+  scheduleHistoryNotify(session)
   return batch.before
 }
 
@@ -145,6 +173,7 @@ export function carryHistoryForReplacement(
   replacement.redoStack = previous.redoStack
   replacement.historyBatch = previous.historyBatch
   replacement.aiSnapshots = previous.aiSnapshots
+  scheduleHistoryNotify(replacement)
 }
 
 const MAX_AI_SNAPSHOTS = 20
@@ -206,6 +235,17 @@ export function setSlidesShellWindow(win: BrowserWindow | null): void {
   windowRefs.shellWindow = win
 }
 
+/** Shell-registered hook (aggregate/tab mode only): cover the tab strip with a tab's
+ *  view during a slideshow without going through HTML fullscreen. Standalone slides
+ *  windows have no tab strip and leave this null. */
+export const showChrome = {
+  setBleed: null as ((wc: WebContents, on: boolean) => void) | null,
+}
+
+export function setSlidesShowBleed(cb: (wc: WebContents, on: boolean) => void): void {
+  showChrome.setBleed = cb
+}
+
 export function setActiveSlidesWebContents(wc: WebContents | null): void {
   windowRefs.activeWebContents = wc
 }
@@ -234,18 +274,10 @@ export function buildAllRenderSlides(opened: OpenedPptx, fitWidthPx: number): Re
   )
 }
 
-const DISPLAY_MIME: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  bmp: 'image/bmp',
-  webp: 'image/webp',
-  svg: 'image/svg+xml',
-}
-
 /** Image mediaRef -> dataUrl (lazily decoded). TIFF is transcoded to PNG for display
-    (Chromium can't decode it); the archive keeps the original bytes for save fidelity. */
+    (Chromium can't decode it); the archive keeps the original bytes for save fidelity.
+    The mime comes from magic-byte sniffing first (legacy decks mislabel media — a PNG
+    stored as .emf must not enter the EMF parser), extension second. */
 export function makeMediaResolver(opened: OpenedPptx) {
   const cache = new Map<string, string | undefined>()
   return (mediaRef: string): string | undefined => {
@@ -253,13 +285,15 @@ export function makeMediaResolver(opened: OpenedPptx) {
     const bytes = opened.archive.readBytes(mediaRef)
     let url: string | undefined
     if (bytes) {
-      const ext = mediaRef.split('.').pop()?.toLowerCase() ?? 'png'
-      if (ext === 'tif' || ext === 'tiff') {
+      const mime = displayMime(mediaRef, bytes)
+      if (mime === 'image/tiff') {
         const decoded = tiffToPng(bytes)
         if (decoded) url = `data:image/png;base64,${Buffer.from(decoded.png).toString('base64')}`
       } else {
-        const mime = DISPLAY_MIME[ext] ?? 'image/png'
-        url = `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`
+        // PowerPoint ignores EXIF orientation; Chromium applies it on decode — neutralize
+        // the flag so rotated-pixel JPEGs with a shape-level rot don't double-rotate
+        const served = mime === 'image/jpeg' ? neutralizeJpegOrientation(bytes) : bytes
+        url = `data:${mime};base64,${Buffer.from(served).toString('base64')}`
       }
     }
     cache.set(mediaRef, url)

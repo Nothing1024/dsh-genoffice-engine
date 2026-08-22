@@ -244,6 +244,41 @@ const pdfApi: PdfApi = {
     return res
   },
 
+  autoRename: async () => ({ renamed: false }),
+  isUntitled: async () => false,
+  canDrawText: async () => true,
+  listStaticFormFills: async () => [],
+  insertBlankPage: async () => ({
+    ok: false as const,
+    error: 'insertBlankPage is not supported in the web version',
+  }),
+  splitPdf: async () => ({ ok: true as const, canceled: true as const }),
+  mergePdf: async () => ({ ok: true as const, canceled: true as const }),
+  mergePages: async () => ({ ok: true as const, canceled: true as const }),
+  replacePages: async () => ({ ok: true as const, canceled: true as const }),
+  setPageSize: async () => ({
+    ok: false as const,
+    error: 'setPageSize is not supported in the web version',
+  }),
+  splitPages: async () => ({
+    ok: false as const,
+    error: 'splitPages is not supported in the web version',
+  }),
+  cropPages: async () => ({
+    ok: false as const,
+    error: 'cropPages is not supported in the web version',
+  }),
+  convertOffice: async () => {
+    throw new Error('PDF conversion to Word/Excel/PowerPoint is not supported in the web version')
+  },
+  listSavedSignatures: async () => [],
+  addSavedSignature: async () => [],
+  removeSavedSignature: async () => [],
+  getUsername: async () => '',
+  onPrintRequest: () => () => {},
+  onChromePressed: () => () => {},
+  gskStatus: async () => ({ loggedIn: false }),
+
   setDirty: () => {},
 
   onCloseSaveRequest: (handler) => {

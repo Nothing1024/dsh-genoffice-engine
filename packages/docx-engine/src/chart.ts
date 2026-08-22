@@ -32,6 +32,7 @@ const CHART_KINDS: Record<string, ChartDisplay['kind']> = {
  */
 export function parseChartPartXml(xml: string, partPath: string): ChartDisplay | null {
   const parsed = xmlParser.parse(xml) as XNode[]
+  if (xml.includes('<cx:chartSpace')) return parseChartexPartXml(parsed, partPath)
   const space = parsed.find((n) => nameOf(n) === 'c:chartSpace')
   const chart = space ? findChild(space, 'c:chart') : undefined
   const plotArea = chart ? findChild(chart, 'c:plotArea') : undefined
@@ -41,6 +42,7 @@ export function parseChartPartXml(xml: string, partPath: string): ChartDisplay |
   const plot = childrenOf(plotArea).find((c) => (nameOf(c) ?? '').endsWith('Chart'))
   if (!plot) return null
   const kind = CHART_KINDS[nameOf(plot) ?? ''] ?? 'other'
+  const horizontal = kind === 'bar' && attrsOf(findChild(plot, 'c:barDir') ?? {})['val'] === 'bar'
 
   let categories: string[] = []
   const series: ChartSeries[] = []
@@ -56,6 +58,11 @@ export function parseChartPartXml(xml: string, partPath: string): ChartDisplay |
     const cat = findChild(ser, 'c:cat')
     if (cat && categories.length === 0) {
       categories = cachePoints(cat).map((v) => v ?? '')
+      // date-formatted numeric caches hold Excel serials; display them as dates
+      const fmt = catFormatCode(cat)
+      if (fmt && /[yd]/i.test(fmt)) {
+        categories = categories.map((v) => serialDateText(v) ?? v)
+      }
     }
     const name = seriesName(ser)
     series.push({ ...(name !== undefined ? { name } : {}), values })
@@ -66,10 +73,124 @@ export function parseChartPartXml(xml: string, partPath: string): ChartDisplay |
   return {
     partPath,
     kind,
+    ...(horizontal ? { horizontal } : {}),
     ...(title !== undefined ? { title } : {}),
     categories,
     series,
   }
+}
+
+/** cx layoutId → closest classic display kind (degrade: shapes differ, data/labels/title survive) */
+const CHARTEX_KINDS: Record<string, ChartDisplay['kind']> = {
+  clusteredColumn: 'bar',
+  boxWhisker: 'bar',
+  waterfall: 'bar',
+  funnel: 'bar',
+  paretoLine: 'line',
+  sunburst: 'pie',
+  treemap: 'pie',
+}
+
+/**
+ * Chartex (cx: 2014 chart extension: sunburst/treemap/boxWhisker/waterfall…)
+ * degrade: read cx:chartData dimensions + series names + title into the
+ * classic ChartDisplay model so the existing chart pipeline renders the data
+ * with the nearest classic shape (title and cached texts/numbers survive).
+ */
+function parseChartexPartXml(parsed: XNode[], partPath: string): ChartDisplay | null {
+  const space = parsed.find((n) => nameOf(n) === 'cx:chartSpace')
+  if (!space) return null
+  const chartData = findChild(space, 'cx:chartData')
+  // data id → {cats, vals}: strDim/numDim carry cx:lvl point caches (the first
+  // strDim level holds the leaf labels of hierarchical charts)
+  const dataById = new Map<string, { cats: string[]; vals: (number | null)[] }>()
+  for (const data of chartData ? findChildren(chartData, 'cx:data') : []) {
+    const id = attrsOf(data)['id'] ?? ''
+    const entry: { cats: string[]; vals: (number | null)[] } = { cats: [], vals: [] }
+    const ptsOf = (dim: XNode): (string | null)[] => {
+      const lvl = findChild(dim, 'cx:lvl')
+      if (!lvl) return []
+      const out: (string | null)[] = []
+      for (const pt of findChildren(lvl, 'cx:pt')) {
+        const idx = parseInt(attrsOf(pt)['idx'] ?? '', 10)
+        if (Number.isFinite(idx) && idx >= 0) out[idx] = textOf(pt)
+      }
+      return out
+    }
+    for (const dim of childrenOf(data)) {
+      const dimName = nameOf(dim)
+      if (dimName === 'cx:strDim') {
+        entry.cats = ptsOf(dim).map((v) => v ?? '')
+      } else if (dimName === 'cx:numDim') {
+        entry.vals = ptsOf(dim).map((v) => {
+          if (v === null || v.trim() === '') return null
+          const n = Number(v)
+          return Number.isFinite(n) ? n : null
+        })
+      }
+    }
+    dataById.set(id, entry)
+  }
+  const chart = findChild(space, 'cx:chart')
+  const plotRegion = chart
+    ? findChild(findChild(chart, 'cx:plotArea') ?? {}, 'cx:plotAreaRegion')
+    : undefined
+  let kind: ChartDisplay['kind'] = 'other'
+  let categories: string[] = []
+  const series: ChartSeries[] = []
+  for (const ser of plotRegion ? findChildren(plotRegion, 'cx:series') : []) {
+    const layout = attrsOf(ser)['layoutId'] ?? ''
+    if (kind === 'other' && CHARTEX_KINDS[layout]) kind = CHARTEX_KINDS[layout]
+    const dataId = attrsOf(findChild(ser, 'cx:dataId') ?? {})['val'] ?? ''
+    const data = dataById.get(dataId)
+    if (!data || data.vals.length === 0) continue
+    if (categories.length === 0) categories = data.cats
+    const name = textOf(
+      findChild(findChild(findChild(ser, 'cx:tx') ?? {}, 'cx:txData') ?? {}, 'cx:v') ?? {},
+    )
+    series.push({ ...(name ? { name } : {}), values: data.vals })
+  }
+  if (series.length === 0) return null
+  // cx:title holds a full a:t rich body like classic charts
+  const title = chart ? chartexTitle(chart) : undefined
+  return {
+    partPath,
+    kind,
+    ...(title !== undefined ? { title } : {}),
+    categories,
+    series,
+  }
+}
+
+function chartexTitle(chart: XNode): string | undefined {
+  const title = findChild(chart, 'cx:title')
+  if (!title) return undefined
+  const texts: string[] = []
+  const walk = (node: XNode) => {
+    for (const child of childrenOf(node)) {
+      if (nameOf(child) === 'a:t') texts.push(textOf(child))
+      else walk(child)
+    }
+  }
+  walk(title)
+  const joined = texts.join('')
+  return joined !== '' ? joined : undefined
+}
+
+/** c:formatCode of a category cache (numCache/numLit), if any */
+function catFormatCode(container: XNode): string | undefined {
+  const ref = findChild(container, 'c:numRef')
+  const cache = ref ? findChild(ref, 'c:numCache') : findChild(container, 'c:numLit')
+  const code = cache ? findChild(cache, 'c:formatCode') : undefined
+  return code ? textOf(code) : undefined
+}
+
+/** Excel date serial → "m/d/yyyy" display (Word/LO render category dates, not serials) */
+function serialDateText(v: string | null): string | null {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0 || n > 80000) return null
+  const d = new Date(Date.UTC(1899, 11, 30) + Math.round(n) * 86400000)
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()}`
 }
 
 /** cached point texts of a c:cat / c:val / c:tx container, in idx order */
@@ -112,7 +233,25 @@ function chartTitle(chart: XNode): string | undefined {
     }
   }
   walk(title)
-  return texts.join('')
+  let joined = texts.join('')
+  if (joined) return joined
+  // strRef titles carry the cached text in c:strCache c:v, not a:t
+  const walkV = (node: XNode) => {
+    for (const child of childrenOf(node)) {
+      if (nameOf(child) === 'c:v') texts.push(textOf(child))
+      else walkV(child)
+    }
+  }
+  walkV(title)
+  joined = texts.join('')
+  if (joined) return joined
+  // text-less c:title = auto title; Word renders the "Chart Title" placeholder
+  // unless the auto title was explicitly deleted (CT_Boolean: a val-less
+  // element and val="true" both mean true)
+  const del = findChild(chart, 'c:autoTitleDeleted')
+  const delVal = del ? attrsOf(del)['val'] : undefined
+  const deleted = del !== undefined && (delVal === undefined || delVal === '1' || delVal === 'true')
+  return deleted ? undefined : 'Chart Title'
 }
 
 const _XLSX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -219,12 +358,47 @@ export interface ChartPatch {
  * these caches, but "Edit Data" will show the original sheet numbers.
  */
 export function patchChartPartXml(xml: string, patch: ChartPatch): string {
+  // a text-less title (auto title / strRef with no rich body) has no a:t to
+  // rewrite: give it one first, then patch it like any other title
+  if (patch.title !== undefined) {
+    const t = tagRange(xml, 'c:title')
+    if (
+      t &&
+      innerTextRanges(xml, 'a:t', t.start, t.end).length === 0 &&
+      innerTextRanges(xml, 'c:v', t.start, t.end).length === 0
+    ) {
+      const runXml = `<a:r><a:t>${escapeXmlText(patch.title)}</a:t></a:r>`
+      const tx = tagRange(xml, 'c:tx', t.start, t.end)
+      const p = tx ? tagRange(xml, 'a:p', tx.start, tx.end) : null
+      if (p) {
+        // Word auto titles carry an empty c:tx/c:rich paragraph (only
+        // a:endParaRPr); CT_Title allows one c:tx, so inject the run there,
+        // before a:endParaRPr per schema order
+        const endPr = xml.indexOf('<a:endParaRPr', p.start)
+        const at = endPr !== -1 && endPr < p.end ? endPr : p.end - '</a:p>'.length
+        xml = xml.slice(0, at) + runXml + xml.slice(at)
+      } else {
+        const rich = `<c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p>${runXml}</a:p></c:rich></c:tx>`
+        if (tx) {
+          // cache-less strRef tx (no a:p, no c:v): nothing to inject into —
+          // replace the whole c:tx with a rich body (CT_Tx is a choice)
+          xml = xml.slice(0, tx.start) + rich + xml.slice(tx.end)
+        } else {
+          const openEnd = xml.indexOf('>', t.start) + 1
+          xml = xml.slice(0, openEnd) + rich + xml.slice(openEnd)
+        }
+      }
+    }
+  }
+
   const edits: Array<{ start: number; end: number; text: string }> = []
 
   if (patch.title !== undefined) {
     const title = tagRange(xml, 'c:title')
     if (title) {
-      const texts = innerTextRanges(xml, 'a:t', title.start, title.end)
+      let texts = innerTextRanges(xml, 'a:t', title.start, title.end)
+      // strRef titles keep the text in the c:strCache c:v cache instead
+      if (texts.length === 0) texts = innerTextRanges(xml, 'c:v', title.start, title.end)
       // whole title into the first run, remaining runs blanked
       texts.forEach((range, i) => {
         edits.push({ ...range, text: i === 0 ? patch.title! : '' })

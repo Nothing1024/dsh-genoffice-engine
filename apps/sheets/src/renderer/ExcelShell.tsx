@@ -1,22 +1,28 @@
 import { useEffect, useRef, useState } from 'react'
-import { SHAPE_GALLERY_GROUPS, ShapePreview } from '@genoffice/ui'
+import { platformShortcuts } from '@genoffice/i18n'
+import { Dropdown, SHAPE_GALLERY_GROUPS, ShapePreview, useDismissablePopover } from '@genoffice/ui'
 
 import {
   CaretIcon,
   GensparkMark,
   RIBBON_GLYPH_ICONS,
   RedoIcon,
+  SaveAsIcon,
   SaveIcon,
   UndoIcon,
 } from './ribbon-icons'
 
+import { ColorDropdown } from './ColorDropdown'
 import { FormatCellsDialog } from './FormatCellsDialog'
+import { AllowEditRangesDialog } from './AllowEditRangesDialog'
 import { GoToDialog } from './GoToDialog'
+import { COLOR_SCHEMES, FONT_SCHEMES, THEME_PRESETS } from './themes'
 import { useI18n, type StringKey } from './i18n/locale'
 import { CONTROL_MODE } from './control-flags'
 import { NameManagerDialog, type DefinedNameAction, type DefinedNameRow } from './NameManagerDialog'
-import { categoryOptionForPattern, NUMBER_FORMAT_CATEGORIES } from './number-format'
+import { categoryOptionForPattern, numberFormatCategories } from './number-format'
 import { type SelectionFormat } from './selection-format'
+import { fontFamilyGroups, useSystemFontFamilies } from './system-fonts'
 
 import type { ChartSeriesVisualState } from '../domain/chart-visual'
 import type { ChangePlan } from '../domain/workbook.types'
@@ -28,6 +34,8 @@ import {
   type PivotField,
   type OoXmlPivotConfig,
 } from './PivotDialog'
+import type { GoalSeekResult } from './goal-seek'
+import { GoalSeekDialog } from './GoalSeekDialog'
 import { InsertFunctionDialog } from './InsertFunctionDialog'
 import { SubtotalDialog, type SubtotalConfig } from './SubtotalDialog'
 import { ConsolidateDialog } from './ConsolidateDialog'
@@ -99,6 +107,21 @@ const IS_MAC = navigator.platform.toLowerCase().includes('mac')
 /// Excel's grow/shrink font walks its size ladder, not ±1.
 const FONT_SIZE_LADDER = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 26, 28, 36, 48, 72]
 
+/// Review > Translate targets, shown in their native names (never localized).
+const TRANSLATE_LANGUAGES = [
+  'English',
+  '简体中文',
+  '繁體中文',
+  '日本語',
+  '한국어',
+  'Español',
+  'Français',
+  'Deutsch',
+  'Português',
+  'Русский',
+  'العربية',
+] as const
+
 function stepFontSize(current: number, direction: 1 | -1): number {
   if (direction === 1) {
     return FONT_SIZE_LADDER.find((size) => size > current) ?? FONT_SIZE_LADDER.at(-1) ?? current
@@ -139,11 +162,12 @@ interface ExcelShellProps {
   readonly onAddPastedImage: (data: ArrayBuffer, ext: string) => void
   readonly onRemoveAttachment: (path: string) => void
   readonly onPromptChange: (prompt: string) => void
-  /** Send the composer text, or the given instruction when provided */
-  readonly onSend: (instruction?: string) => void
+  /** Send the composer text, or the given instruction when provided (Retry also
+   *  resends that message's original attachments) */
+  readonly onSend: (instruction?: string, attachments?: readonly AttachmentMeta[]) => void
   readonly onStop: () => void
   readonly onNewChat: () => void
-  readonly onUndo: () => void
+  readonly onUndo: (steps?: number) => void
   readonly onCommand: (command: string) => void
   /// Left side of the status bar (ready / streaming / AI progress messages).
   readonly statusMessage: string
@@ -152,9 +176,16 @@ interface ExcelShellProps {
   /// True when the edit journal has unsaved changes (enables the QAT Save).
   readonly canSave: boolean
   readonly onSave: () => void
+  /// Save As remains available for a clean workbook, but requires a real
+  /// file-backed session (the in-memory demo workbook has nowhere to copy).
+  readonly canSaveAs: boolean
+  readonly onSaveAs: () => void
   /// QAT redo (workbook history, same path as the app menu's ⇧⌘Z); undo
   /// shares the AI panel's onUndo above.
   readonly onRedo: () => void
+  /// Undo/redo stack occupancy: the QAT buttons grey out when there is nothing to apply.
+  readonly canUndo: boolean
+  readonly canRedo: boolean
   /// AutoSave toggle in the tab row (docs/slides parity).
   readonly autoSave: boolean
   readonly onAutoSaveChange: (on: boolean) => void
@@ -164,10 +195,22 @@ interface ExcelShellProps {
   readonly onGetSortColumns: () => { label: string; colIndex: number }[]
   /// Effective protection of the active sheet (null = unknown / demo).
   readonly onGetSheetProtection: () => boolean | null
+  /// Effective workbook structure lock (null = no file open).
+  readonly onGetWorkbookProtection: () => boolean | null
+  readonly formulaBarVisible: boolean
+  /// Allow-edit ranges of the active sheet, read when the dialog opens.
+  readonly onGetProtectedRanges: () => {
+    ranges: readonly { name: string; sqref: string; hasPassword: boolean }[]
+    error: string | null
+  }
+  readonly onApplyProtectedRanges: (
+    ranges: readonly { name: string; sqref: string }[],
+  ) => string | null
   /// Name Manager data + actions (actions return an error message or null).
   readonly onGetDefinedNames: () => {
     names: DefinedNameRow[]
     sheets: { id: string; name: string }[]
+    activeSheetId: string | null
   }
   readonly onDefinedNameAction: (action: DefinedNameAction) => string | null
   /// Field choices for the Pivot dialog, read from the selection's header row.
@@ -199,6 +242,10 @@ interface ExcelShellProps {
   /// Session page-layout settings of the active sheet, echoed by the Page
   /// Layout tab's controls (untouched fields show the app default).
   readonly pageLayout: PageLayoutEcho
+  /// Manual-recalc mode echo for the Calculation Options menu.
+  readonly calcManual: boolean
+  /// Goal Seek solve; rejects with a user-facing Error message.
+  readonly onGoalSeek: (setCell: string, toValue: number, byCell: string) => Promise<GoalSeekResult>
 }
 
 export interface PageLayoutEcho {
@@ -211,10 +258,13 @@ export interface PageLayoutEcho {
   readonly printGridlines?: boolean | undefined
   readonly printHeadings?: boolean | undefined
   readonly showGridlines: boolean
+  readonly showHeadings: boolean
   readonly printArea?: string | null | undefined
   readonly printTitles?: string | null | undefined
   readonly header?: HeaderFooterParts | null | undefined
   readonly footer?: HeaderFooterParts | null | undefined
+  /// Page Break Preview overlay on for the active sheet (View tab echo).
+  readonly pageBreakPreview?: boolean | undefined
 }
 
 export function ExcelShell({
@@ -233,6 +283,10 @@ export function ExcelShell({
   onRemoveAttachment,
   onGetSortColumns,
   onGetSheetProtection,
+  onGetWorkbookProtection,
+  formulaBarVisible,
+  onGetProtectedRanges,
+  onApplyProtectedRanges,
   onGetDefinedNames,
   onDefinedNameAction,
   onGetPivotFields,
@@ -262,15 +316,27 @@ export function ExcelShell({
   zoomPercent,
   canSave,
   onSave,
+  canSaveAs,
+  onSaveAs,
   onRedo,
+  canUndo,
+  canRedo,
   autoSave,
   onAutoSaveChange,
   selectedChart,
   pageLayout,
+  calcManual,
+  onGoalSeek,
 }: ExcelShellProps): React.JSX.Element {
   const { t } = useI18n()
   const [activeTab, setActiveTab] = useState<RibbonTab>('Home')
-  const [isCopilotOpen, setIsCopilotOpen] = useState(true)
+  // Persisted so a closed AI panel stays closed on next launch (docs/slides parity)
+  const [isCopilotOpen, setIsCopilotOpen] = useState(
+    () => localStorage.getItem('ai-sheets-show-ai') !== '0',
+  )
+  useEffect(() => {
+    localStorage.setItem('ai-sheets-show-ai', isCopilotOpen ? '1' : '0')
+  }, [isCopilotOpen])
   const [showFormatCells, setShowFormatCells] = useState(false)
   const [axisSizeTarget, setAxisSizeTarget] = useState<'row' | 'col' | null>(null)
   const [showLinkDialog, setShowLinkDialog] = useState(false)
@@ -282,9 +348,11 @@ export function ExcelShell({
   /** null = closed; string = open on that catalog category ('All' for the plain button) */
   const [insertFunctionCat, setInsertFunctionCat] = useState<string | null>(null)
   const [showSubtotalDialog, setShowSubtotalDialog] = useState(false)
+  const [showGoalSeek, setShowGoalSeek] = useState(false)
   const [showConsolidateDialog, setShowConsolidateDialog] = useState(false)
   const [showGoTo, setShowGoTo] = useState(false)
   const [showHeaderFooter, setShowHeaderFooter] = useState(false)
+  const [showAllowEditRanges, setShowAllowEditRanges] = useState(false)
   /// Non-null while the Chart Design → Add Chart Element text prompt is open.
   const [chartTextTarget, setChartTextTarget] = useState<ChartTextTarget | null>(null)
   useEffect(() => {
@@ -314,6 +382,7 @@ export function ExcelShell({
   const visibleTabs: readonly RibbonTab[] = selectedChart
     ? [...ribbonTabs, 'Chart Design']
     : ribbonTabs
+  const saveAsTitle = `${t('appSaveAs')} (${platformShortcuts('⇧⌘S')})`
 
   return (
     <main className={`app-shell ${isCopilotOpen ? '' : 'copilot-collapsed'}${CONTROL_MODE ? ' control-mode' : ''}`}>
@@ -325,7 +394,7 @@ export function ExcelShell({
           <button
             type="button"
             className="qa-btn"
-            title={t('appSaveTitle')}
+            data-tip={t('appSaveTitle')}
             aria-label={t('appSaveTitle')}
             disabled={!canSave}
             onClick={onSave}
@@ -335,22 +404,37 @@ export function ExcelShell({
           <button
             type="button"
             className="qa-btn"
-            title={t('appUndo')}
+            data-tip={saveAsTitle}
+            aria-label={saveAsTitle}
+            disabled={!canSaveAs}
+            onClick={onSaveAs}
+          >
+            <SaveAsIcon />
+          </button>
+          <button
+            type="button"
+            className="qa-btn"
+            data-tip={t('appUndo')}
             aria-label={t('appUndo')}
-            onClick={onUndo}
+            disabled={!canUndo}
+            onClick={() => onUndo()}
           >
             <UndoIcon />
           </button>
           <button
             type="button"
             className="qa-btn"
-            title={t('appRedo')}
+            data-tip={t('appRedo')}
             aria-label={t('appRedo')}
+            disabled={!canRedo}
             onClick={onRedo}
           >
             <RedoIcon />
           </button>
-          <label className={`autosave-toggle ${autoSave ? 'on' : ''}`} title={t('appAutoSaveTip')}>
+          <label
+            className={`autosave-toggle ${autoSave ? 'on' : ''}`}
+            data-tip={t('appAutoSaveTip')}
+          >
             <span className="autosave-knob" />
             <span className="autosave-text">{t('appAutoSave')}</span>
             <input
@@ -380,8 +464,21 @@ export function ExcelShell({
           selectionFormat={selectionFormat}
           sheetHasContent={sheetHasContent}
           sheetProtected={onGetSheetProtection()}
+          workbookProtected={onGetWorkbookProtection()}
+          formulaBarVisible={formulaBarVisible}
           pageLayout={pageLayout}
           selectedChart={selectedChart}
+          onListNames={() => {
+            // Names scoped to another sheet resolve to #NAME? here; only
+            // workbook-scoped and active-sheet names are usable in a formula.
+            const data = onGetDefinedNames()
+            return data.names
+              .filter(
+                (entry) => entry.scopeSheetId === null || entry.scopeSheetId === data.activeSheetId,
+              )
+              .map((entry) => entry.name)
+          }}
+          calcManual={calcManual}
           onRefreshPivot={onRefreshPivot}
           onIsSelectionInPivot={onIsSelectionInPivot}
           onCommand={(command) => {
@@ -397,10 +494,12 @@ export function ExcelShell({
             else if (command === 'insert-function-open') setInsertFunctionCat('All')
             else if (command.startsWith('insert-function-open:'))
               setInsertFunctionCat(command.slice('insert-function-open:'.length))
+            else if (command === 'goal-seek-open') setShowGoalSeek(true)
             else if (command === 'subtotal-open') setShowSubtotalDialog(true)
             else if (command === 'consolidate-open') setShowConsolidateDialog(true)
             else if (command === 'goto-open') setShowGoTo(true)
             else if (command === 'header-footer-open') setShowHeaderFooter(true)
+            else if (command === 'allow-edit-ranges-open') setShowAllowEditRanges(true)
             else if (command === 'ai-open-panel') setIsCopilotOpen(true)
             else if (command === 'ai-toggle-panel') setIsCopilotOpen((v) => !v)
             else if (command === 'chart-element-title') setChartTextTarget('title')
@@ -449,7 +548,7 @@ export function ExcelShell({
             <NameBox activeCellA1={activeCellA1} onGoTo={onGoToReference} />
             <button
               className="name-box-goto"
-              title={t('appGoToButtonTitle')}
+              data-tip={t('appGoToButtonTitle')}
               aria-label="Go To"
               onClick={() => setShowGoTo(true)}
             >
@@ -466,7 +565,12 @@ export function ExcelShell({
               <span className="status-msg">{statusMessage}</span>
             </div>
             <div className="status-right">
-              <button className="zoom-btn" onClick={() => onCommand('zoom-out')}>
+              <button
+                className="zoom-btn"
+                data-tip={t('appZoomOut')}
+                aria-label={t('appZoomOut')}
+                onClick={() => onCommand('zoom-out')}
+              >
                 −
               </button>
               <input
@@ -477,7 +581,12 @@ export function ExcelShell({
                 value={Math.min(400, Math.max(50, zoomPercent))}
                 onChange={(event) => onCommand(`zoom:${event.target.value}`)}
               />
-              <button className="zoom-btn" onClick={() => onCommand('zoom-in')}>
+              <button
+                className="zoom-btn"
+                data-tip={t('appZoomIn')}
+                aria-label={t('appZoomIn')}
+                onClick={() => onCommand('zoom-in')}
+              >
                 +
               </button>
               <span className="zoom-value">{zoomPercent}%</span>
@@ -561,6 +670,13 @@ export function ExcelShell({
           onClose={() => setPivotEditSeed(null)}
         />
       )}
+      {showGoalSeek && (
+        <GoalSeekDialog
+          initialSetCell={onGetActiveCell()}
+          onSolve={onGoalSeek}
+          onClose={() => setShowGoalSeek(false)}
+        />
+      )}
       {insertFunctionCat !== null && (
         <InsertFunctionDialog
           targetLabel={onGetActiveCell()}
@@ -591,6 +707,18 @@ export function ExcelShell({
           onClose={() => setShowGoTo(false)}
         />
       )}
+      {showAllowEditRanges &&
+        (() => {
+          const snapshot = onGetProtectedRanges()
+          return (
+            <AllowEditRangesDialog
+              ranges={snapshot.error === null ? snapshot.ranges : []}
+              defaultRef={activeCellA1}
+              onApply={(ranges) => snapshot.error ?? onApplyProtectedRanges(ranges)}
+              onClose={() => setShowAllowEditRanges(false)}
+            />
+          )
+        })()}
       {showHeaderFooter && (
         <HeaderFooterDialog
           initialHeader={pageLayout.header ?? null}
@@ -621,7 +749,7 @@ function NameBox({
     <input
       className={`name-box${error === null ? '' : ' invalid'}`}
       aria-label="Name Box"
-      title={error ?? t('appNameBoxTitle')}
+      data-tip={error ?? t('appNameBoxTitle')}
       placeholder="A1"
       spellCheck={false}
       value={draft ?? activeCellA1}
@@ -710,26 +838,26 @@ function SortDialog({
           {levels.map((level, index) => (
             <div className="sort-level" key={index}>
               <span>{t(index === 0 ? 'appSortBy' : 'appThenBy')}</span>
-              <select
-                className="select-like"
-                value={level.colIndex}
-                onChange={(event) => setLevel(index, { colIndex: Number(event.target.value) })}
-              >
-                {index > 0 && <option value={NO_SORT_LEVEL}>{t('appSortNone')}</option>}
-                {columns.map((column) => (
-                  <option key={column.colIndex} value={column.colIndex}>
-                    {column.label}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="select-like compact"
+              <Dropdown
+                ariaLabel={t(index === 0 ? 'appSortBy' : 'appThenBy')}
+                value={String(level.colIndex)}
+                options={[
+                  ...(index > 0 ? [{ value: String(NO_SORT_LEVEL), label: t('appSortNone') }] : []),
+                  ...columns.map((column) => ({
+                    value: String(column.colIndex),
+                    label: column.label,
+                  })),
+                ]}
+                onPick={(v) => setLevel(index, { colIndex: Number(v) })}
+              />
+              <Dropdown
                 value={level.order}
-                onChange={(event) => setLevel(index, { order: event.target.value as 'a' | 'd' })}
-              >
-                <option value="a">{t('appSortAsc')}</option>
-                <option value="d">{t('appSortDesc')}</option>
-              </select>
+                options={[
+                  { value: 'a', label: t('appSortAsc') },
+                  { value: 'd', label: t('appSortDesc') },
+                ]}
+                onPick={(v) => setLevel(index, { order: v })}
+              />
             </div>
           ))}
         </div>
@@ -973,12 +1101,16 @@ function Ribbon({
   selectionFormat,
   sheetHasContent,
   sheetProtected,
+  workbookProtected,
+  formulaBarVisible,
   pageLayout,
   selectedChart,
   onCommand,
   onAiRun,
   aiOpen,
   onAiToggle,
+  onListNames,
+  calcManual,
   onRefreshPivot,
   onIsSelectionInPivot,
 }: {
@@ -986,9 +1118,16 @@ function Ribbon({
   readonly selectionFormat: SelectionFormat | null
   readonly sheetHasContent: boolean
   readonly sheetProtected: boolean | null
+  readonly workbookProtected: boolean | null
+  /// View > Show echo for the formula bar toggle (app-level, not per sheet).
+  readonly formulaBarVisible: boolean
   readonly pageLayout: PageLayoutEcho
   readonly selectedChart: SelectedChartRibbon | null
   readonly onCommand: (command: string) => void
+  /** Defined names for the Use in Formula menu. */
+  readonly onListNames: () => readonly string[]
+  /** Manual-recalc mode echo for the Calculation Options menu. */
+  readonly calcManual: boolean
   /** Open the AI panel and immediately send the given prompt */
   readonly onAiRun: (prompt: string) => void
   /** AI side panel visibility (docs/slides parity: the entry button toggles it) */
@@ -1001,6 +1140,7 @@ function Ribbon({
   const [fontColor, setFontColor] = useState('#C00000')
   const [fillColor, setFillColor] = useState('#FFF2CC')
   const [borderColor, setBorderColor] = useState('#000000')
+  const { families: systemFontFamilies, load: loadSystemFonts } = useSystemFontFamilies()
   // Large menu button: a native select stretched invisibly over the tool,
   // each option carrying its full command string.
   const largeMenu = (
@@ -1009,7 +1149,7 @@ function Ribbon({
     title: string,
     options: readonly { value: string; label: string }[],
   ): React.JSX.Element => (
-    <div className="ribbon-tool large" title={title}>
+    <div className="ribbon-tool large" data-tip={title}>
       <span className="tool-icon-row">
         <ToolSymbol symbol={symbol} />
         <CaretIcon />
@@ -1131,12 +1271,28 @@ function Ribbon({
           {canEditChart ? (
             largeMenu(t('appAddChartElement'), '📊', t('appAddChartElementTitle'), elementOptions)
           ) : (
-            <RibbonReserved large menu label={t('appAddChartElement')} symbol="📊" />
+            <RibbonButton
+              large
+              menu
+              label={t('appAddChartElement')}
+              detail={t('appSelectEditableChart')}
+              symbol="📊"
+              disabled
+              onClick={() => {}}
+            />
           )}
           {canEditChart ? (
             largeMenu(t('appQuickLayout'), '▦', t('appQuickLayoutTitle'), layoutOptions)
           ) : (
-            <RibbonReserved large menu label={t('appQuickLayout')} symbol="▦" />
+            <RibbonButton
+              large
+              menu
+              label={t('appQuickLayout')}
+              detail={t('appSelectEditableChart')}
+              symbol="▦"
+              disabled
+              onClick={() => {}}
+            />
           )}
           {canRecolor ? (
             largeMenu(
@@ -1253,9 +1409,6 @@ function Ribbon({
             onClick={() => onCommand('format-as-table')}
           />
         </RibbonGroup>
-        <RibbonGroup label={t('appGroupForms')}>
-          <RibbonReserved large menu label={t('appGroupForms')} symbol="🗒" />
-        </RibbonGroup>
         <RibbonGroup label={t('appGroupIllustrations')}>
           <RibbonButton
             large
@@ -1265,7 +1418,7 @@ function Ribbon({
             onClick={() => onCommand('insert-picture')}
           />
           <div className="row-stack">
-            <span className="styles-row" title={t('appInsertShapeTitle')}>
+            <span className="styles-row" data-tip={t('appInsertShapeTitle')}>
               <ToolSymbol symbol="◇" />
               {t('appShapes')}
               <CaretIcon />
@@ -1274,22 +1427,19 @@ function Ribbon({
                 onPick={(prst) => onCommand(`insert-shape:${prst}`)}
               />
             </span>
-            <button className="styles-row as-button" onClick={() => onCommand('insert-icons')}>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appIcons')}
+              onClick={() => onCommand('insert-icons')}
+            >
               <ToolSymbol symbol="✧" />
               {t('appIcons')}
             </button>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
-              <ToolSymbol symbol="⬡" />
-              {t('app3dModels')}
-              <CaretIcon />
-            </span>
-          </div>
-          <div className="row-stack">
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
-              <ToolSymbol symbol="▤" />
-              SmartArt
-            </span>
-            <button className="styles-row as-button" onClick={() => onCommand('insert-screenshot')}>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appScreenshot')}
+              onClick={() => onCommand('insert-screenshot')}
+            >
               <ToolSymbol symbol="⧉" />
               {t('appScreenshot')}
             </button>
@@ -1314,61 +1464,69 @@ function Ribbon({
           />
           <div className="chart-grid">
             <button
-              title={t('appChartGridTitle', { type: t('appChartColumn') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartColumn') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartColumn') })}
               onClick={() => onCommand('insert-chart:column')}
             >
               <ToolSymbol symbol="▮▬" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartBar') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartBar') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartBar') })}
               onClick={() => onCommand('insert-chart:bar')}
             >
               <ToolSymbol symbol="▤" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartLine') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartLine') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartLine') })}
               onClick={() => onCommand('insert-chart:line')}
             >
               <ToolSymbol symbol="📈" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartTypeArea') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartTypeArea') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartTypeArea') })}
               onClick={() => onCommand('insert-chart:area')}
             >
               <ToolSymbol symbol="◪" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartPie') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartPie') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartPie') })}
               onClick={() => onCommand('insert-chart:pie')}
             >
               <ToolSymbol symbol="◔" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartScatter') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartScatter') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartScatter') })}
               onClick={() => onCommand('insert-chart:scatter')}
             >
               <ToolSymbol symbol="∴" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartRadar') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartRadar') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartRadar') })}
               onClick={() => onCommand('insert-chart:radar')}
             >
               <ToolSymbol symbol="✳" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartDoughnut') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartDoughnut') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartDoughnut') })}
               onClick={() => onCommand('insert-chart:doughnut')}
             >
               <ToolSymbol symbol="◍" />
             </button>
             <button
-              title={t('appChartGridTitle', { type: t('appChartCombo') })}
+              data-tip={t('appChartGridTitle', { type: t('appChartCombo') })}
+              aria-label={t('appChartGridTitle', { type: t('appChartCombo') })}
               onClick={() => onCommand('insert-chart:combo')}
             >
               <ToolSymbol symbol="𝄜" />
             </button>
           </div>
-          <RibbonReserved large label={t('appMaps')} symbol="🌐" />
           {largeMenu(
             t('appPivotChart'),
             '🗠',
@@ -1394,7 +1552,7 @@ function Ribbon({
           <div className="row-stack">
             <button
               className="styles-row as-button"
-              title={onIsSelectionInPivot() ? t('appSlicerHintIn') : t('appSlicerHintOut')}
+              data-tip={onIsSelectionInPivot() ? t('appSlicerHintIn') : t('appSlicerHintOut')}
               onClick={() => onCommand('slicer-open')}
             >
               <ToolSymbol symbol="▥" />
@@ -1402,7 +1560,7 @@ function Ribbon({
             </button>
             <button
               className="styles-row as-button"
-              title={onIsSelectionInPivot() ? t('appTimelineHintIn') : t('appTimelineHintOut')}
+              data-tip={onIsSelectionInPivot() ? t('appTimelineHintIn') : t('appTimelineHintOut')}
               onClick={() => onCommand('timeline-open')}
             >
               <ToolSymbol symbol="🕒" />
@@ -1446,11 +1604,19 @@ function Ribbon({
         </RibbonGroup>
         <RibbonGroup label={t('appGroupSymbols')}>
           <div className="row-stack">
-            <button className="styles-row as-button" onClick={() => onCommand('insert-equation')}>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appEquation')}
+              onClick={() => onCommand('insert-equation')}
+            >
               <ToolSymbol symbol="π" />
               {t('appEquation')}
             </button>
-            <button className="styles-row as-button" onClick={() => onCommand('insert-symbol')}>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appSymbol')}
+              onClick={() => onCommand('insert-symbol')}
+            >
               <ToolSymbol symbol="Ω" />
               {t('appSymbol')}
             </button>
@@ -1476,6 +1642,7 @@ function Ribbon({
         <MenuSelect
           className="select-like compact"
           label={`Fit to ${axis}`}
+          data-tip={axis === 'width' ? t('appWidth') : t('appHeight')}
           value={current}
           display={options.find((option) => option.value === current)?.label ?? current}
           options={options}
@@ -1491,17 +1658,43 @@ function Ribbon({
     return (
       <div className="ribbon">
         <RibbonGroup label={t('appGroupThemes')}>
-          <RibbonReserved large menu label={t('appGroupThemes')} symbol="🎨" />
+          {largeMenu(
+            t('appGroupThemes'),
+            '🎨',
+            t('appThemesTitle'),
+            THEME_PRESETS.map((preset) => ({
+              value: `page-layout:theme:${preset.id}`,
+              label: preset.name,
+            })),
+          )}
           <div className="row-stack">
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
+            <span className="styles-row" data-tip={t('appThemeColorsTitle')}>
               <ToolSymbol symbol="▤" />
               {t('appColors')}
               <CaretIcon />
+              <MenuSelect
+                cover
+                label={t('appColors')}
+                options={COLOR_SCHEMES.map((scheme) => ({
+                  value: `page-layout:theme-colors:${scheme.id}`,
+                  label: scheme.name,
+                }))}
+                onPick={onCommand}
+              />
             </span>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
+            <span className="styles-row" data-tip={t('appThemeFontsTitle')}>
               <ToolSymbol symbol="A" />
               {t('appFonts')}
               <CaretIcon />
+              <MenuSelect
+                cover
+                label={t('appFonts')}
+                options={FONT_SCHEMES.map((scheme) => ({
+                  value: `page-layout:theme-fonts:${scheme.id}`,
+                  label: scheme.name,
+                }))}
+                onPick={onCommand}
+              />
             </span>
           </div>
         </RibbonGroup>
@@ -1551,8 +1744,11 @@ function Ribbon({
               { value: 'page-layout:print-area:clear', label: t('appClearPrintArea') },
             ],
           )}
-          <RibbonReserved large menu label={t('appBreaks')} symbol="┆" />
-          <RibbonReserved large label={t('appBackground')} symbol="🖼" />
+          {largeMenu(t('appBreaks'), '┆', t('appBreaksTitle'), [
+            { value: 'page-layout:breaks:insert', label: t('appInsertPageBreak') },
+            { value: 'page-layout:breaks:remove', label: t('appRemovePageBreak') },
+            { value: 'page-layout:breaks:reset', label: t('appResetAllPageBreaks') },
+          ])}
           {largeMenu(
             t('appPrintTitlesLabel'),
             '▤',
@@ -1568,11 +1764,11 @@ function Ribbon({
         </RibbonGroup>
         <RibbonGroup label={t('appGroupScaleToFit')}>
           <div className="row-stack">
-            <label className="styles-row">
+            <label className="styles-row" data-tip={t('appWidth')}>
               <ToolSymbol symbol="↔" />
               {t('appWidth')}:{fitOptions('width')}
             </label>
-            <label className="styles-row">
+            <label className="styles-row" data-tip={t('appHeight')}>
               <ToolSymbol symbol="↕" />
               {t('appHeight')}:{fitOptions('height')}
             </label>
@@ -1581,13 +1777,17 @@ function Ribbon({
         <RibbonGroup label={t('appGroupSheetOptions')}>
           <div className="check-column">
             <span className="check-head">{t('appGridlines')}</span>
-            <button className="check-item" onClick={() => onCommand('toggle-gridlines')}>
+            <button
+              className="check-item"
+              data-tip={t('appGridlines')}
+              onClick={() => onCommand('toggle-gridlines')}
+            >
               <i className="check-box">{pageLayout.showGridlines ? '✓' : ''}</i>
               {t('appViewCheck')}
             </button>
             <button
               className="check-item"
-              title={t('appPrintGridlinesTitle')}
+              data-tip={t('appPrintGridlinesTitle')}
               onClick={() =>
                 onCommand(`page-layout:print-gridlines:${pageLayout.printGridlines ? '0' : '1'}`)
               }
@@ -1598,13 +1798,17 @@ function Ribbon({
           </div>
           <div className="check-column">
             <span className="check-head">{t('appHeadings')}</span>
-            <span className="check-item reserved-check" title={t('appNotAvailableYet')}>
-              <i className="check-box">✓</i>
-              {t('appViewCheck')}
-            </span>
             <button
               className="check-item"
-              title={t('appPrintHeadingsTitle')}
+              data-tip={t('appHeadings')}
+              onClick={() => onCommand('toggle-headings')}
+            >
+              <i className="check-box">{pageLayout.showHeadings ? '✓' : ''}</i>
+              {t('appViewCheck')}
+            </button>
+            <button
+              className="check-item"
+              data-tip={t('appPrintHeadingsTitle')}
               onClick={() =>
                 onCommand(`page-layout:print-headings:${pageLayout.printHeadings ? '0' : '1'}`)
               }
@@ -1619,6 +1823,7 @@ function Ribbon({
   }
 
   if (activeTab === 'Formulas') {
+    const definedNames = onListNames()
     // Category buttons all open the same catalog dialog; the per-category
     // menus funnel into Insert Function.
     // Each button opens the catalog filtered to its own category; 'All'
@@ -1643,7 +1848,7 @@ function Ribbon({
             symbol="ƒx"
             onClick={() => onCommand('insert-function-open')}
           />
-          <div className="ribbon-tool large" title={t('appAutoSumTitle')}>
+          <div className="ribbon-tool large" data-tip={t('appAutoSumTitle')}>
             <span className="tool-icon-row">
               <ToolSymbol symbol="Σ" />
               <CaretIcon />
@@ -1682,19 +1887,43 @@ function Ribbon({
             onClick={() => onCommand('name-manager-open')}
           />
           <div className="row-stack">
-            <button className="styles-row as-button" onClick={() => onCommand('name-manager-open')}>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appDefineName')}
+              onClick={() => onCommand('name-manager-open')}
+            >
               <ToolSymbol symbol="🏷" />
               {t('appDefineName')}
               <CaretIcon />
             </button>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
+            <span className="styles-row" data-tip={t('appUseInFormulaTitle')}>
               <ToolSymbol symbol="ƒ" />
               {t('appUseInFormula')}
               <CaretIcon />
+              <MenuSelect
+                cover
+                label={t('appUseInFormula')}
+                options={
+                  definedNames.length > 0
+                    ? definedNames.map((name) => ({ value: `use-in-formula:${name}`, label: name }))
+                    : [{ value: 'name-manager-open', label: t('appNoNamesYet') }]
+                }
+                onPick={onCommand}
+              />
             </span>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
+            <span className="styles-row" data-tip={t('appCreateFromSelectionTitle')}>
               <ToolSymbol symbol="⊞" />
               {t('appCreateFromSelection')}
+              <CaretIcon />
+              <MenuSelect
+                cover
+                label={t('appCreateFromSelection')}
+                options={[
+                  { value: 'create-names:top', label: t('appCreateNamesTopRow') },
+                  { value: 'create-names:left', label: t('appCreateNamesLeftCol') },
+                ]}
+                onPick={onCommand}
+              />
             </span>
           </div>
         </RibbonGroup>
@@ -1702,7 +1931,7 @@ function Ribbon({
           <div className="row-stack">
             <button
               className="styles-row as-button"
-              title={t('appTracePrecedentsTitle')}
+              data-tip={t('appTracePrecedentsTitle')}
               onClick={() => onCommand('trace-precedents')}
             >
               <ToolSymbol symbol="⇢" />
@@ -1710,7 +1939,7 @@ function Ribbon({
             </button>
             <button
               className="styles-row as-button"
-              title={t('appTraceDependentsTitle')}
+              data-tip={t('appTraceDependentsTitle')}
               onClick={() => onCommand('trace-dependents')}
             >
               <ToolSymbol symbol="⇠" />
@@ -1718,7 +1947,7 @@ function Ribbon({
             </button>
             <button
               className="styles-row as-button"
-              title={t('appRemoveArrowsTitle')}
+              data-tip={t('appRemoveArrowsTitle')}
               onClick={() => onCommand('remove-arrows')}
             >
               <ToolSymbol symbol="⌫" />
@@ -1732,20 +1961,43 @@ function Ribbon({
             symbol="ƒ"
             onClick={() => onCommand('toggle-show-formulas')}
           />
-          <RibbonReserved large menu label={t('appErrorChecking')} symbol="⚠" />
-          <RibbonReserved large label={t('appWatchWindow')} symbol="👓" />
+          <RibbonButton
+            large
+            label={t('appErrorChecking')}
+            detail={t('appErrorCheckingDetail')}
+            symbol="⚠"
+            onClick={() => onCommand('error-checking')}
+          />
+          <RibbonButton
+            large
+            label={t('appWatchWindow')}
+            detail={t('appWatchWindowDetail')}
+            symbol="👓"
+            onClick={() => onCommand('watch-window')}
+          />
         </RibbonGroup>
         <RibbonGroup label={t('appGroupCalculation')}>
-          <RibbonReserved large menu label={t('appCalculationOptions')} symbol="🧮" />
+          {largeMenu(t('appCalculationOptions'), '🧮', t('appCalculationOptionsTitle'), [
+            { value: 'calc-mode:auto', label: t('appCalcAuto') + (calcManual ? '' : ' ✓') },
+            { value: 'calc-mode:manual', label: t('appCalcManual') + (calcManual ? ' ✓' : '') },
+          ])}
           <div className="row-stack">
-            <span className="styles-row reserved" title={t('appRecalcLiveTitle')}>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appCalculateNowTitle')}
+              onClick={() => onCommand('calculate-now')}
+            >
               <ToolSymbol symbol="⟳" />
               {t('appCalculateNow')}
-            </span>
-            <span className="styles-row reserved" title={t('appRecalcLiveTitle')}>
+            </button>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appCalculateSheetTitle')}
+              onClick={() => onCommand('calculate-sheet')}
+            >
               <ToolSymbol symbol="▦" />
               {t('appCalculateSheet')}
-            </span>
+            </button>
           </div>
         </RibbonGroup>
       </div>
@@ -1775,21 +2027,23 @@ function Ribbon({
           />
         </RibbonGroup>
         <RibbonGroup label={t('appGroupGetData')}>
-          <RibbonReserved large menu label={t('appGroupGetData')} symbol="🛢" />
           <div className="row-stack">
             <button
               className="styles-row as-button"
-              title={t('appFromTextCsvTitle')}
+              data-tip={t('appFromTextCsvTitle')}
               onClick={() => onCommand('import-csv')}
             >
               <ToolSymbol symbol="🗎" />
               {t('appFromTextCsv')}
             </button>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appRefreshAllTitle')}
+              onClick={() => onCommand('refresh-all')}
+            >
               <ToolSymbol symbol="⟳" />
               {t('appRefreshAll')}
-              <CaretIcon />
-            </span>
+            </button>
           </div>
         </RibbonGroup>
         <RibbonGroup label={t('appGroupSortFilter')}>
@@ -1808,19 +2062,23 @@ function Ribbon({
           <div className="row-stack">
             <button
               className="styles-row as-button"
-              title={t('appClearFilterTitle')}
+              data-tip={t('appClearFilterTitle')}
               onClick={() => onCommand('filter-clear')}
             >
               <ToolSymbol symbol="⊘" />
               {t('appClear')}
             </button>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
-              <ToolSymbol symbol="↻" />
-              {t('appReapply')}
-            </span>
             <button
               className="styles-row as-button"
-              title={t('appAdvancedFilterTitle')}
+              data-tip={t('appReapplyTitle')}
+              onClick={() => onCommand('filter-reapply')}
+            >
+              <ToolSymbol symbol="↻" />
+              {t('appReapply')}
+            </button>
+            <button
+              className="styles-row as-button"
+              data-tip={t('appAdvancedFilterTitle')}
               onClick={() => onCommand('filter-advanced')}
             >
               <ToolSymbol symbol="▽" />
@@ -1866,7 +2124,9 @@ function Ribbon({
           />
         </RibbonGroup>
         <RibbonGroup label={t('appGroupForecast')}>
-          <RibbonReserved large menu label={t('appWhatIfAnalysis')} symbol="❔" />
+          {largeMenu(t('appWhatIfAnalysis'), '❔', t('appWhatIfTitle'), [
+            { value: 'goal-seek-open', label: t('appGoalSeek') },
+          ])}
         </RibbonGroup>
         <RibbonGroup label={t('appGroupOutline')}>
           {largeMenu(t('appOutlineGroup'), '⊟', t('appOutlineGroupTitle'), [
@@ -1897,31 +2157,53 @@ function Ribbon({
     return (
       <div className="ribbon">
         <RibbonGroup label={t('appGroupWorkbookViews')}>
-          <div className="ribbon-tool large is-current" title={t('appCurrentViewTitle')}>
-            <span className="tool-icon-row">
-              <ToolSymbol symbol="▦" />
-            </span>
-            <span>
-              <strong>{t('appNormalView')}</strong>
-            </span>
-          </div>
-          <RibbonReserved large label={t('appTabPageLayout')} symbol="🗎" />
-          <RibbonReserved large label={t('appPageBreakPreview')} symbol="┆" />
+          <RibbonButton
+            large
+            label={t('appNormalView')}
+            detail={t('appCurrentViewTitle')}
+            symbol="▦"
+            active={pageLayout.pageBreakPreview !== true}
+            onClick={() => {
+              if (pageLayout.pageBreakPreview === true) onCommand('toggle-page-break-preview')
+            }}
+          />
+          <RibbonButton
+            large
+            label={t('appPageBreakPreview')}
+            detail={t('appPageBreakPreviewTitle')}
+            symbol="┆"
+            active={pageLayout.pageBreakPreview === true}
+            onClick={() => {
+              if (pageLayout.pageBreakPreview !== true) onCommand('toggle-page-break-preview')
+            }}
+          />
         </RibbonGroup>
         <RibbonGroup label={t('appGroupShow')}>
           <div className="check-column">
-            <button className="check-item" onClick={() => onCommand('toggle-gridlines')}>
+            <button
+              className="check-item"
+              data-tip={t('appGridlines')}
+              onClick={() => onCommand('toggle-gridlines')}
+            >
               <i className="check-box">{pageLayout.showGridlines ? '✓' : ''}</i>
               {t('appGridlines')}
             </button>
-            <span className="check-item reserved-check">
-              <i className="check-box">✓</i>
+            <button
+              className="check-item"
+              data-tip={t('appFormulaBar')}
+              onClick={() => onCommand('toggle-formula-bar')}
+            >
+              <i className="check-box">{formulaBarVisible ? '✓' : ''}</i>
               {t('appFormulaBar')}
-            </span>
-            <span className="check-item reserved-check">
-              <i className="check-box">✓</i>
+            </button>
+            <button
+              className="check-item"
+              data-tip={t('appHeadings')}
+              onClick={() => onCommand('toggle-headings')}
+            >
+              <i className="check-box">{pageLayout.showHeadings ? '✓' : ''}</i>
               {t('appHeadings')}
-            </span>
+            </button>
           </div>
         </RibbonGroup>
         <RibbonGroup label={t('appZoomLabel')}>
@@ -1940,7 +2222,13 @@ function Ribbon({
             symbol="⊙"
             onClick={() => onCommand('zoom-reset')}
           />
-          <RibbonReserved large label={t('appZoomToSelection')} symbol="⌖" />
+          <RibbonButton
+            large
+            label={t('appZoomToSelection')}
+            detail={t('appZoomToSelectionDetail')}
+            symbol="⌖"
+            onClick={() => onCommand('zoom-to-selection')}
+          />
         </RibbonGroup>
         <RibbonGroup label={t('appGroupWindow')}>
           {largeMenu(t('appFreezePanes'), '❄', t('appFreezeTitle'), [
@@ -1949,23 +2237,6 @@ function Ribbon({
             { value: 'freeze-first-col', label: t('appFreezeFirstCol') },
             { value: 'unfreeze', label: t('appUnfreeze') },
           ])}
-          <div className="row-stack">
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
-              <ToolSymbol symbol="🗔" />
-              {t('appNewWindow')}
-            </span>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
-              <ToolSymbol symbol="▦" />
-              {t('appArrangeAll')}
-            </span>
-            <span className="styles-row reserved" title={t('appNotAvailableYet')}>
-              <ToolSymbol symbol="◫" />
-              {t('appSplit')}
-            </span>
-          </div>
-        </RibbonGroup>
-        <RibbonGroup label={t('appMacros')}>
-          <RibbonReserved large menu label={t('appMacros')} symbol="▶" />
         </RibbonGroup>
       </div>
     )
@@ -1975,8 +2246,6 @@ function Ribbon({
     return (
       <div className="ribbon">
         <RibbonGroup label={t('appGroupProofing')}>
-          <RibbonReserved large label={t('appSpelling')} symbol="abc" />
-          <RibbonReserved large label={t('appThesaurus')} symbol="🕮" />
           <RibbonButton
             large
             label={t('appWorkbookStatsLabel')}
@@ -1985,12 +2254,25 @@ function Ribbon({
             onClick={() => onCommand('workbook-statistics')}
           />
         </RibbonGroup>
-        <RibbonGroup label={t('appGroupAccessibility')}>
-          <RibbonReserved large menu label={t('appCheckAccessibility')} symbol="♿" />
-        </RibbonGroup>
-        <RibbonGroup label={t('appGroupInsights')}>
-          <RibbonReserved large label={t('appSmartLookup')} symbol="💡" />
-          <RibbonReserved large label={t('appTranslate')} symbol="文" />
+        <RibbonGroup label={t('appGroupLanguage')}>
+          <div className="ribbon-tool large" data-tip={t('appTranslateTitle')}>
+            <span className="tool-icon-row">
+              <ToolSymbol symbol="文" />
+              <CaretIcon />
+            </span>
+            <span>
+              <strong>{t('appTranslate')}</strong>
+            </span>
+            <MenuSelect
+              cover
+              label={t('appTranslate')}
+              options={TRANSLATE_LANGUAGES.map((language) => ({
+                value: language,
+                label: language,
+              }))}
+              onPick={(language) => onAiRun(t('appTranslatePrompt', { language }))}
+            />
+          </div>
         </RibbonGroup>
         <RibbonGroup label={t('appGroupComments')}>
           <RibbonButton
@@ -2010,7 +2292,7 @@ function Ribbon({
           <div className="row-stack">
             <button
               className="styles-row as-button"
-              title={t('appNotePrevTitle')}
+              data-tip={t('appNotePrevTitle')}
               onClick={() => onCommand('note-prev')}
             >
               <ToolSymbol symbol="←" />
@@ -2018,7 +2300,7 @@ function Ribbon({
             </button>
             <button
               className="styles-row as-button"
-              title={t('appNoteNextTitle')}
+              data-tip={t('appNoteNextTitle')}
               onClick={() => onCommand('note-next')}
             >
               <ToolSymbol symbol="→" />
@@ -2026,7 +2308,7 @@ function Ribbon({
             </button>
             <button
               className="styles-row as-button"
-              title={t('appShowCommentsTitle')}
+              data-tip={t('appShowCommentsTitle')}
               onClick={() => onCommand('note-show-toggle')}
             >
               <ToolSymbol symbol="🗨" />
@@ -2052,23 +2334,37 @@ function Ribbon({
             symbol={sheetProtected ? '🔓' : '🔒'}
             onClick={() => onCommand('sheet-protect')}
           />
-          <RibbonReserved large label={t('appProtectWorkbook')} symbol="🔐" />
-          <RibbonReserved large label={t('appAllowEditRanges')} symbol="⬚" />
-        </RibbonGroup>
-        <RibbonGroup label={t('appGroupInk')}>
-          <RibbonReserved large menu label={t('appHideInk')} symbol="✒" />
+          <RibbonButton
+            large
+            label={t(workbookProtected ? 'appUnprotectWorkbook' : 'appProtectWorkbook')}
+            detail={t(workbookProtected === null ? 'appOpenFileFirst' : 'appProtectWorkbookTitle')}
+            symbol={workbookProtected ? '🔓' : '🔐'}
+            onClick={() => onCommand('workbook-protect')}
+          />
+          <RibbonButton
+            large
+            label={t('appAllowEditRanges')}
+            detail={t('appAllowEditRangesTitle')}
+            symbol="⬚"
+            onClick={() => onCommand('allow-edit-ranges-open')}
+          />
         </RibbonGroup>
       </div>
     )
   }
 
-  const fontFamilies = ['Aptos', 'Arial', 'Calibri', 'Times New Roman', '微软雅黑', '宋体']
   const fontSizes = [9, 10, 11, 12, 14, 16, 18, 22, 26]
   const echoFamily = selectionFormat?.fontFamily ?? 'Aptos'
   const echoSize = selectionFormat?.fontSize ?? 11
-  const familyOptions = fontFamilies.includes(echoFamily)
-    ? fontFamilies
-    : [echoFamily, ...fontFamilies]
+  const fontGroups = fontFamilyGroups(systemFontFamilies, echoFamily)
+  const familyOptions = [
+    ...fontGroups.common.map((family) => ({ value: family, label: family })),
+    ...fontGroups.system.map((family, index) => ({
+      value: family,
+      label: family,
+      sep: index === 0,
+    })),
+  ]
   const sizeOptions = fontSizes.includes(echoSize)
     ? fontSizes
     : [...fontSizes, echoSize].sort((a, b) => a - b)
@@ -2078,7 +2374,7 @@ function Ribbon({
       <RibbonGroup label={t('appGroupAiAssistant')}>
         <button
           className={`ribbon-tool as-button large ai-entry ${aiOpen ? 'active' : ''}`}
-          title={t('aiOpenAssistant')}
+          data-tip={t('aiOpenAssistant')}
           onClick={onAiToggle}
         >
           <span className="tool-icon-row">
@@ -2091,7 +2387,7 @@ function Ribbon({
         <button
           className="ribbon-tool as-button large ai-entry"
           disabled={!sheetHasContent}
-          title={t('aiCheckPrompt')}
+          data-tip={t('aiCheckBtn')}
           onClick={() => onAiRun(t('aiCheckPrompt'))}
         >
           <span className="tool-icon-row">
@@ -2120,7 +2416,7 @@ function Ribbon({
         <button
           className="ribbon-tool as-button large ai-entry"
           disabled={!sheetHasContent}
-          title={t('aiAnalyzePrompt')}
+          data-tip={t('aiAnalyzeBtn')}
           onClick={() => onAiRun(t('aiAnalyzePrompt'))}
         >
           <span className="tool-icon-row">
@@ -2150,7 +2446,7 @@ function Ribbon({
       <RibbonGroup label={t('appGroupClipboard')}>
         <button
           className="ribbon-tool as-button large"
-          title={t('appPasteTitle')}
+          data-tip={t('appPasteTitle')}
           onClick={() => onCommand('paste')}
         >
           <span className="tool-icon-row">
@@ -2168,13 +2464,25 @@ function Ribbon({
           { value: 'paste-special:besides-border', label: t('appPasteExceptBorders') },
         ])}
         <div className="tool-stack">
-          <button title={t('appCutTitle')} onClick={() => onCommand('cut')}>
+          <button
+            data-tip={t('appCutTitle')}
+            aria-label={t('appCutTitle')}
+            onClick={() => onCommand('cut')}
+          >
             <ToolSymbol symbol="✂" />
           </button>
-          <button title={t('appCopyTitle')} onClick={() => onCommand('copy')}>
+          <button
+            data-tip={t('appCopyTitle')}
+            aria-label={t('appCopyTitle')}
+            onClick={() => onCommand('copy')}
+          >
             <ToolSymbol symbol="⧉" />
           </button>
-          <button title={t('appFormatPainter')} onClick={() => onCommand('format-painter')}>
+          <button
+            data-tip={t('appFormatPainter')}
+            aria-label={t('appFormatPainter')}
+            onClick={() => onCommand('format-painter')}
+          >
             <ToolSymbol symbol="🖌" />
           </button>
         </div>
@@ -2185,14 +2493,17 @@ function Ribbon({
             <EditableMenuSelect
               className="select-like font-name"
               label="Font family"
+              data-tip={t('appFontFamilyTip')}
               value={echoFamily}
-              options={familyOptions.map((family) => ({ value: family, label: family }))}
+              options={familyOptions}
+              onOpen={loadSystemFonts}
               onPick={(value) => onCommand(`font-family:${value}`)}
               commit={(text) => onCommand(`font-family:${text}`)}
             />
             <EditableMenuSelect
               className="select-like font-size"
               label="Font size"
+              data-tip={t('appFontSizeTip')}
               value={String(echoSize)}
               options={sizeOptions.map((size) => ({ value: String(size), label: String(size) }))}
               onPick={(value) => onCommand(`font-size:${value}`)}
@@ -2204,13 +2515,15 @@ function Ribbon({
               }}
             />
             <button
-              title={t('appIncreaseFontSize')}
+              data-tip={t('appIncreaseFontSize')}
+              aria-label={t('appIncreaseFontSize')}
               onClick={() => onCommand(`font-size:${stepFontSize(echoSize, 1)}`)}
             >
               <ToolSymbol symbol="A↑" />
             </button>
             <button
-              title={t('appDecreaseFontSize')}
+              data-tip={t('appDecreaseFontSize')}
+              aria-label={t('appDecreaseFontSize')}
               onClick={() => onCommand(`font-size:${stepFontSize(echoSize, -1)}`)}
             >
               <ToolSymbol symbol="A↓" />
@@ -2218,72 +2531,74 @@ function Ribbon({
           </div>
           <div className="inline-tools">
             <button
-              title={t('appBold')}
+              data-tip={t('appBold')}
               className={selectionFormat?.bold ? 'is-active' : ''}
               onClick={() => onCommand('bold')}
             >
               <b>B</b>
             </button>
             <button
-              title={t('appItalic')}
+              data-tip={t('appItalic')}
               className={selectionFormat?.italic ? 'is-active' : ''}
               onClick={() => onCommand('italic')}
             >
               <em>I</em>
             </button>
             <button
-              title={t('appUnderline')}
+              data-tip={t('appUnderline')}
               className={selectionFormat?.underline ? 'is-active' : ''}
               onClick={() => onCommand('underline')}
             >
               <u>U</u>
             </button>
-            <button title={t('appDoubleUnderline')} onClick={() => onCommand('underline:double')}>
+            <button
+              data-tip={t('appDoubleUnderline')}
+              onClick={() => onCommand('underline:double')}
+            >
               <u style={{ textDecorationStyle: 'double' }}>D</u>
             </button>
             <button
-              title={t('appStrikethrough')}
+              data-tip={t('appStrikethrough')}
               className={selectionFormat?.strike ? 'is-active' : ''}
               onClick={() => onCommand('strike')}
             >
               <s>S</s>
             </button>
-            <label className="color-tool" title={t('appFontColor')}>
-              <span className="swatch-letter">
-                A<i style={{ background: fontColor }} />
-              </span>
-              <input
-                type="color"
-                aria-label="Font color"
-                value={fontColor}
-                onChange={(event) => {
-                  setFontColor(event.target.value)
-                  onCommand(`font-color:${event.target.value}`)
-                }}
-              />
-            </label>
-            <label className="color-tool" title={t('appFillColor')}>
-              <span className="swatch-letter">
-                <ToolSymbol symbol="◧" />
-                <i style={{ background: fillColor }} />
-              </span>
-              <input
-                type="color"
-                aria-label="Fill color"
-                value={fillColor}
-                onChange={(event) => {
-                  setFillColor(event.target.value)
-                  onCommand(`fill:${event.target.value}`)
-                }}
-              />
-            </label>
-            <button title={t('dlgFcNoFill')} onClick={() => onCommand('fill:none')}>
-              <ToolSymbol symbol="∅" />
-            </button>
+            <ColorDropdown
+              label="Font color"
+              data-tip={t('appFontColor')}
+              display={
+                <span className="swatch-letter">
+                  A<i style={{ background: fontColor }} />
+                </span>
+              }
+              value={fontColor}
+              auto={t('appAutomaticColor')}
+              onPick={(hex) => {
+                setFontColor(hex ?? '#000000')
+                onCommand(hex ? `font-color:${hex}` : 'font-color:auto')
+              }}
+            />
+            <ColorDropdown
+              label="Fill color"
+              data-tip={t('appFillColor')}
+              display={
+                <span className="swatch-letter">
+                  <ToolSymbol symbol="◧" />
+                  <i style={{ background: fillColor }} />
+                </span>
+              }
+              value={fillColor}
+              auto={t('dlgFcNoFill')}
+              onPick={(hex) => {
+                if (hex) setFillColor(hex)
+                onCommand(hex ? `fill:${hex}` : 'fill:none')
+              }}
+            />
             <MenuSelect
               className="select-like compact"
               label="Borders"
-              title={t('appBorders')}
+              data-tip={t('appBorders')}
               display={
                 <>
                   <ToolSymbol symbol="⊡" /> {t('appBorders')}
@@ -2301,35 +2616,50 @@ function Ribbon({
               ]}
               onPick={(value) => onCommand(`border:${value}:${borderColor}`)}
             />
-            <label className="color-tool" title={t('appBorderColor')}>
-              <span className="swatch-letter">
-                <ToolSymbol symbol="⊡" />
-                <i style={{ background: borderColor }} />
-              </span>
-              <input
-                type="color"
-                aria-label="Border color"
-                value={borderColor}
-                onChange={(event) => setBorderColor(event.target.value)}
-              />
-            </label>
+            <ColorDropdown
+              label="Border color"
+              data-tip={t('appBorderColor')}
+              display={
+                <span className="swatch-letter">
+                  <ToolSymbol symbol="⊡" />
+                  <i style={{ background: borderColor }} />
+                </span>
+              }
+              value={borderColor}
+              onPick={(hex) => {
+                if (hex) setBorderColor(hex)
+              }}
+            />
           </div>
         </div>
       </RibbonGroup>
       <RibbonGroup label={t('appGroupAlignment')}>
         <div className="ribbon-rows">
           <div className="inline-tools alignment-tools">
-            <button title={t('appTopAlign')} onClick={() => onCommand('valign:top')}>
+            <button
+              data-tip={t('appTopAlign')}
+              aria-label={t('appTopAlign')}
+              onClick={() => onCommand('valign:top')}
+            >
               <ToolSymbol symbol="⤒" />
             </button>
-            <button title={t('appMiddleAlign')} onClick={() => onCommand('valign:middle')}>
+            <button
+              data-tip={t('appMiddleAlign')}
+              aria-label={t('appMiddleAlign')}
+              onClick={() => onCommand('valign:middle')}
+            >
               <ToolSymbol symbol="↕" />
             </button>
-            <button title={t('appBottomAlign')} onClick={() => onCommand('valign:bottom')}>
+            <button
+              data-tip={t('appBottomAlign')}
+              aria-label={t('appBottomAlign')}
+              onClick={() => onCommand('valign:bottom')}
+            >
               <ToolSymbol symbol="⤓" />
             </button>
             <button
-              title={t('dlgFcWrapText')}
+              data-tip={t('dlgFcWrapText')}
+              aria-label={t('dlgFcWrapText')}
               className={selectionFormat?.wrap ? 'is-active' : ''}
               onClick={() => onCommand('wrap')}
             >
@@ -2338,7 +2668,7 @@ function Ribbon({
             <MenuSelect
               className="select-like compact"
               label="Orientation"
-              title={t('dlgFcOrientation')}
+              data-tip={t('dlgFcOrientation')}
               display={<ToolSymbol symbol="⤴" />}
               options={[
                 { value: '45', label: t('appAngleCcw') },
@@ -2352,19 +2682,31 @@ function Ribbon({
             />
           </div>
           <div className="inline-tools alignment-tools">
-            <button title={t('appAlignLeft')} onClick={() => onCommand('align:left')}>
+            <button
+              data-tip={t('appAlignLeft')}
+              aria-label={t('appAlignLeft')}
+              onClick={() => onCommand('align:left')}
+            >
               <ToolSymbol symbol="≡" />
             </button>
-            <button title={t('appAlignCenter')} onClick={() => onCommand('align:center')}>
+            <button
+              data-tip={t('appAlignCenter')}
+              aria-label={t('appAlignCenter')}
+              onClick={() => onCommand('align:center')}
+            >
               <ToolSymbol symbol="≣" />
             </button>
-            <button title={t('appAlignRight')} onClick={() => onCommand('align:right')}>
+            <button
+              data-tip={t('appAlignRight')}
+              aria-label={t('appAlignRight')}
+              onClick={() => onCommand('align:right')}
+            >
               <ToolSymbol symbol="☰" />
             </button>
             <MenuSelect
               className="select-like compact"
               label="Merge cells"
-              title={t('appMergeCells')}
+              data-tip={t('appMergeCells')}
               display={
                 <>
                   <ToolSymbol symbol="⇔" /> {t('appMerge')}
@@ -2385,19 +2727,39 @@ function Ribbon({
         <div className="ribbon-rows">
           <NumberFormatSelect pattern={selectionFormat?.numberFormat ?? ''} onCommand={onCommand} />
           <div className="inline-tools">
-            <button title={t('appCurrency')} onClick={() => onCommand('format:$#,##0.00')}>
+            <button
+              data-tip={t('appCurrency')}
+              aria-label={t('appCurrency')}
+              onClick={() => onCommand('format:$#,##0.00')}
+            >
               $
             </button>
-            <button title={t('appPercentTitle')} onClick={() => onCommand('format:0.00%')}>
+            <button
+              data-tip={t('appPercentTitle')}
+              aria-label={t('appPercentTitle')}
+              onClick={() => onCommand('format:0.00%')}
+            >
               %
             </button>
-            <button title={t('appThousands')} onClick={() => onCommand('format:#,##0')}>
+            <button
+              data-tip={t('appThousands')}
+              aria-label={t('appThousands')}
+              onClick={() => onCommand('format:#,##0')}
+            >
               ,
             </button>
-            <button title={t('appIncreaseDecimal')} onClick={() => onCommand('decimal-inc')}>
+            <button
+              data-tip={t('appIncreaseDecimal')}
+              aria-label={t('appIncreaseDecimal')}
+              onClick={() => onCommand('decimal-inc')}
+            >
               .0+
             </button>
-            <button title={t('appDecreaseDecimal')} onClick={() => onCommand('decimal-dec')}>
+            <button
+              data-tip={t('appDecreaseDecimal')}
+              aria-label={t('appDecreaseDecimal')}
+              onClick={() => onCommand('decimal-dec')}
+            >
               .0−
             </button>
           </div>
@@ -2405,12 +2767,16 @@ function Ribbon({
       </RibbonGroup>
       <RibbonGroup label={t('appGroupStyles')}>
         <div className="styles-stack">
-          <button className="styles-row as-button" onClick={() => onCommand('cf-open')}>
+          <button
+            className="styles-row as-button"
+            data-tip={t('appConditionalFormatting')}
+            onClick={() => onCommand('cf-open')}
+          >
             <ToolSymbol symbol="▤" />
             {t('appConditionalFormatting')}
             <CaretIcon />
           </button>
-          <div className="styles-row as-button" title={t('appFormatAsTableTitle')}>
+          <div className="styles-row as-button" data-tip={t('appFormatAsTableTitle')}>
             <ToolSymbol symbol="▦" />
             {t('appFormatAsTable')}
             <CaretIcon />
@@ -2428,7 +2794,7 @@ function Ribbon({
               onPick={(value) => onCommand(`format-as-table:${value}`)}
             />
           </div>
-          <div className="styles-row as-button" title={t('appCellStylesTitle')}>
+          <div className="styles-row as-button" data-tip={t('appCellStylesTitle')}>
             <ToolSymbol symbol="🎨" />
             {t('appCellStyles')}
             <CaretIcon />
@@ -2458,28 +2824,49 @@ function Ribbon({
       </RibbonGroup>
       <RibbonGroup label={t('appGroupCells')}>
         <div className="ribbon-rows">
-          <button className="styles-row as-button" onClick={() => onCommand('format-cells')}>
+          <button
+            className="styles-row as-button"
+            data-tip={t('appFormatCells')}
+            data-tip-kbd={platformShortcuts('⌘1')}
+            onClick={() => onCommand('format-cells')}
+          >
             <ToolSymbol symbol="🎨" />
-            {t('appFormatCells')} ⌘1
+            {t('appFormatCells')} {platformShortcuts('⌘1')}
             <CaretIcon />
           </button>
           <div className="inline-tools cell-tools">
-            <button title={t('appInsertRow')} onClick={() => onCommand('insert-row-here')}>
+            <button
+              data-tip={t('appInsertRow')}
+              aria-label={t('appInsertRow')}
+              onClick={() => onCommand('insert-row-here')}
+            >
               <ToolSymbol symbol="⤒" />
             </button>
-            <button title={t('appDeleteRow')} onClick={() => onCommand('delete-row-here')}>
+            <button
+              data-tip={t('appDeleteRow')}
+              aria-label={t('appDeleteRow')}
+              onClick={() => onCommand('delete-row-here')}
+            >
               <ToolSymbol symbol="⤓" />
             </button>
-            <button title={t('appInsertCol')} onClick={() => onCommand('insert-col-here')}>
+            <button
+              data-tip={t('appInsertCol')}
+              aria-label={t('appInsertCol')}
+              onClick={() => onCommand('insert-col-here')}
+            >
               <ToolSymbol symbol="⇤" />
             </button>
-            <button title={t('appDeleteCol')} onClick={() => onCommand('delete-col-here')}>
+            <button
+              data-tip={t('appDeleteCol')}
+              aria-label={t('appDeleteCol')}
+              onClick={() => onCommand('delete-col-here')}
+            >
               <ToolSymbol symbol="⇥" />
             </button>
             <MenuSelect
               className="select-like compact"
               label="Format"
-              title={t('appFormatMenu')}
+              data-tip={t('appFormatMenu')}
               display={
                 <>
                   <ToolSymbol symbol="⇳" /> {t('appFormatMenu')}
@@ -2500,7 +2887,7 @@ function Ribbon({
             <MenuSelect
               className="select-like compact"
               label="Fill"
-              title={t('appFillMenu')}
+              data-tip={t('appFillMenu')}
               display={
                 <>
                   <ToolSymbol symbol="↓" /> {t('appFillMenu')}
@@ -2515,7 +2902,7 @@ function Ribbon({
             <MenuSelect
               className="select-like compact"
               label="Clear"
-              title={t('appClear')}
+              data-tip={t('appClear')}
               display={
                 <>
                   <ToolSymbol symbol="⌫" /> {t('appClear')}
@@ -2530,19 +2917,23 @@ function Ribbon({
             />
           </div>
           <div className="inline-tools">
-            <button className="labeled" title={t('appFindTitle')} onClick={() => onCommand('find')}>
+            <button
+              className="labeled"
+              data-tip={t('appFindTitle')}
+              onClick={() => onCommand('find')}
+            >
               <ToolSymbol symbol="🔍" /> {t('appFind')}
             </button>
             <button
               className="labeled"
-              title={t('appReplace')}
+              data-tip={t('appReplace')}
               onClick={() => onCommand('replace')}
             >
               <ToolSymbol symbol="⇄" /> {t('appReplace')}
             </button>
             <button
               className="labeled"
-              title={`${t('appGoTo')} ⌘G`}
+              data-tip={`${t('appGoTo')} ${platformShortcuts('⌘G')}`}
               onClick={() => onCommand('goto-open')}
             >
               <ToolSymbol symbol="⌖" /> {t('appGoTo')}
@@ -2554,12 +2945,27 @@ function Ribbon({
   )
 }
 
+/// Escape-to-close for the ribbon dropdowns; outside-press / blur / shell
+/// chrome-press dismissal lives in the shared useDismissablePopover.
+function useEscapeClose(open: boolean, close: () => void): void {
+  const closeRef = useRef(close)
+  closeRef.current = close
+  useEffect(() => {
+    if (!open) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') closeRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+}
+
 /// Custom ribbon dropdown replacing the native <select>: macOS pops the native
 /// menu over the control (covering ribbon content), while this panel is
 /// anchored below its trigger — same pattern as the slides ribbon's .rb-drop.
 function MenuSelect({
   label,
-  title,
+  'data-tip': tip,
   className,
   cover = false,
   display,
@@ -2569,7 +2975,7 @@ function MenuSelect({
 }: {
   /// aria-label (mirrors the old select's aria-label)
   readonly label: string
-  readonly title?: string
+  readonly 'data-tip'?: string
   /// trigger classes for the combobox look (e.g. 'select-like compact')
   readonly className?: string
   /// invisible trigger stretched over the host tool (old .cover-select)
@@ -2583,27 +2989,15 @@ function MenuSelect({
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent): void => {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('mousedown', onDown)
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('mousedown', onDown)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  // outside press / window blur / shell chrome press — the shared hook
+  useDismissablePopover(open, () => setOpen(false), { inside: () => [wrapRef.current] })
+  useEscapeClose(open, () => setOpen(false))
   return (
     <div ref={wrapRef} className={`menu-select${cover ? ' menu-select-cover' : ''}`}>
       <button
         type="button"
         className={cover ? 'cover-select' : className}
-        title={title}
+        data-tip={tip}
         aria-label={label}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -2657,21 +3051,9 @@ function ShapeGallerySelect({
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent): void => {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('mousedown', onDown)
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('mousedown', onDown)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  // outside press / window blur / shell chrome press — the shared hook
+  useDismissablePopover(open, () => setOpen(false), { inside: () => [wrapRef.current] })
+  useEscapeClose(open, () => setOpen(false))
   return (
     <div ref={wrapRef} className="menu-select menu-select-cover">
       <button
@@ -2693,7 +3075,8 @@ function ShapeGallerySelect({
                     type="button"
                     key={s.prst}
                     className="rb-shape-cell"
-                    title={t(s.labelKey as StringKey)}
+                    data-tip={t(s.labelKey as StringKey)}
+                    aria-label={t(s.labelKey as StringKey)}
                     onClick={() => {
                       setOpen(false)
                       onPick(s.prst)
@@ -2716,16 +3099,21 @@ function ShapeGallerySelect({
 /// reverts, the caret opens the preset list.
 function EditableMenuSelect({
   label,
+  'data-tip': tip,
   className,
   value,
   options,
+  onOpen,
   onPick,
   commit,
 }: {
   readonly label: string
+  readonly 'data-tip'?: string
   readonly className?: string
   readonly value: string
-  readonly options: readonly { value: string; label: string }[]
+  readonly options: readonly { value: string; label: string; sep?: boolean }[]
+  /// fired on the click that opens the list (lazy option loading)
+  readonly onOpen?: () => void
   readonly onPick: (value: string) => void
   /// apply typed text (caller validates; invalid input is dropped silently)
   readonly commit: (text: string) => void
@@ -2740,21 +3128,9 @@ function EditableMenuSelect({
     setDraftState(next)
   }
   const wrapRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent): void => {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('mousedown', onDown)
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('mousedown', onDown)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  // outside press / window blur / shell chrome press — the shared hook
+  useDismissablePopover(open, () => setOpen(false), { inside: () => [wrapRef.current] })
+  useEscapeClose(open, () => setOpen(false))
   const commitDraft = (): void => {
     const text = draftRef.current?.trim()
     if (text && text !== value) commit(text)
@@ -2762,7 +3138,7 @@ function EditableMenuSelect({
   }
   return (
     <div ref={wrapRef} className="menu-select">
-      <span className={`${className ?? ''} menu-select-edit`}>
+      <span className={`${className ?? ''} menu-select-edit`} data-tip={tip}>
         <input
           value={draft ?? value}
           aria-label={label}
@@ -2788,7 +3164,10 @@ function EditableMenuSelect({
           aria-label={label}
           aria-haspopup="listbox"
           aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            if (!open) onOpen?.()
+            setOpen(!open)
+          }}
         >
           <CaretIcon />
         </button>
@@ -2801,7 +3180,7 @@ function EditableMenuSelect({
               key={option.value}
               role="option"
               aria-selected={option.value === value}
-              className={option.value === value ? 'on' : ''}
+              className={`${option.value === value ? 'on' : ''}${option.sep ? ' sep-above' : ''}`}
               onClick={() => {
                 setOpen(false)
                 setDraft(null)
@@ -2849,15 +3228,15 @@ function NumberFormatSelect({
     <MenuSelect
       className="select-like"
       label="Number format"
-      title={pattern || t('dlgFcNumGeneral')}
+      data-tip={pattern || t('dlgFcNumGeneral')}
       value={current}
       display={localized(current)}
-      options={NUMBER_FORMAT_CATEGORIES.map((category) => ({
+      options={numberFormatCategories().map((category) => ({
         value: category.label,
         label: localized(category.label),
       }))}
       onPick={(value) => {
-        const category = NUMBER_FORMAT_CATEGORIES.find((candidate) => candidate.label === value)
+        const category = numberFormatCategories().find((candidate) => candidate.label === value)
         if (category) onCommand(`format:${category.pattern}`)
       }}
     />
@@ -2910,7 +3289,8 @@ function RibbonButton({
       className={`ribbon-tool as-button ${accent ? 'accent' : ''} ${compact ? 'compact-icon' : ''} ${large ? 'large' : ''} ${active ? 'active' : ''}`}
       onClick={onClick}
       disabled={disabled}
-      title={`${label} — ${detail}`}
+      data-tip={label}
+      data-tip-detail={detail}
     >
       {large ? (
         // The dropdown caret sits beside the icon (top row, inside the
@@ -2930,39 +3310,5 @@ function RibbonButton({
         <small>{detail}</small>
       </span>
     </button>
-  )
-}
-
-/// A greyed placeholder item: reserves its ribbon slot, not built yet.
-function RibbonReserved({
-  label,
-  symbol,
-  menu = false,
-  large = false,
-}: {
-  readonly label: string
-  readonly symbol: string
-  readonly menu?: boolean
-  readonly large?: boolean
-}): React.JSX.Element {
-  const { t } = useI18n()
-  return (
-    <div className={`ribbon-tool reserved ${large ? 'large' : ''}`} title={t('appNotAvailableYet')}>
-      {large ? (
-        <span className="tool-icon-row">
-          <ToolSymbol symbol={symbol} />
-          {menu && <CaretIcon />}
-        </span>
-      ) : (
-        <ToolSymbol symbol={symbol} />
-      )}
-      <span>
-        <strong>
-          {label}
-          {!large && menu && <CaretIcon />}
-        </strong>
-        <small>{t('appComingSoon')}</small>
-      </span>
-    </div>
   )
 }

@@ -15,9 +15,11 @@ import type {
   ProjectSummaryEntry,
   RecentEntry,
 } from '../../shared/home-api'
+import { useDismissablePopover } from '@genoffice/ui'
 import { fileCountKey, visiblePageCount } from './counts'
 import { useI18n } from './locale'
 import type { I18n, StringKey } from './locale'
+import { SettingsModal } from './SettingsModal'
 
 declare global {
   interface Window {
@@ -119,6 +121,29 @@ const FILTERS: { key: string; label: StringKey }[] = [
   { key: 'md', label: 'filterMd' },
 ]
 
+/** Check glyph marking the selected sort option; invisible on the others so labels stay aligned */
+function SortCheck({ visible }: { visible: boolean }): ReactElement {
+  return (
+    <svg
+      className="cloud-sort-check"
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+      style={visible ? undefined : { visibility: 'hidden' }}
+    >
+      <path
+        d="M3 8.5L6.5 12L13 4.5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 // ── Project sidebar component ────────────────────────────
 
 interface ProjectPanelProps {
@@ -137,26 +162,25 @@ function ProjectPanel({ projects, selectedId, onSelect, onRefresh }: ProjectPane
   const [projMenu, setProjMenu] = useState<{ id: string; top: number; right: number } | null>(null)
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null)
   const newInputRef = useRef<HTMLInputElement>(null)
+  // wrap (… button + popup) of the row whose menu is open — the dismissal guard root
+  const projMenuWrapRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (creating && newInputRef.current) newInputRef.current.focus()
   }, [creating])
 
-  // close the menu on outside click or any scroll (the fixed-position popup
-  // would otherwise detach from its row while the list scrolls)
+  // unified dismissal: outside press, window blur, chrome press (tab strip / window drag)
+  useDismissablePopover(projMenu !== null, () => setProjMenu(null), {
+    inside: () => [projMenuWrapRef.current],
+  })
+
+  // also close on any scroll (the fixed-position popup would otherwise detach
+  // from its row while the list scrolls)
   useEffect(() => {
     if (!projMenu) return
-    const handler = (e: PointerEvent) => {
-      const target = e.target as Element | null
-      if (!target?.closest?.('.proj-menu-wrap')) setProjMenu(null)
-    }
     const close = () => setProjMenu(null)
-    window.addEventListener('pointerdown', handler)
     window.addEventListener('scroll', close, true)
-    return () => {
-      window.removeEventListener('pointerdown', handler)
-      window.removeEventListener('scroll', close, true)
-    }
+    return () => window.removeEventListener('scroll', close, true)
   }, [projMenu])
 
   const commitCreate = async () => {
@@ -210,7 +234,7 @@ function ProjectPanel({ projects, selectedId, onSelect, onRefresh }: ProjectPane
         <span className="proj-panel-title">{t('projects')}</span>
         <button
           className="proj-add-btn"
-          title={t('newProject')}
+          data-tip={t('newProject')}
           onClick={() => setCreating(true)}
           aria-label={t('newProject')}
         >
@@ -235,6 +259,9 @@ function ProjectPanel({ projects, selectedId, onSelect, onRefresh }: ProjectPane
             onChange={(e) => setNewName(e.target.value)}
             onBlur={() => void commitCreate()}
             onKeyDown={(e) => {
+              // IME (e.g. pinyin): Enter/Escape during composition only affects
+              // the composition, it must not commit or cancel the field
+              if (e.nativeEvent.isComposing) return
               if (e.key === 'Enter') void commitCreate()
               if (e.key === 'Escape') {
                 setCreating(false)
@@ -281,6 +308,7 @@ function ProjectPanel({ projects, selectedId, onSelect, onRefresh }: ProjectPane
                     onBlur={() => void commitRename()}
                     onKeyDown={(e) => {
                       e.stopPropagation()
+                      if (e.nativeEvent.isComposing) return
                       if (e.key === 'Enter') void commitRename()
                       if (e.key === 'Escape') setRenaming(null)
                     }}
@@ -296,7 +324,10 @@ function ProjectPanel({ projects, selectedId, onSelect, onRefresh }: ProjectPane
               </div>
 
               {!proj.isDefault && (
-                <div className="proj-menu-wrap">
+                <div
+                  className="proj-menu-wrap"
+                  ref={projMenu?.id === proj.id ? projMenuWrapRef : undefined}
+                >
                   <button
                     className="proj-more-btn"
                     aria-label={t('projMoreActions', { name: proj.name })}
@@ -394,55 +425,19 @@ function ProjectPanel({ projects, selectedId, onSelect, onRefresh }: ProjectPane
 
 // ── Account entry (bottom-left) ──────────────────────────
 // Currently the Genspark (gsk) login entry; to be upgraded to a signup/account system later.
-// Language switching also lives in this popup menu.
+// Clicking it opens the settings modal directly (SettingsModal.tsx), which hosts
+// login/logout plus preferences (language, theme, save location, update channel).
 
 const LOGIN_POLL_MS = 2500
 /** fallback deadline when the CLI does not report expires_in (device codes live ~300s) */
 const LOGIN_MAX_WAIT_MS = 300_000
-
-// sorted by ISO 639 language code — native-script labels have no natural
-// shared alphabet, so the code is the ordering key
-const LANG_OPTIONS = [
-  { value: 'ar', label: 'العربية' },
-  { value: 'de', label: 'Deutsch' },
-  { value: 'en', label: 'English' },
-  { value: 'es', label: 'Español' },
-  { value: 'fr', label: 'Français' },
-  { value: 'he', label: 'עברית' },
-  { value: 'hi', label: 'हिन्दी' },
-  { value: 'id', label: 'Bahasa Indonesia' },
-  { value: 'it', label: 'Italiano' },
-  { value: 'ja', label: '日本語' },
-  { value: 'ko', label: '한국어' },
-  { value: 'ms', label: 'Bahasa Melayu' },
-  { value: 'nl', label: 'Nederlands' },
-  { value: 'pl', label: 'Polski' },
-  { value: 'pt', label: 'Português' },
-  { value: 'ru', label: 'Русский' },
-  { value: 'th', label: 'ไทย' },
-  { value: 'zh', label: '简体中文' },
-  { value: 'zh-TW', label: '繁體中文' },
-] as const
-
-const CHANNEL_OPTIONS = [
-  { value: 'stable', labelKey: 'channelStable' },
-  { value: 'beta', labelKey: 'channelBeta' },
-] as const
-
-const THEME_OPTIONS = [
-  { value: 'light' as const, labelKey: 'themeLight' as const },
-  { value: 'dark' as const, labelKey: 'themeDark' as const },
-  { value: 'system' as const, labelKey: 'themeSystem' as const },
-] as const
-
-type ThemeValue = (typeof THEME_OPTIONS)[number]['value']
 
 function AccountEntry({
   onStatusChange,
 }: {
   onStatusChange?: (status: AccountStatus | null) => void
 }) {
-  const { lang, setLang, t } = useI18n()
+  const { t } = useI18n()
   const [status, setStatus] = useState<AccountStatus | null>(null)
 
   useEffect(() => {
@@ -458,38 +453,17 @@ function AccountEntry({
   const [authUrl, setAuthUrl] = useState<string | null>(null)
   const [urlCopied, setUrlCopied] = useState(false)
   const loginDeadline = useRef(0)
-  const [menuOpen, setMenuOpen] = useState(false)
-  // language flyout: opens on hover, fixed-position so it can escape the
-  // sidebar's scroll container (same trick as the project row menu)
-  const [langFly, setLangFly] = useState<{ left: number; bottom: number } | null>(null)
-  const langRowRef = useRef<HTMLDivElement>(null)
-  // grace period before the hover flyout closes: the pointer's diagonal path
-  // from the row to the options crosses ground outside both elements
-  const langCloseTimer = useRef<number | null>(null)
-  // update-channel flyout: same hover/click/outside-scroll pattern as the language flyout
-  const [channel, setChannel] = useState<'stable' | 'beta'>('stable')
-  const [chanFly, setChanFly] = useState<{ left: number; bottom: number } | null>(null)
-  const chanRowRef = useRef<HTMLDivElement>(null)
-  const chanCloseTimer = useRef<number | null>(null)
-  // theme flyout: same pattern as language and channel flyouts
-  const [theme, setThemeState] = useState<ThemeValue>('system')
-  const [themeFly, setThemeFly] = useState<{ left: number; bottom: number } | null>(null)
-  const themeRowRef = useRef<HTMLDivElement>(null)
-  const themeCloseTimer = useRef<number | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
-  const [appVersion, setAppVersion] = useState('')
+  // bumped on logout so an in-flight status refresh (which can still
+  // report logged-in) is discarded instead of resurrecting the UI
+  const statusSeq = useRef(0)
 
-  // query login state + app version once on mount
+  // query login state once on mount
   useEffect(() => {
     let alive = true
     void window.aiOffice.accountStatus?.().then((s) => {
       if (alive) setStatus(s)
-    })
-    void window.aiOffice.getAppVersion?.().then((v) => {
-      if (alive && v) setAppVersion(v)
-    })
-    void window.aiOffice.getTheme?.().then((th) => {
-      if (alive) setThemeState(th)
     })
     return () => {
       alive = false
@@ -540,22 +514,6 @@ function AccountEntry({
     return () => clearInterval(timer)
   }, [waiting, loginNonce])
 
-  // close the menu on outside click
-  useEffect(() => {
-    if (!menuOpen) return
-    const handler = (e: PointerEvent) => {
-      const target = e.target as Element | null
-      if (!target?.closest?.('.account-entry')) {
-        setMenuOpen(false)
-        setLangFly(null)
-        setChanFly(null)
-        setThemeFly(null)
-      }
-    }
-    window.addEventListener('pointerdown', handler)
-    return () => window.removeEventListener('pointerdown', handler)
-  }, [menuOpen])
-
   const loggedIn = status?.loggedIn ?? false
   const email = status?.email ?? ''
   const initial = email ? email[0].toUpperCase() : loggedIn ? 'G' : '?'
@@ -569,114 +527,14 @@ function AccountEntry({
       }[loginError]
     : null
 
-  const closeMenu = () => {
-    setMenuOpen(false)
-    setLangFly(null)
-    setChanFly(null)
-    setThemeFly(null)
+  const doLogout = () => {
+    setLoggingOut(true)
+    statusSeq.current++
+    void window.aiOffice.accountLogout().then(() => {
+      setLoggingOut(false)
+      setStatus({ loggedIn: false })
+    })
   }
-
-  const cancelLangFlyClose = () => {
-    if (langCloseTimer.current !== null) {
-      window.clearTimeout(langCloseTimer.current)
-      langCloseTimer.current = null
-    }
-  }
-
-  const openLangFly = () => {
-    cancelLangFlyClose()
-    const rect = langRowRef.current?.getBoundingClientRect()
-    if (rect) setLangFly({ left: rect.right - 2, bottom: window.innerHeight - rect.bottom })
-  }
-
-  const scheduleLangFlyClose = () => {
-    cancelLangFlyClose()
-    langCloseTimer.current = window.setTimeout(() => setLangFly(null), 200)
-  }
-
-  // the fixed-position flyout would detach from its row on scroll — close it
-  // (same rule as the project row menu); also drop any pending close timer
-  useEffect(() => {
-    if (!langFly) return
-    const close = (event: Event) => {
-      // the flyout scrolls its own options (max-height + overflow-y) — only
-      // outside scrolls detach it from its row
-      const target = event.target as Element | null
-      if (target instanceof Element && target.closest('.lang-flyout')) return
-      setLangFly(null)
-    }
-    window.addEventListener('scroll', close, true)
-    return () => {
-      window.removeEventListener('scroll', close, true)
-      cancelLangFlyClose()
-    }
-  }, [langFly])
-
-  const cancelChanFlyClose = () => {
-    if (chanCloseTimer.current !== null) {
-      window.clearTimeout(chanCloseTimer.current)
-      chanCloseTimer.current = null
-    }
-  }
-
-  const openChanFly = () => {
-    cancelChanFlyClose()
-    const rect = chanRowRef.current?.getBoundingClientRect()
-    if (rect) setChanFly({ left: rect.right - 2, bottom: window.innerHeight - rect.bottom })
-  }
-
-  const scheduleChanFlyClose = () => {
-    cancelChanFlyClose()
-    chanCloseTimer.current = window.setTimeout(() => setChanFly(null), 200)
-  }
-
-  // same scroll-close rule as the language flyout: the fixed-position flyout
-  // would otherwise detach from its row when the sidebar scrolls
-  useEffect(() => {
-    if (!chanFly) return
-    const close = (event: Event) => {
-      const target = event.target as Element | null
-      if (target instanceof Element && target.closest('.lang-flyout')) return
-      setChanFly(null)
-    }
-    window.addEventListener('scroll', close, true)
-    return () => {
-      window.removeEventListener('scroll', close, true)
-      cancelChanFlyClose()
-    }
-  }, [chanFly])
-
-  const cancelThemeFlyClose = () => {
-    if (themeCloseTimer.current !== null) {
-      window.clearTimeout(themeCloseTimer.current)
-      themeCloseTimer.current = null
-    }
-  }
-
-  const openThemeFly = () => {
-    cancelThemeFlyClose()
-    const rect = themeRowRef.current?.getBoundingClientRect()
-    if (rect) setThemeFly({ left: rect.right - 2, bottom: window.innerHeight - rect.bottom })
-  }
-
-  const scheduleThemeFlyClose = () => {
-    cancelThemeFlyClose()
-    themeCloseTimer.current = window.setTimeout(() => setThemeFly(null), 200)
-  }
-
-  useEffect(() => {
-    if (!themeFly) return
-    const close = (event: Event) => {
-      const target = event.target as Element | null
-      if (target instanceof Element && target.closest('.lang-flyout')) return
-      setThemeFly(null)
-    }
-    window.addEventListener('scroll', close, true)
-    return () => {
-      window.removeEventListener('scroll', close, true)
-      cancelThemeFlyClose()
-    }
-  }, [themeFly])
 
   const startLogin = () => {
     // clicking again while waiting = relaunch the login (main kills the stale CLI, so the new device code is the live one)
@@ -686,7 +544,6 @@ function AccountEntry({
     setUrlCopied(false)
     loginDeadline.current = Date.now() + LOGIN_MAX_WAIT_MS
     setLoginNonce((n) => n + 1)
-    closeMenu()
     void window.aiOffice.accountLogin().then((launched) => {
       if (!launched) {
         setWaiting(false)
@@ -706,354 +563,35 @@ function AccountEntry({
   }
 
   const handleClick = () => {
-    setMenuOpen((v) => {
-      if (!v) void window.aiOffice.getUpdateChannel().then(setChannel)
-      return !v
+    // refresh the login state / credit balance; drop the response
+    // when a logout happened while it was in flight
+    const seq = statusSeq.current
+    void window.aiOffice.accountStatus?.().then((s) => {
+      if (seq === statusSeq.current) setStatus(s)
     })
-    setLangFly(null)
-    setChanFly(null)
-    setThemeFly(null)
+    setSettingsOpen(true)
   }
 
   return (
     <div className="account-entry">
-      {menuOpen && (
-        <div className="account-menu" role="menu">
-          {loggedIn ? (
-            <div className="account-menu-info">
-              <span className="account-menu-email" title={email}>
-                {email || t('loggedIn')}
-              </span>
-            </div>
-          ) : (
-            <>
-              <button
-                className="account-menu-item"
-                role="menuitem"
-                onClick={startLogin}
-                title={waiting ? t('waitingLogin') : undefined}
-              >
-                {waiting ? t('waitingShort') : t('loginGenspark')}
-              </button>
-              {waiting && authUrl && (
-                <>
-                  <button
-                    className="account-menu-item login-rescue"
-                    role="menuitem"
-                    onClick={openLoginUrl}
-                  >
-                    {t('loginOpenManually')}
-                  </button>
-                  <button
-                    className="account-menu-item login-rescue"
-                    role="menuitem"
-                    onClick={copyLoginUrl}
-                  >
-                    {urlCopied ? t('loginCopied') : t('loginCopyUrl')}
-                  </button>
-                </>
-              )}
-            </>
-          )}
-          <div className="account-menu-divider" />
-          <div
-            className="lang-row-wrap"
-            ref={langRowRef}
-            onMouseEnter={openLangFly}
-            onMouseLeave={scheduleLangFlyClose}
-          >
-            <button
-              className="account-menu-item lang-row"
-              role="menuitem"
-              aria-haspopup="menu"
-              aria-expanded={!!langFly}
-              onClick={openLangFly}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <circle cx="8" cy="8" r="6.3" stroke="currentColor" strokeWidth="1.2" />
-                <ellipse cx="8" cy="8" rx="2.8" ry="6.3" stroke="currentColor" strokeWidth="1.1" />
-                <path d="M2 5.9h12M2 10.1h12" stroke="currentColor" strokeWidth="1.1" />
-              </svg>
-              <span className="lang-row-label">{t('language')}</span>
-              <span className="lang-row-current">
-                {LANG_OPTIONS.find((opt) => opt.value === lang)?.label}
-              </span>
-              <svg
-                className="lang-row-chevron"
-                width="11"
-                height="11"
-                viewBox="0 0 12 12"
-                aria-hidden="true"
-              >
-                <path
-                  d="M4.5 2.5l4 3.5-4 3.5"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinecap="round"
-                  fill="none"
-                />
-              </svg>
-            </button>
-            {langFly && (
-              <div
-                className="lang-flyout"
-                role="menu"
-                style={{ left: langFly.left, bottom: langFly.bottom }}
-              >
-                {LANG_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    role="menuitemradio"
-                    aria-checked={lang === opt.value}
-                    className={`lang-menu-item${lang === opt.value ? ' active' : ''}`}
-                    onClick={() => {
-                      closeMenu()
-                      if (lang !== opt.value) setLang(opt.value)
-                    }}
-                  >
-                    {opt.label}
-                    {lang === opt.value && (
-                      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-                        <path
-                          d="M2.5 6.2l2.4 2.4 4.6-5"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          fill="none"
-                        />
-                      </svg>
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          <div
-            className="lang-row-wrap"
-            ref={themeRowRef}
-            onMouseEnter={openThemeFly}
-            onMouseLeave={scheduleThemeFlyClose}
-          >
-            <button
-              className="account-menu-item lang-row"
-              role="menuitem"
-              aria-haspopup="menu"
-              aria-expanded={!!themeFly}
-              onClick={openThemeFly}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <circle cx="8" cy="8" r="3.5" stroke="currentColor" strokeWidth="1.2" />
-                <path
-                  d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                />
-              </svg>
-              <span className="lang-row-label">{t('theme')}</span>
-              <span className="lang-row-current">
-                {t(THEME_OPTIONS.find((opt) => opt.value === theme)?.labelKey ?? 'themeSystem')}
-              </span>
-              <svg
-                className="lang-row-chevron"
-                width="11"
-                height="11"
-                viewBox="0 0 12 12"
-                aria-hidden="true"
-              >
-                <path
-                  d="M4.5 2.5l4 3.5-4 3.5"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinecap="round"
-                  fill="none"
-                />
-              </svg>
-            </button>
-            {themeFly && (
-              <div
-                className="lang-flyout"
-                role="menu"
-                style={{ left: themeFly.left, bottom: themeFly.bottom }}
-              >
-                {THEME_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    role="menuitemradio"
-                    aria-checked={theme === opt.value}
-                    className={`lang-menu-item${theme === opt.value ? ' active' : ''}`}
-                    onClick={() => {
-                      closeMenu()
-                      if (theme !== opt.value) {
-                        setThemeState(opt.value)
-                        void window.aiOffice.setTheme(opt.value)
-                        // apply theme attribute to DOM immediately
-                        if (opt.value === 'light' || opt.value === 'dark') {
-                          document.documentElement.setAttribute('data-theme', opt.value)
-                        } else {
-                          document.documentElement.removeAttribute('data-theme')
-                        }
-                      }
-                    }}
-                  >
-                    {t(opt.labelKey)}
-                    {theme === opt.value && (
-                      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-                        <path
-                          d="M2.5 6.2l2.4 2.4 4.6-5"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          fill="none"
-                        />
-                      </svg>
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          <div
-            className="lang-row-wrap"
-            ref={chanRowRef}
-            onMouseEnter={openChanFly}
-            onMouseLeave={scheduleChanFlyClose}
-          >
-            <button
-              className="account-menu-item lang-row"
-              role="menuitem"
-              aria-haspopup="menu"
-              aria-expanded={!!chanFly}
-              onClick={openChanFly}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path
-                  d="M4 3v6.5a3 3 0 0 0 3 3h5"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                />
-                <circle cx="4" cy="3" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-                <path
-                  d="M9.8 10l2.4 2.5-2.4 2.5"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                />
-              </svg>
-              <span className="lang-row-label">{t('updateChannel')}</span>
-              <span className="lang-row-current">
-                {t(channel === 'beta' ? 'channelBeta' : 'channelStable')}
-              </span>
-              <svg
-                className="lang-row-chevron"
-                width="11"
-                height="11"
-                viewBox="0 0 12 12"
-                aria-hidden="true"
-              >
-                <path
-                  d="M4.5 2.5l4 3.5-4 3.5"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinecap="round"
-                  fill="none"
-                />
-              </svg>
-            </button>
-            {chanFly && (
-              <div
-                className="lang-flyout"
-                role="menu"
-                style={{ left: chanFly.left, bottom: chanFly.bottom }}
-              >
-                {CHANNEL_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    role="menuitemradio"
-                    aria-checked={channel === opt.value}
-                    className={`lang-menu-item${channel === opt.value ? ' active' : ''}`}
-                    onClick={() => {
-                      closeMenu()
-                      if (channel !== opt.value) {
-                        setChannel(opt.value)
-                        void window.aiOffice.setUpdateChannel(opt.value)
-                      }
-                    }}
-                  >
-                    {t(opt.labelKey)}
-                    {channel === opt.value && (
-                      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-                        <path
-                          d="M2.5 6.2l2.4 2.4 4.6-5"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          fill="none"
-                        />
-                      </svg>
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          {appVersion && (
-            <div className="account-menu-version">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <circle cx="8" cy="8" r="6.3" stroke="currentColor" strokeWidth="1.2" />
-                <path
-                  d="M8 7.4v3.4"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                />
-                <circle cx="8" cy="5.1" r="0.8" fill="currentColor" />
-              </svg>
-              <span className="version-row-label">{t('versionLabel')}</span>
-              <span className="version-row-value">{appVersion}</span>
-            </div>
-          )}
-          {loggedIn && (
-            <button
-              className="account-menu-item danger"
-              role="menuitem"
-              disabled={loggingOut}
-              onClick={() => {
-                setLoggingOut(true)
-                void window.aiOffice.accountLogout().then(() => {
-                  setLoggingOut(false)
-                  closeMenu()
-                  setStatus({ loggedIn: false })
-                })
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path
-                  d="M6.2 2H3.7A1.7 1.7 0 0 0 2 3.7v8.6A1.7 1.7 0 0 0 3.7 14h2.5"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                />
-                <path
-                  d="M10.7 4.9 13.8 8l-3.1 3.1M13.4 8H6.4"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <span>{loggingOut ? t('loggingOut') : t('logout')}</span>
-            </button>
-          )}
-        </div>
+      {settingsOpen && (
+        <SettingsModal
+          status={status}
+          loggingOut={loggingOut}
+          loginWaiting={waiting}
+          loginUrl={authUrl}
+          urlCopied={urlCopied}
+          onOpenLoginUrl={openLoginUrl}
+          onCopyLoginUrl={copyLoginUrl}
+          onClose={() => setSettingsOpen(false)}
+          onLogin={() => {
+            setSettingsOpen(false)
+            startLogin()
+          }}
+          onLogout={doLogout}
+        />
       )}
-      {!menuOpen && waiting && authUrl && (
+      {!settingsOpen && waiting && authUrl && (
         <div className="login-hint" role="status">
           <button className="login-hint-open" onClick={openLoginUrl}>
             {t('loginOpenManually')}
@@ -1066,15 +604,16 @@ function AccountEntry({
       <button
         className="account-btn"
         onClick={handleClick}
-        aria-expanded={menuOpen}
-        title={
+        aria-haspopup="dialog"
+        aria-expanded={settingsOpen}
+        data-tip={
           loggedIn
             ? email || t('loggedInGenspark')
             : waiting
               ? t('waitingLogin')
               : (errorText ?? t('loginGenspark'))
         }
-        aria-label={loggedIn ? t('account') : t('login')}
+        aria-label={t('settings')}
       >
         <span
           className={`account-avatar${loggedIn ? ' logged-in' : ''}${waiting ? ' waiting' : ''}`}
@@ -1104,22 +643,35 @@ function AccountEntry({
           )}
         </span>
         <span className="account-text">
-          {loggedIn ? (
-            <>
-              <span className="account-name">{email ? email.split('@')[0] : t('loggedIn')}</span>
-              <span className="account-sub" title={email}>
-                {email || 'Genspark'}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="account-name">{waiting ? t('waitingShort') : t('login')}</span>
-              <span className={`account-sub${!waiting && errorText ? ' error' : ''}`}>
-                {!waiting && errorText ? errorText : t('accountGenspark')}
-              </span>
-            </>
+          <span className="account-name">
+            {loggedIn
+              ? email
+                ? email.split('@')[0]
+                : t('loggedIn')
+              : waiting
+                ? t('waitingShort')
+                : t('login')}
+          </span>
+          {!loggedIn && !waiting && errorText && (
+            <span className="account-sub error">{errorText}</span>
           )}
         </span>
+        <svg
+          className="account-chevron"
+          width="14"
+          height="14"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path
+            d="M5 6.2 8 3.4l3 2.8M5 9.8l3 2.8 3-2.8"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
       </button>
     </div>
   )
@@ -1195,14 +747,10 @@ function CloudProjectsView() {
     return off
   }, [])
 
-  useEffect(() => {
-    if (!sortMenuOpen) return
-    const handler = (e: PointerEvent) => {
-      if (!sortRef.current?.contains(e.target as Node)) setSortMenuOpen(false)
-    }
-    window.addEventListener('pointerdown', handler)
-    return () => window.removeEventListener('pointerdown', handler)
-  }, [sortMenuOpen])
+  // unified dismissal: outside press, window blur, chrome press (tab strip / window drag)
+  useDismissablePopover(sortMenuOpen, () => setSortMenuOpen(false), {
+    inside: () => [sortRef.current],
+  })
 
   const startLogin = () => {
     setLoginWaiting(true)
@@ -1228,43 +776,19 @@ function CloudProjectsView() {
   if (sort === 'oldest') list = [...list].reverse()
   const visible = list.slice(0, revealed)
 
-  /** time-bucket header: this week → earlier this month → month → month + year */
-  const groupLabel = (ctimeMs: number): string => {
-    if (!ctimeMs) return ''
-    const now = Date.now()
-    if (now - ctimeMs < 7 * 86_400_000 && ctimeMs < now + 86_400_000) {
-      return t('cloudGroupThisWeek')
-    }
-    const d = new Date(ctimeMs)
-    const n = new Date()
-    if (d.getFullYear() === n.getFullYear()) {
-      if (d.getMonth() === n.getMonth()) return t('cloudGroupThisMonth')
-      return new Intl.DateTimeFormat(i18n.dateLocale, { month: 'long' }).format(d)
-    }
-    return new Intl.DateTimeFormat(i18n.dateLocale, { year: 'numeric', month: 'long' }).format(d)
-  }
-
   const renderRows = () => {
     const items: ReactElement[] = []
-    let prevLabel = ''
     for (const proj of visible) {
-      const label = groupLabel(proj.ctimeMs)
-      if (label && label !== prevLabel) {
-        prevLabel = label
-        items.push(
-          <li key={`group-${label}`} className="cloud-group-label" aria-hidden="true">
-            {label}
-          </li>,
-        )
-      }
       items.push(
         <li key={proj.projectId}>
           <button
             className="cloud-row"
-            title={t('cloudOpenInBrowser')}
+            data-tip={t('cloudOpenInBrowser')}
+            data-tip-anchor=".cloud-row-external"
+            data-tip-place="right"
             onClick={() => openProject(proj.projectUrl)}
           >
-            <FileBadge ext={CLOUD_KIND_EXT[proj.kind] ?? ''} size={22} />
+            <FileBadge ext={CLOUD_KIND_EXT[proj.kind] ?? ''} size={24} />
             <span className="cloud-row-main">
               <span className="cloud-row-title">{proj.title || t('untitled')}</span>
               <svg
@@ -1333,7 +857,58 @@ function CloudProjectsView() {
     }
     return (
       <div className="cloud-scroll">
-        <ul className="cloud-list">{renderRows()}</ul>
+        <div className="cloud-table">
+          <div className="cloud-columns">
+            <span className="col-name">{t('colName')}</span>
+            <div className="cloud-col-sort" ref={sortRef}>
+              <button
+                className="cloud-col-sort-btn"
+                aria-haspopup="menu"
+                aria-expanded={sortMenuOpen}
+                onClick={() => setSortMenuOpen((o) => !o)}
+              >
+                {t('colModified')}
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden="true"
+                  style={sort === 'oldest' ? { transform: 'rotate(180deg)' } : undefined}
+                >
+                  <path
+                    d="M8 3v10M4.5 9.5L8 13l3.5-3.5"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+              {sortMenuOpen && (
+                <div className="cloud-sort-menu" role="menu">
+                  {(['recent', 'oldest'] as const).map((key) => (
+                    <button
+                      key={key}
+                      className={sort === key ? 'active' : ''}
+                      role="menuitemradio"
+                      aria-checked={sort === key}
+                      onClick={() => {
+                        setSort(key)
+                        setSortMenuOpen(false)
+                        setRevealed(CLOUD_REVEAL_STEP)
+                      }}
+                    >
+                      <SortCheck visible={sort === key} />
+                      {t(key === 'recent' ? 'cloudSortRecent' : 'cloudSortOldest')}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <ul className="cloud-list">{renderRows()}</ul>
+        </div>
         {list.length > revealed && (
           <div className="load-more">
             <button
@@ -1348,82 +923,46 @@ function CloudProjectsView() {
     )
   }
 
-  const sortValueKey = sort === 'recent' ? 'cloudSortRecent' : 'cloudSortOldest'
   return (
     <main className="content">
       <section className="cloud-projects" aria-label={t('navCloud')}>
         <header className="cloud-hero">
           <div className="cloud-hero-top">
-            <h1 className="cloud-title">
-              {t('navCloud')}
-              <span className="cloud-chip">
-                <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path
-                    d="M4 12L12 4M6 3.5h6.5V10"
-                    stroke="currentColor"
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                {t('cloudOpenInBrowser')}
-              </span>
-            </h1>
-            {snapshot?.available && (
-              <div className="cloud-actions">
-                <button
-                  className={`cloud-refresh-btn${syncing ? ' syncing' : ''}`}
-                  title={t('cloudRefresh')}
-                  aria-label={t('cloudRefresh')}
-                  disabled={syncing}
-                  onClick={() => startSync()}
-                >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <path
-                      d="M13.6 8a5.6 5.6 0 1 1-1.64-3.96M13.6 2.4v3.2h-3.2"
-                      stroke="currentColor"
-                      strokeWidth="1.4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-                <div className="cloud-sort" ref={sortRef}>
-                  <button className="cloud-sort-btn" onClick={() => setSortMenuOpen((o) => !o)}>
-                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <path
-                        d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3"
-                        stroke="currentColor"
-                        strokeWidth="1.4"
-                        strokeLinecap="round"
-                      />
-                    </svg>
-                    {t('cloudSortLabel', { v: t(sortValueKey) })}
-                  </button>
-                  {sortMenuOpen && (
-                    <div className="cloud-sort-menu" role="menu">
-                      {(['recent', 'oldest'] as const).map((key) => (
-                        <button
-                          key={key}
-                          className={sort === key ? 'active' : ''}
-                          onClick={() => {
-                            setSort(key)
-                            setSortMenuOpen(false)
-                            setRevealed(CLOUD_REVEAL_STEP)
-                          }}
-                        >
-                          {t(key === 'recent' ? 'cloudSortRecent' : 'cloudSortOldest')}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
+            <h1 className="cloud-title">{t('navCloud')}</h1>
           </div>
           <p className="cloud-subtitle">{t('cloudSubtitle')}</p>
           {snapshot?.available && (
             <div className="cloud-controls">
+              <div className="cloud-seg" role="tablist" aria-label={t('filterAria')}>
+                {CLOUD_FILTERS.map((f) => (
+                  <button
+                    key={f.key}
+                    className={kind === f.key ? 'active' : ''}
+                    role="tab"
+                    aria-selected={kind === f.key}
+                    onClick={() => changeKind(f.key)}
+                  >
+                    {t(f.label)}
+                  </button>
+                ))}
+              </div>
+              <button
+                className={`cloud-refresh-btn${syncing ? ' syncing' : ''}`}
+                data-tip={t('cloudRefresh')}
+                aria-label={t('cloudRefresh')}
+                disabled={syncing}
+                onClick={() => startSync()}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path
+                    d="M13.6 8a5.6 5.6 0 1 1-1.64-3.96M13.6 2.4v3.2h-3.2"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
               <div className="cloud-search">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <circle cx="7" cy="7" r="4.6" stroke="currentColor" strokeWidth="1.4" />
@@ -1442,19 +981,6 @@ function CloudProjectsView() {
                     setRevealed(CLOUD_REVEAL_STEP)
                   }}
                 />
-              </div>
-              <div className="cloud-seg" role="tablist" aria-label={t('filterAria')}>
-                {CLOUD_FILTERS.map((f) => (
-                  <button
-                    key={f.key}
-                    className={kind === f.key ? 'active' : ''}
-                    role="tab"
-                    aria-selected={kind === f.key}
-                    onClick={() => changeKind(f.key)}
-                  >
-                    {t(f.label)}
-                  </button>
-                ))}
               </div>
             </div>
           )}
@@ -1481,7 +1007,13 @@ export function Home() {
   // Genspark web projects take over the content area (like a selected project)
   const [cloudMode, setCloudMode] = useState(false)
   const [filter, setFilter] = useState('all')
+  // modified-column sort (WPS-style header popover), shared by the global and project tables
+  const [fileSort, setFileSort] = useState<'recent' | 'oldest'>('recent')
+  const [fileSortMenuOpen, setFileSortMenuOpen] = useState(false)
+  const fileSortRef = useRef<HTMLDivElement>(null)
   const [rowMenu, setRowMenu] = useState<string | null>(null)
+  // actions cell (… button + menu) of the row whose menu is open — the dismissal guard root
+  const rowMenuWrapRef = useRef<HTMLSpanElement>(null)
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
   const [renaming, setRenaming] = useState<{ path: string; value: string } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null)
@@ -1570,6 +1102,11 @@ export function Home() {
 
   const hasMore = entries.length < listTotal
 
+  // unified dismissal: outside press, window blur, chrome press (tab strip / window drag)
+  useDismissablePopover(fileSortMenuOpen, () => setFileSortMenuOpen(false), {
+    inside: () => [fileSortRef.current],
+  })
+
   const loadMore = () => {
     if (loadingMore || !hasMore) return
     setLoadingMore(true)
@@ -1585,6 +1122,12 @@ export function Home() {
   }
   const loadMoreRef = useRef(loadMore)
   loadMoreRef.current = loadMore
+
+  // oldest-first over a partially loaded list would miss the tail pages —
+  // keep pulling until the list is complete (backend caps recents at 100)
+  useEffect(() => {
+    if (fileSort === 'oldest' && hasMore) loadMoreRef.current()
+  }, [fileSort, hasMore, entries.length])
 
   // Load the next page once the bottom sentinel enters the viewport (240px early);
   // depending on entries.length rebuilds the observer after each page — observe fires an immediate
@@ -1603,24 +1146,22 @@ export function Home() {
     return () => observer.disconnect()
   }, [hasMore, entries.length])
 
+  // unified dismissal: outside press, window blur, chrome press (tab strip / window drag)
+  useDismissablePopover(rowMenu !== null, () => setRowMenu(null), {
+    inside: () => [rowMenuWrapRef.current],
+  })
+
+  // Escape closes the row menu and the delete-confirm dialog
   useEffect(() => {
     if (rowMenu === null && confirmDelete === null) return
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Element | null
-      if (rowMenu !== null && !target?.closest?.('.recent-actions')) setRowMenu(null)
-    }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setRowMenu(null)
         setConfirmDelete(null)
       }
     }
-    window.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('keydown', onKeyDown)
-    }
+    return () => window.removeEventListener('keydown', onKeyDown)
   }, [rowMenu, confirmDelete])
 
   // ── Project files state ────────────────────────────────
@@ -1635,6 +1176,8 @@ export function Home() {
     open: null,
     close: null,
   })
+  // wrap (trigger + submenu) of the row whose move submenu is open — the dismissal guard root
+  const moveMenuWrapRef = useRef<HTMLDivElement>(null)
 
   const openMoveMenu = (path: string) => {
     setMoveMenuFlip(false)
@@ -1657,6 +1200,8 @@ export function Home() {
     }
   }
   const [bulkMoveMenu, setBulkMoveMenu] = useState(false)
+  // selection-bar wrap (trigger + menu) of the bulk move menu — the dismissal guard root
+  const bulkMoveWrapRef = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
     if (!projectMode || !selectedProjectId) {
@@ -1685,34 +1230,72 @@ export function Home() {
     }
   }, [rowMenu])
 
-  // close the move-file menu
-  useEffect(() => {
-    if (!moveFileMenu) return
-    const handler = (e: PointerEvent) => {
-      const target = e.target as Element | null
-      if (!target?.closest?.('.move-menu-wrap')) setMoveFileMenu(null)
-    }
-    window.addEventListener('pointerdown', handler)
-    return () => window.removeEventListener('pointerdown', handler)
-  }, [moveFileMenu])
+  // move-file submenu: unified dismissal (outside press, window blur, chrome press)
+  useDismissablePopover(moveFileMenu !== null, () => setMoveFileMenu(null), {
+    inside: () => [moveMenuWrapRef.current],
+  })
 
-  // close the bulk move-to-project menu in the selection bar
+  // bulk move-to-project menu in the selection bar: unified dismissal, plus Escape
+  useDismissablePopover(bulkMoveMenu, () => setBulkMoveMenu(false), {
+    inside: () => [bulkMoveWrapRef.current],
+  })
   useEffect(() => {
     if (!bulkMoveMenu) return
-    const handler = (e: PointerEvent) => {
-      const target = e.target as Element | null
-      if (!target?.closest?.('.selection-move-wrap')) setBulkMoveMenu(false)
-    }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setBulkMoveMenu(false)
     }
-    window.addEventListener('pointerdown', handler)
     window.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.removeEventListener('pointerdown', handler)
-      window.removeEventListener('keydown', onKeyDown)
-    }
+    return () => window.removeEventListener('keydown', onKeyDown)
   }, [bulkMoveMenu])
+
+  // WPS-style sortable "modified" column header, shared by both file tables
+  const renderModifiedHeader = () => (
+    <div className="cloud-col-sort" ref={fileSortRef}>
+      <button
+        className="cloud-col-sort-btn"
+        aria-haspopup="menu"
+        aria-expanded={fileSortMenuOpen}
+        onClick={() => setFileSortMenuOpen((o) => !o)}
+      >
+        {t('colModified')}
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+          style={fileSort === 'oldest' ? { transform: 'rotate(180deg)' } : undefined}
+        >
+          <path
+            d="M8 3v10M4.5 9.5L8 13l3.5-3.5"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      {fileSortMenuOpen && (
+        <div className="cloud-sort-menu" role="menu">
+          {(['recent', 'oldest'] as const).map((key) => (
+            <button
+              key={key}
+              className={fileSort === key ? 'active' : ''}
+              role="menuitemradio"
+              aria-checked={fileSort === key}
+              onClick={() => {
+                setFileSort(key)
+                setFileSortMenuOpen(false)
+              }}
+            >
+              <SortCheck visible={fileSort === key} />
+              {t(key === 'recent' ? 'cloudSortRecent' : 'cloudSortOldest')}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 
   // ── Plain view (no project selected): filtering runs in the main process; entries is the visible list ──
   const selectedPaths = entries.filter((e) => selected.has(e.path)).map((e) => e.path)
@@ -1839,11 +1422,16 @@ export function Home() {
     )
   }
 
+  const handleNewPdf = () => {
+    void window.aiOffice.newPdf(selectedProjectId ? { projectId: selectedProjectId } : undefined)
+  }
+
   const NEW_ITEMS = [
     { ext: 'docx', title: t('newDoc'), sub: '.docx', action: handleNewDoc },
     { ext: 'xlsx', title: t('newSheet'), sub: '.xlsx', action: handleNewSheet },
     { ext: 'pptx', title: t('newSlide'), sub: '.pptx', action: handleNewSlide },
     { ext: 'md', title: t('newMarkdown'), sub: '.md', action: handleNewMarkdown },
+    { ext: 'pdf', title: t('newPdf'), sub: '.pdf', action: handleNewPdf },
   ]
 
   function renderQuickCards() {
@@ -1928,6 +1516,7 @@ export function Home() {
               onBlur={() => commitRename(entry)}
               onKeyDown={(event) => {
                 event.stopPropagation()
+                if (event.nativeEvent.isComposing) return
                 if (event.key === 'Enter') commitRename(entry)
                 if (event.key === 'Escape') setRenaming(null)
               }}
@@ -1956,7 +1545,11 @@ export function Home() {
               />
             </svg>
           </button>
-          <span className="recent-actions" onClick={(event) => event.stopPropagation()}>
+          <span
+            className="recent-actions"
+            ref={rowMenu === entry.path ? rowMenuWrapRef : undefined}
+            onClick={(event) => event.stopPropagation()}
+          >
             <button
               className="more-btn"
               aria-label={t('moreActions')}
@@ -2003,6 +1596,7 @@ export function Home() {
                     <div className="row-menu-divider" />
                     <div
                       className="move-menu-wrap"
+                      ref={moveFileMenu === entry.path ? moveMenuWrapRef : undefined}
                       onMouseEnter={() => {
                         clearMoveMenuTimer('close')
                         if (moveFileMenu === entry.path) return
@@ -2129,7 +1723,7 @@ export function Home() {
                   {t('selectedCount', { n: projSelectedPaths.length })}
                 </span>
                 {otherProjects.length > 0 && (
-                  <span className="selection-move-wrap">
+                  <span className="selection-move-wrap" ref={bulkMoveWrapRef}>
                     <button
                       className="selection-action"
                       aria-expanded={bulkMoveMenu}
@@ -2201,13 +1795,16 @@ export function Home() {
                 </span>
                 <span className="col-name">{t('colName')}</span>
                 <span>{t('colLocation')}</span>
-                <span>{t('colModified')}</span>
+                {renderModifiedHeader()}
                 <span className="col-size">{t('colSize')}</span>
                 <span />
                 <span />
               </div>
               <ul className="recent-list">
-                {projectFileEntries.map((entry) => renderFileRow(entry, 'project'))}
+                {(fileSort === 'oldest'
+                  ? [...projectFileEntries].reverse()
+                  : projectFileEntries
+                ).map((entry) => renderFileRow(entry, 'project'))}
               </ul>
             </div>
           )}
@@ -2248,12 +1845,6 @@ export function Home() {
           aria-label={view === 'recent' ? t('secRecent') : t('secStarred')}
         >
           <div className="recents-toolbar">
-            <div className="recents-heading">
-              <span className="section-label">
-                {view === 'recent' ? t('secRecent') : t('secStarred')}
-              </span>
-              <span className="file-count">{t(fileCountKey(listTotal), { n: listTotal })}</span>
-            </div>
             {selectedPaths.length > 0 ? (
               <div className="selection-bar">
                 <span className="selection-count">
@@ -2285,6 +1876,12 @@ export function Home() {
                 ))}
               </div>
             )}
+            <div className="recents-heading">
+              <span className="section-label">
+                {view === 'recent' ? t('secRecent') : t('secStarred')}
+              </span>
+              <span className="file-count">{t(fileCountKey(listTotal), { n: listTotal })}</span>
+            </div>
           </div>
 
           {entries.length === 0 ? (
@@ -2329,13 +1926,15 @@ export function Home() {
                 </span>
                 <span className="col-name">{t('colName')}</span>
                 <span>{t('colLocation')}</span>
-                <span>{t('colModified')}</span>
+                {renderModifiedHeader()}
                 <span className="col-size">{t('colSize')}</span>
                 <span />
                 <span />
               </div>
               <ul className="recent-list">
-                {entries.map((entry) => renderFileRow(entry, 'global'))}
+                {(fileSort === 'oldest' ? [...entries].reverse() : entries).map((entry) =>
+                  renderFileRow(entry, 'global'),
+                )}
               </ul>
               {hasMore && (
                 <div ref={sentinelRef} className="load-more" aria-hidden="true">

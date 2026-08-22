@@ -17,6 +17,7 @@ const RAW =
 // what extractParaFormat yields for RAW
 const MODEL: ParaFormat = {
   borders: 'tb',
+  borderLines: { t: { color: 'FF0000', szPt: 1.5 }, b: { color: 'FF0000', szPt: 1.5 } },
   shadingFill: 'EEEEEE',
   spaceBefore: 240,
   spaceAfter: 120,
@@ -65,6 +66,24 @@ describe('mergePPrFormat keeps unedited groups byte-identical', () => {
     expect(mergePPrFormat(raw, doc.blocks[0].format)).toBe(raw)
   })
 
+  it('changing only a border color rebuilds pBdr with the declared color/sz', () => {
+    const out = mergePPrFormat(RAW, {
+      ...MODEL,
+      borderLines: { t: { color: '00FF00', szPt: 1.5 }, b: { color: 'FF0000', szPt: 1.5 } },
+    })
+    expect(out).toContain('<w:top w:val="single" w:sz="12" w:space="1" w:color="00FF00"/>')
+    expect(out).toContain('<w:bottom w:val="single" w:sz="12" w:space="1" w:color="FF0000"/>')
+    expect(out).not.toContain('dashed')
+  })
+
+  it('rebuilding pBdr from a bare model writes declared color/sz', () => {
+    const out = mergePPrFormat('<w:pPr></w:pPr>', {
+      borders: 'b',
+      borderLines: { b: { color: '4472C4', szPt: 2.25 } },
+    })
+    expect(out).toContain('<w:bottom w:val="single" w:sz="18" w:space="1" w:color="4472C4"/>')
+  })
+
   it('changing indent rebuilds w:ind and drops the char-unit variants', () => {
     // Word prefers *Chars over the twips attrs, so a stale firstLineChars would
     // override the user's new indent — the rebuilt w:ind must not carry them
@@ -91,5 +110,25 @@ describe('explicit w:after="0"', () => {
       spaceAfter: 0,
     })
     expect(out).toBe('<w:pPr><w:spacing w:after="0"/></w:pPr>')
+  })
+})
+
+describe('empty-paragraph size write-back (pPr w:rPr)', () => {
+  it('inserts a fresh paragraph-mark rPr when the model carries a size', () => {
+    expect(mergePPrFormat('<w:pPr></w:pPr>', { emptyRunSizeHalfPoints: 2 })).toBe(
+      '<w:pPr><w:rPr><w:sz w:val="2"/><w:szCs w:val="2"/></w:rPr></w:pPr>',
+    )
+  })
+
+  it('keeps the original paragraph-mark rPr bytes when the size is unchanged', () => {
+    const raw = '<w:pPr><w:rPr><w:rFonts w:ascii="Georgia"/><w:sz w:val="2"/></w:rPr></w:pPr>'
+    expect(mergePPrFormat(raw, { emptyRunSizeHalfPoints: 2 })).toBe(raw)
+  })
+
+  it('leaves the paragraph-mark rPr unmanaged when the model has no size', () => {
+    const raw = '<w:pPr><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:pPr>'
+    expect(mergePPrFormat(raw, { align: 'center' })).toBe(
+      '<w:pPr><w:jc w:val="center"/><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:pPr>',
+    )
   })
 })

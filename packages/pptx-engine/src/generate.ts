@@ -95,7 +95,7 @@ function buildPPrGroup(p: Paragraph, group: 'lnSpc' | 'spcBef' | 'spcAft' | 'bul
       if (b.font) s += `<a:buFont typeface="${escapeXmlAttr(b.font)}"/>`
       s +=
         b.type === 'number'
-          ? `<a:buAutoNum type="${escapeXmlAttr(b.numType ?? 'arabicPeriod')}"/>`
+          ? `<a:buAutoNum type="${escapeXmlAttr(b.numType ?? 'arabicPeriod')}"${b.startAt != null ? ` startAt="${b.startAt}"` : ''}/>`
           : `<a:buChar char="${escapeXmlAttr(b.char ?? '•')}"/>`
       return s
     }
@@ -330,16 +330,17 @@ function patchRunProps(runXml: string, run: TextRun): string {
     }
     runXml = patchRunHlink(runXml, run)
   } else {
-    // No rPr: inject a minimal rPr after <a:r> (no latin/ea injected when the font is untouched — inheritance applies)
+    // No rPr: inject a minimal rPr after <a:r> (no font slots injected when the font is untouched,
+    // so inheritance applies)
     const attrs = buildRPrAttrs(run)
     const color = run.color
       ? `<a:solidFill><a:srgbClr val="${hex6(run.color)}"/></a:solidFill>`
       : ''
     const font =
       run.fontFamily && !run.fontImplicit && !run.latinFont && !run.eaFont
-        ? `<a:latin typeface="${escapeXmlAttr(run.fontFamily)}"/><a:ea typeface="${escapeXmlAttr(run.fontFamily)}"/>`
+        ? fontSlotsXml(escapeXmlAttr(run.fontFamily))
         : ''
-    const inner = color + font + hlinkXml(run) // schema order: fill before latin/ea, hlinkClick after
+    const inner = color + font + hlinkXml(run) // schema order: fill before the font slots, hlinkClick after
     const rpr = inner ? `<a:rPr${attrs}>${inner}</a:rPr>` : `<a:rPr${attrs}/>`
     runXml = runXml.replace(/(<a:r(?:\s[^>]*)?>)/, `$1${rpr}`)
   }
@@ -378,9 +379,78 @@ function patchRunHlink(runXml: string, run: TextRun): string {
   return runXml.replace(/<\/a:rPr>/, `${hlink}</a:rPr>`)
 }
 
-/** Patch or inject the run font: <a:latin>/<a:ea> typeface (ea written in sync for CJK, avoiding the theme ea font). */
-function patchRunFont(runXml: string, family: string): string {
-  const esc = escapeXmlAttr(family)
+/** The three script slots written together: with a:latin alone PowerPoint still renders CJK from
+ *  the theme ea font and Arabic/Hebrew/Indic from the theme cs font, so a font change appears to
+ *  do nothing to that text. Takes an already-escaped typeface. */
+function fontSlotsXml(esc: string): string {
+  return `<a:latin typeface="${esc}"/><a:ea typeface="${esc}"/><a:cs typeface="${esc}"/>`
+}
+
+/** The font slots, in CT_TextCharacterProperties order. */
+const FONT_SLOTS = ['a:latin', 'a:ea', 'a:cs']
+const IS_FONT_SLOT = new Set(FONT_SLOTS)
+/** The rPr children that follow the font slots, so the group is inserted ahead of the first one. */
+const AFTER_FONT_SLOTS = new Set(['a:sym', 'a:hlinkClick', 'a:hlinkMouseOver', 'a:rtl', 'a:extLst'])
+
+/**
+ * Point an element's own typeface attribute at a new value. Only the start tag's own attributes
+ * are considered, so a payload nested inside a paired element keeps whatever it declared, and the
+ * attribute name is read as a whole token so one merely ending in "typeface" is left alone.
+ */
+function setTypeface(el: string, esc: string): string {
+  const tag = /^<[^\s/>]+(?:"[^"]*"|'[^']*'|[^"'>])*>/.exec(el)?.[0]
+  if (!tag) return el
+  // sliced rather than grouped: an attribute pattern permissive enough for unquoted values also
+  // swallows the '/' of a self-closing tag, which then reappears in front of whatever is added
+  const name = /^<[^\s/>]+/.exec(tag)![0]
+  const close = tag.endsWith('/>') ? '/>' : '>'
+  let had = false
+  const attrs = tag
+    .slice(name.length, tag.length - close.length)
+    .replace(/\s([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')/g, (whole, attr: string) => {
+      if (attr !== 'typeface') return whole
+      had = true
+      return ` typeface="${esc}"`
+    })
+  // added here rather than letting a caller infer absence from an unchanged string: setting a slot
+  // to the typeface it already carries returns the element untouched, which is not the same as it
+  // having no typeface at all
+  return name + (had ? attrs : `${attrs} typeface="${esc}"`) + close + el.slice(tag.length)
+}
+
+/** CT_TextCharacterProperties children. Anything else means the scan below cannot be trusted. */
+const RPR_KNOWN_CHILDREN = new Set([
+  'a:ln',
+  'a:noFill',
+  'a:solidFill',
+  'a:gradFill',
+  'a:blipFill',
+  'a:pattFill',
+  'a:grpFill',
+  'a:effectLst',
+  'a:effectDag',
+  'a:highlight',
+  'a:uLnTx',
+  'a:uLn',
+  'a:uFillTx',
+  'a:uFill',
+  'a:latin',
+  'a:ea',
+  'a:cs',
+  'a:sym',
+  'a:hlinkClick',
+  'a:hlinkMouseOver',
+  'a:rtl',
+  'a:extLst',
+])
+
+/**
+ * The font patch as it stood before complex-script support, kept verbatim for any run this file
+ * cannot scan structurally. Markup compatibility branches, comments, CDATA and processing
+ * instructions can all make element-looking text appear where a child is not, so rather than
+ * guess, such a run gets exactly the previous behaviour and a:cs is left untouched.
+ */
+function patchRunFontUnscannable(runXml: string, esc: string): string {
   if (/<a:latin\b/.test(runXml)) {
     runXml = runXml.replace(/(<a:latin\b[^>]*?\btypeface=")[^"]*(")/, `$1${esc}$2`)
     if (/<a:ea\b/.test(runXml)) {
@@ -394,12 +464,85 @@ function patchRunFont(runXml: string, family: string): string {
     return runXml
   }
   const fonts = `<a:latin typeface="${esc}"/><a:ea typeface="${esc}"/>`
-  // Self-closing rPr → expand to a pair, then insert
   if (/<a:rPr\b[^>]*\/>/.test(runXml)) {
     return runXml.replace(/<a:rPr\b([^>]*?)\/>/, `<a:rPr$1>${fonts}</a:rPr>`)
   }
-  // Paired rPr → append at the end (latin/ea after ln/fill, per the CT_TextCharacterProperties order)
   return runXml.replace(/<\/a:rPr>/, `${fonts}</a:rPr>`)
+}
+
+/**
+ * Patch or inject the run font: <a:latin>/<a:ea>/<a:cs> typeface, kept in sync per fontSlotsXml.
+ * Works on the direct children of the run's own <a:rPr>, so a typeface nested inside a:ln, an
+ * a:extLst extension payload or any other subtree stays with whatever owns it.
+ */
+function patchRunFont(runXml: string, family: string): string {
+  const esc = escapeXmlAttr(family)
+  // Comments, CDATA and processing instructions can all carry element-looking text, so the scan
+  // below would read structure that is not there
+  if (/<!--|<!\[CDATA\[|<\?/.test(runXml)) return patchRunFontUnscannable(runXml, esc)
+  // topLevelChildren reads a name as [a-zA-Z][\w:]*, while XML allows a leading underscore, a
+  // non-ASCII character and an interior middle dot among others. A name outside what it reads
+  // would be taken short and the element mistaken for a different one, so refuse the run rather
+  // than widen a scanner five other callers share.
+  for (const [, name] of runXml.matchAll(/<\/?([^\s/>!?][^\s/>]*)/g)) {
+    if (!/^[a-zA-Z][\w:]*$/.test(name!)) return patchRunFontUnscannable(runXml, esc)
+  }
+  // The run's OWN properties, taken as a direct child rather than as the first a:rPr in the text:
+  // an extension payload may carry one of its own, and filling that one in would leave the real
+  // slots untouched.
+  const runOpen = /^<[^\s/>]+(?:"[^"]*"|'[^']*'|[^"'>])*?>/.exec(runXml)?.[0]
+  if (!runOpen) return patchRunFontUnscannable(runXml, esc)
+  const rPr = topLevelChildren(runXml, runOpen.length, runXml.length).find(
+    (c) => c.name === 'a:rPr',
+  )
+  // could not be located structurally, so hand it to the previous behaviour rather than
+  // silently doing nothing: a payload's own closing tag can truncate the slice this is given
+  if (!rPr) return patchRunFontUnscannable(runXml, esc)
+  const el = runXml.slice(rPr.start, rPr.end)
+  // Self-closing rPr → expand to a pair around the slots. Checked before the open-tag match:
+  // that pattern's [^"'>] accepts '/', so it would swallow a self-closing tag whole and this
+  // branch could never run.
+  const selfAttrs = /^<a:rPr\b((?:"[^"]*"|'[^']*'|[^"'>])*?)\/>$/.exec(el)?.[1]
+  if (selfAttrs !== undefined) {
+    return (
+      runXml.slice(0, rPr.start) +
+      `<a:rPr${selfAttrs}>${fontSlotsXml(esc)}</a:rPr>` +
+      runXml.slice(rPr.end)
+    )
+  }
+  const rPrOpen = /^<a:rPr\b(?:"[^"]*"|'[^']*'|[^"'>])*?>/.exec(el)?.[0]
+  if (!rPrOpen) return patchRunFontUnscannable(runXml, esc)
+  const innerStart = rPr.start + rPrOpen.length
+  // the closing tag's own start, since a valid one may carry whitespace before its '>'
+  const innerEnd = rPr.start + el.lastIndexOf('</')
+  if (innerEnd <= innerStart) return patchRunFontUnscannable(runXml, esc)
+  const children = topLevelChildren(runXml, innerStart, innerEnd)
+  // An unrecognised child is a markup-compatibility wrapper or something else that supplies the
+  // real children indirectly, whatever prefix it was bound to. Recognising the whole list is the
+  // only way to know the slots found here are the run's own.
+  if (children.some((c) => !RPR_KNOWN_CHILDREN.has(c.name))) {
+    return patchRunFontUnscannable(runXml, esc)
+  }
+  const slots = children.filter((c) => IS_FONT_SLOT.has(c.name))
+  // A repeated slot is not something to reason about: the group is rebuilt from one of them and
+  // the others would be dropped along with their attributes. The schema allows one of each.
+  if (new Set(slots.map((c) => c.name)).size !== slots.length) {
+    return patchRunFontUnscannable(runXml, esc)
+  }
+  // Rebuild the group whole so it comes out as latin, ea, cs however few of the three the run
+  // arrived with, keeping each existing element's other attributes (pitchFamily, charset, panose)
+  const block = FONT_SLOTS.map((tag) => {
+    const found = slots.find((s) => s.name === tag)
+    if (!found) return `<${tag} typeface="${esc}"/>`
+    return setTypeface(runXml.slice(found.start, found.end), esc)
+  }).join('')
+  // Every removal below sits at or after this point, so the index stays valid through them
+  const at = slots.length
+    ? slots[0]!.start
+    : (children.find((c) => AFTER_FONT_SLOTS.has(c.name))?.start ?? innerEnd)
+  let out = runXml
+  for (const c of [...slots].reverse()) out = out.slice(0, c.start) + out.slice(c.end)
+  return out.slice(0, at) + block + out.slice(at)
 }
 
 function patchRunColor(runXml: string, color: string): string {
@@ -428,7 +571,8 @@ function buildRPrAttrs(run: TextRun): string {
   if (run.fontSize != null && !run.fontSizeImplicit) s += ` sz="${Math.round(run.fontSize * 100)}"`
   if (run.bold) s += ' b="1"'
   if (run.italic) s += ' i="1"'
-  if (run.underline && !run.underlineImplicit) s += ` u="${escapeXmlAttr(run.underlineStyle ?? 'sng')}"`
+  if (run.underline && !run.underlineImplicit)
+    s += ` u="${escapeXmlAttr(run.underlineStyle ?? 'sng')}"`
   if (run.strike) s += ` strike="${escapeXmlAttr(run.strikeStyle ?? 'sngStrike')}"`
   if (run.letterSpacing) s += ` spc="${Math.round(run.letterSpacing * 100)}"`
   if (run.baseline) s += ` baseline="${Math.round(run.baseline * 1000)}"`
@@ -496,6 +640,7 @@ export function generateParagraphXml(p: Paragraph): string {
   if (p.marL != null && want('marL')) pPrAttrs.push(`marL="${Math.round(p.marL)}"`)
   if (p.indent != null && want('indent')) pPrAttrs.push(`indent="${Math.round(p.indent)}"`)
   if (p.align && want('align')) pPrAttrs.push(`algn="${alignMap[p.align]}"`)
+  if (p.rtl) pPrAttrs.push('rtl="1"')
   if (p.level) pPrAttrs.push(`lvl="${p.level}"`)
 
   // CT_TextParagraphProperties child order: lnSpc → spcBef → spcAft → buClr → buSzPct → buFont → bu*
@@ -527,7 +672,7 @@ export function generateParagraphXml(p: Paragraph): string {
       if (b.font) kids += `<a:buFont typeface="${escapeXmlAttr(b.font)}"/>`
       kids +=
         b.type === 'number'
-          ? `<a:buAutoNum type="${escapeXmlAttr(b.numType ?? 'arabicPeriod')}"/>`
+          ? `<a:buAutoNum type="${escapeXmlAttr(b.numType ?? 'arabicPeriod')}"${b.startAt != null ? ` startAt="${b.startAt}"` : ''}/>`
           : `<a:buChar char="${escapeXmlAttr(b.char ?? '•')}"/>`
     }
   }
@@ -562,19 +707,23 @@ function generateRunXml(r: TextRun): string {
     r.color && !r.colorInherited
       ? `<a:solidFill><a:srgbClr val="${hex6(r.color)}"/></a:solidFill>`
       : ''
+  // Text highlight (CT_TextCharacterProperties order: after the fill group, before the font slots)
+  const highlight = r.highlight
+    ? `<a:highlight><a:srgbClr val="${hex6(r.highlight)}"/></a:highlight>`
+    : ''
   // Original dual fonts/theme references restored first; no declaration (inherited) writes nothing;
-  // a user-changed font writes latin + ea together — with latin alone, CJK characters in PowerPoint still use the theme ea font
+  // a user-changed font writes all three slots, so a rebuilt run keeps the typeface the user picked
   const font =
     r.latinFont || r.eaFont || r.csFont
       ? (r.latinFont ? `<a:latin typeface="${escapeXmlAttr(r.latinFont)}"/>` : '') +
         (r.eaFont ? `<a:ea typeface="${escapeXmlAttr(r.eaFont)}"/>` : '') +
         (r.csFont ? `<a:cs typeface="${escapeXmlAttr(r.csFont)}"/>` : '')
       : r.fontFamily && !r.fontImplicit
-        ? `<a:latin typeface="${escapeXmlAttr(r.fontFamily)}"/><a:ea typeface="${escapeXmlAttr(r.fontFamily)}"/>`
+        ? fontSlotsXml(escapeXmlAttr(r.fontFamily))
         : ''
   // Run-level hyperlink: rId written back (allocated by ensureRunLinkRels for links set this session)
   const hlink = hlinkXml(r)
-  const rprInner = ln + color + font + hlink
+  const rprInner = ln + color + highlight + font + hlink
   const rPr = rprInner
     ? `<a:rPr${attrs}>${rprInner}</a:rPr>`
     : attrs
@@ -679,30 +828,51 @@ export interface GradientFillPatch {
   stops: Array<{ pos: number; color: string }>
   /** 1/60000 degree (for linear) */
   angle?: number
-  /** Radial (circle path, center outward) */
+  /** Radial (alias for path: 'circle') */
   radial?: boolean
+  /** <a:path path> kind (PPT: radial/rectangular/path); linear when absent */
+  path?: 'circle' | 'rect' | 'shape'
+  /** <a:fillToRect> focus insets as fractions (default: centered 0.5 each) */
+  fillTo?: { l: number; t: number; r: number; b: number }
 }
 
 type FillPatch = 'none' | string | GradientFillPatch | { rawFillXml: string }
 
 function gsLstXml(stops: GradientFillPatch['stops']): string {
+  // srgbClrXml keeps an #RRGGBBAA stop's alpha as <a:alpha>
   return `<a:gsLst>${stops
     .map(
       (s) =>
-        `<a:gs pos="${Math.round(Math.max(0, Math.min(1, s.pos)) * 100000)}"><a:srgbClr val="${hex6(s.color)}"/></a:gs>`,
+        `<a:gs pos="${Math.round(Math.max(0, Math.min(1, s.pos)) * 100000)}">${srgbClrXml(s.color)}</a:gs>`,
     )
     .join('')}</a:gsLst>`
 }
 
-const RADIAL_PATH_XML =
-  '<a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>'
+/** Path gradient (circle/rect/shape) focused on fillTo (default: centered) */
+function gradPathXml(
+  kind: 'circle' | 'rect' | 'shape',
+  fillTo?: { l: number; t: number; r: number; b: number },
+): string {
+  const pct = (v: number) => Math.round(v * 100000)
+  const ftr = fillTo ?? { l: 0.5, t: 0.5, r: 0.5, b: 0.5 }
+  return `<a:path path="${kind}"><a:fillToRect l="${pct(ftr.l)}" t="${pct(ftr.t)}" r="${pct(ftr.r)}" b="${pct(ftr.b)}"/></a:path>`
+}
+
+/** Requested path kind of a gradient patch (radial is a legacy alias for circle). */
+function gradPathKind(patch: GradientFillPatch): 'circle' | 'rect' | 'shape' | undefined {
+  return patch.path ?? (patch.radial ? 'circle' : undefined)
+}
 
 function buildFillXml(fill: FillPatch): string {
   if (typeof fill === 'object' && 'rawFillXml' in fill) return fill.rawFillXml
-  if (typeof fill === 'object')
+  if (typeof fill === 'object') {
+    const kind = gradPathKind(fill)
     return `<a:gradFill rotWithShape="1">${gsLstXml(fill.stops)}${
-      fill.radial ? RADIAL_PATH_XML : `<a:lin ang="${Math.round(fill.angle ?? 0)}" scaled="1"/>`
+      kind
+        ? gradPathXml(kind, fill.fillTo)
+        : `<a:lin ang="${Math.round(fill.angle ?? 0)}" scaled="1"/>`
     }</a:gradFill>`
+  }
   if (fill === 'none') return '<a:noFill/>'
   return `<a:solidFill>${srgbClrXml(fill)}</a:solidFill>`
 }
@@ -747,9 +917,14 @@ function patchGradFillXml(gradXml: string, patch: GradientFillPatch): string {
       gsIdx = parts.length
       parts.push(gsLstXml(patch.stops))
     } else if (c.name === 'a:lin' || c.name === 'a:path') {
-      if (patch.radial) {
+      const kind = gradPathKind(patch)
+      if (kind) {
         if (c.name === 'a:path') {
-          parts.push(seg) // keep the original path (off-center fillToRect etc.)
+          const existingKind = /path="([^"]*)"/.exec(seg)?.[1]
+          // The same (or legacy radial's unspecified) path kind keeps the original node
+          // (off-center fillToRect etc.); an explicit kind change or focus change replaces it.
+          const keep = patch.path ? existingKind === patch.path && !patch.fillTo : !patch.fillTo
+          parts.push(keep ? seg : gradPathXml(patch.path ?? kind, patch.fillTo))
           hasShade = true
         }
       } else if (c.name === 'a:lin') {
@@ -763,8 +938,9 @@ function patchGradFillXml(gradXml: string, patch: GradientFillPatch): string {
   }
   if (gsIdx < 0) return buildFillXml(patch)
   if (!hasShade) {
-    const shade = patch.radial
-      ? RADIAL_PATH_XML
+    const kind = gradPathKind(patch)
+    const shade = kind
+      ? gradPathXml(kind, patch.fillTo)
       : `<a:lin ang="${Math.round(patch.angle ?? 0)}" scaled="1"/>`
     parts.splice(gsIdx + 1, 0, shade) // in the lin/path sequence it immediately follows gsLst
   }
@@ -811,23 +987,58 @@ export interface StrokePatch {
   widthEmu: number
   /** prstDash preset name; 'solid' removes the prstDash node; undefined keeps the original bytes */
   dash?: string
+  /** Line cap attribute (undefined keeps the original bytes) */
+  cap?: 'flat' | 'rnd' | 'sq'
+  /** Compound type attribute ('sng' removes it; undefined keeps the original bytes) */
+  compound?: 'sng' | 'dbl' | 'thickThin' | 'thinThick' | 'tri'
+  /** Join child element (undefined keeps the original bytes) */
+  join?: 'round' | 'bevel' | 'miter'
+  /** Gradient line: replaces the fill child (color then only feeds callers' fallbacks); angle in 1/60000° */
+  gradient?: { stops: Array<{ pos: number; color: string }>; angle: number }
 }
 
-/** In-place patch of <a:ln>: change the w attribute, replace the fill child and (when requested) the prstDash child; all other bytes are kept. */
+const JOIN_XML: Record<NonNullable<StrokePatch['join']>, string> = {
+  round: '<a:round/>',
+  bevel: '<a:bevel/>',
+  // PowerPoint's default miter limit (8×)
+  miter: '<a:miter lim="800000"/>',
+}
+
+/** The <a:ln> fill child for a stroke patch: gradient line, solid color (alpha kept), or noFill. */
+function strokeFillXml(stroke: StrokePatch | null): string {
+  if (!stroke) return '<a:noFill/>'
+  if (stroke.gradient)
+    return buildFillXml({ stops: stroke.gradient.stops, angle: stroke.gradient.angle })
+  return `<a:solidFill>${srgbClrXml(stroke.color)}</a:solidFill>`
+}
+
+/** Set/replace/remove one attribute inside an <a:ln> attribute string. */
+function setLnAttr(attrs: string, name: string, value: string | null): string {
+  const re = new RegExp(`\\s${name}="[^"]*"`)
+  if (value === null) return attrs.replace(re, '')
+  const decl = `${name}="${value}"`
+  return re.test(attrs) ? attrs.replace(re, ` ${decl}`) : ` ${decl}${attrs}`
+}
+
+/** In-place patch of <a:ln>: change the w/cap/cmpd attributes, replace the fill child and
+ * (when requested) the prstDash / join children; all other bytes are kept. */
 function patchLnXml(lnXml: string, stroke: StrokePatch | null): string {
   const open = /^<a:ln((?:"[^"]*"|'[^']*'|[^"'>])*?)(\/?)>/.exec(lnXml)
   if (!open) return lnXml
   let attrs = open[1] ?? ''
   if (stroke) {
-    const w = `w="${Math.round(stroke.widthEmu)}"`
-    attrs = /\sw="[^"]*"/.test(attrs) ? attrs.replace(/\sw="[^"]*"/, ` ${w}`) : ` ${w}${attrs}`
+    attrs = setLnAttr(attrs, 'w', String(Math.round(stroke.widthEmu)))
+    if (stroke.cap !== undefined) attrs = setLnAttr(attrs, 'cap', stroke.cap)
+    if (stroke.compound !== undefined)
+      attrs = setLnAttr(attrs, 'cmpd', stroke.compound === 'sng' ? null : stroke.compound)
   }
-  const fillXml = stroke ? `<a:solidFill>${srgbClrXml(stroke.color)}</a:solidFill>` : '<a:noFill/>'
+  const fillXml = strokeFillXml(stroke)
   const dashXml =
     stroke?.dash && stroke.dash !== 'solid'
       ? `<a:prstDash val="${escapeXmlAttr(stroke.dash)}"/>`
       : ''
-  if (open[2] === '/') return `<a:ln${attrs}>${fillXml}${dashXml}</a:ln>`
+  const joinXml = stroke?.join ? JOIN_XML[stroke.join] : ''
+  if (open[2] === '/') return `<a:ln${attrs}>${fillXml}${dashXml}${joinXml}</a:ln>`
   const innerStart = open[0].length
   const innerEnd = lnXml.lastIndexOf('</a:ln>')
   if (innerEnd < 0) return lnXml
@@ -844,6 +1055,16 @@ function patchLnXml(lnXml: string, stroke: StrokePatch | null): string {
       const fillEnd = inner.indexOf(fillXml) + fillXml.length
       inner = inner.slice(0, fillEnd) + dashXml + inner.slice(fillEnd)
     }
+  }
+  if (stroke && stroke.join !== undefined) {
+    inner = inner.replace(
+      /<a:(?:round|bevel|miter)\b(?:[^>]*\/>|[^>]*>[\s\S]*?<\/a:(?:round|bevel|miter)>)/,
+      '',
+    )
+    // join sits after prstDash (when present), otherwise right after the fill
+    const dashEl = /<a:prstDash\b(?:[^>]*\/>|[^>]*>[\s\S]*?<\/a:prstDash>)/.exec(inner)
+    const at = dashEl ? dashEl.index + dashEl[0].length : inner.indexOf(fillXml) + fillXml.length
+    inner = inner.slice(0, at) + joinXml + inner.slice(at)
   }
   return `<a:ln${attrs}>${inner}</a:ln>`
 }
@@ -873,11 +1094,13 @@ export function patchElementStroke(originalXml: string, stroke: StrokePatch | nu
   }
 
   const lnXml = stroke
-    ? `<a:ln w="${Math.round(stroke.widthEmu)}"><a:solidFill>${srgbClrXml(stroke.color)}</a:solidFill>${
+    ? `<a:ln w="${Math.round(stroke.widthEmu)}"${stroke.cap ? ` cap="${stroke.cap}"` : ''}${
+        stroke.compound && stroke.compound !== 'sng' ? ` cmpd="${stroke.compound}"` : ''
+      }>${strokeFillXml(stroke)}${
         stroke.dash && stroke.dash !== 'solid'
           ? `<a:prstDash val="${escapeXmlAttr(stroke.dash)}"/>`
           : ''
-      }</a:ln>`
+      }${stroke.join ? JOIN_XML[stroke.join] : ''}</a:ln>`
     : '<a:ln><a:noFill/></a:ln>'
   // Insert after fill / geometry / xfrm (OOXML order: xfrm → geom → fill → ln)
   const anchor =
@@ -947,13 +1170,30 @@ export function patchPictureSrcRect(
   return xmlInner.slice(0, insertAt) + srcRectXml + xmlInner.slice(insertAt)
 }
 
+/** Slide background image write-back parameters (the rel must already exist in the slide's rels). */
+export interface BackgroundImagePatch {
+  imageRid: string
+  /** Tile instead of stretch */
+  tile?: boolean
+}
+
+export type BackgroundFillPatch = string | GradientFillPatch | BackgroundImagePatch
+
 /**
  * In-place patch of a slide's bodyPrefix: replace/inject the <p:bg> under <p:cSld>
- * with a solid color. Returns the new bodyPrefix (the caller writes it back to
- * slide.bodyPrefix and flags a rebuild).
+ * with a solid color, gradient, or picture fill. Returns the new bodyPrefix (the
+ * caller writes it back to slide.bodyPrefix and flags a rebuild).
  */
-export function patchSlideBackgroundXml(bodyPrefix: string, color: string): string {
-  const bgXml = `<p:bg><p:bgPr><a:solidFill><a:srgbClr val="${hex6(color)}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>`
+export function patchSlideBackgroundXml(bodyPrefix: string, fill: BackgroundFillPatch): string {
+  const fillXml =
+    typeof fill === 'object' && 'imageRid' in fill
+      ? `<a:blipFill><a:blip r:embed="${fill.imageRid}"/>` +
+        (fill.tile
+          ? '<a:tile tx="0" ty="0" sx="100000" sy="100000" flip="none" algn="tl"/>'
+          : '<a:stretch><a:fillRect/></a:stretch>') +
+        '</a:blipFill>'
+      : buildFillXml(fill)
+  const bgXml = `<p:bg><p:bgPr>${fillXml}<a:effectLst/></p:bgPr></p:bg>`
   const existing = /<p:bg>[\s\S]*?<\/p:bg>|<p:bg\s[^>]*\/>/.exec(bodyPrefix)
   if (existing) {
     return (
@@ -966,6 +1206,30 @@ export function patchSlideBackgroundXml(bodyPrefix: string, color: string): stri
   if (!cSld) return bodyPrefix
   const at = cSld.index + cSld[0].length
   return bodyPrefix.slice(0, at) + bgXml + bodyPrefix.slice(at)
+}
+
+/** Remove the slide's own <p:bg> override (background falls back to layout/master). */
+export function removeSlideBackgroundXml(bodyPrefix: string): string {
+  const existing = /<p:bg>[\s\S]*?<\/p:bg>|<p:bg\s[^>]*\/>/.exec(bodyPrefix)
+  if (!existing) return bodyPrefix
+  return bodyPrefix.slice(0, existing.index) + bodyPrefix.slice(existing.index + existing[0].length)
+}
+
+/**
+ * Toggle showMasterSp on the <p:sld> root ("hide background graphics").
+ * hidden=true writes showMasterSp="0"; hidden=false removes the attribute
+ * (default is shown).
+ */
+export function patchSlideShowMasterSpXml(bodyPrefix: string, hidden: boolean): string {
+  const open = /<p:sld((?:\s(?:"[^"]*"|'[^']*'|[^"'>])*?)?)>/.exec(bodyPrefix)
+  if (!open) return bodyPrefix
+  let attrs = (open[1] ?? '').replace(/\s+showMasterSp="[^"]*"/, '')
+  if (hidden) attrs += ' showMasterSp="0"'
+  return (
+    bodyPrefix.slice(0, open.index) +
+    `<p:sld${attrs}>` +
+    bodyPrefix.slice(open.index + open[0].length)
+  )
 }
 
 // ── Slide transition patch ──────────────────────────────────────────────

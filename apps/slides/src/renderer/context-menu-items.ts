@@ -13,6 +13,7 @@ import * as showActions from './show-actions'
 import * as arrangeActions from './arrange-actions'
 import * as insertActions from './insert-actions'
 import * as pictureEditActions from './picture-edit-actions'
+import * as styleActions from './style-actions'
 import * as tableActions from './table-actions'
 import { TABLE_SHADING_COLORS } from './components/table-shading-colors'
 import { t } from './i18n/locale'
@@ -56,6 +57,26 @@ export function buildCtxItems(ctx: ActionCtx): Array<CtxItem | null> {
       },
       null,
       { label: t('appCtxAddSectionBefore'), onClick: () => void slideActions.addSectionAt(ctx, i) },
+      null,
+      {
+        label: t('appCtxChangeBgImage'),
+        onClick: () => {
+          ctx.setCurrent(i)
+          void styleActions.onBackground(ctx, {
+            kind: 'image',
+            mode: 'stretch',
+            pick: true,
+            slideIndex: i,
+          })
+        },
+      },
+      {
+        label: t('appCtxFormatBackground'),
+        onClick: () => {
+          ctx.setCurrent(i)
+          ctx.openBgFormat()
+        },
+      },
       null,
       {
         label: t('appCtxDeleteSlide'),
@@ -102,6 +123,8 @@ export function buildCtxItems(ctx: ActionCtx): Array<CtxItem | null> {
       },
       null,
       { label: t('appCtxNewSlide'), onClick: () => void slideActions.addSlide(ctx) },
+      null,
+      { label: t('appCtxFormatBackground'), onClick: () => ctx.openBgFormat() },
     ]
   }
   const node = slide?.nodes.find((n) => n.sourceId === ctxMenu.targetId)
@@ -272,8 +295,44 @@ export function buildCtxItems(ctx: ActionCtx): Array<CtxItem | null> {
       onClick: () => void arrangeActions.reorderSelected(ctx, ctxMenu.targetId, 'backward'),
     },
     null,
+    // Rotate/flip group (PowerPoint parity) for shapes, pictures and groups; connectors
+    // are endpoint-based and keep their existing menu
+    ...(node &&
+    (node.type === 'shape' || node.type === 'picture' || node.type === 'group') &&
+    !(node as { line?: unknown }).line
+      ? [
+          {
+            label: t('appCtxRotateLeft90'),
+            onClick: () => void arrangeActions.rotateSelected(ctx, -90),
+          } as CtxItem,
+          {
+            label: t('appCtxRotateRight90'),
+            onClick: () => void arrangeActions.rotateSelected(ctx, 90),
+          } as CtxItem,
+          null,
+          {
+            label: t('appCtxFlipH'),
+            onClick: () => void arrangeActions.flipSelected(ctx, 'h'),
+          } as CtxItem,
+          {
+            label: t('appCtxFlipV'),
+            onClick: () => void arrangeActions.flipSelected(ctx, 'v'),
+          } as CtxItem,
+          null,
+        ]
+      : []),
     ...(node && isEditableText(node)
       ? [{ label: t('appCtxEditText'), onClick: () => ctx.startEdit(ctxMenu.targetId) } as CtxItem]
+      : []),
+    // Connectors are endpoint-based (p:cxnSp): swapping their prstGeom would
+    // orphan the connection metadata, so they keep their existing menu.
+    ...(single && node?.type === 'shape' && !(node as { line?: unknown }).line
+      ? [
+          {
+            label: t('appCtxChangeShape'),
+            onClick: () => ctx.openChangeShape(ctxMenu.targetId, ctxMenu.x, ctxMenu.y),
+          } as CtxItem,
+        ]
       : []),
     ...(single
       ? [
@@ -360,10 +419,36 @@ export function buildCtxItems(ctx: ActionCtx): Array<CtxItem | null> {
       : []),
     null,
     {
+      // findNodeCtx also resolves children of the group being edited (node is top-level only)
+      label: t('paneFormatTitleTyped', {
+        type: nodeTypeName(node ?? ctx.findNodeCtx(ctxMenu.targetId)?.node),
+      }),
+      onClick: ctx.openFormat,
+    },
+    null,
+    {
       label: t('appCtxDelete'),
       hint: '⌫',
       danger: true,
       onClick: () => void clipboardActions.deleteSelected(ctx),
     },
   ]
+}
+
+/** Format-pane type name (same mapping as FormatPane's title) for the context-menu label */
+function nodeTypeName(node: { type: string } | undefined): string {
+  switch (node?.type) {
+    case 'picture':
+      return t('paneFormatPicture')
+    case 'group':
+      return t('paneFormatGroup')
+    case 'text':
+      return t('paneFormatTextBox')
+    case 'table':
+      return t('ribbonGroupTable')
+    case 'chart':
+      return t('ribbonChart')
+    default:
+      return t('paneFormatShape')
+  }
 }

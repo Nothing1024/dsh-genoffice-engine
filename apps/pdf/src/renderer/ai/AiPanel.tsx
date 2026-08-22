@@ -17,12 +17,19 @@ const PANEL_WIDTH_DEFAULT = 360
 const PANEL_WIDTH_MIN = 280
 
 function clampPanelWidth(w: number): number {
-  return Math.min(Math.max(w, PANEL_WIDTH_MIN), Math.min(720, Math.round(window.innerWidth * 0.6)))
+  // The viewport can be transiently tiny (a WebContentsView is 0×0 until the
+  // shell lays it out), so never let the ceiling drop below the minimum
+  const max = Math.max(PANEL_WIDTH_MIN, Math.min(720, Math.round(window.innerWidth * 0.6)))
+  return Math.min(Math.max(w, PANEL_WIDTH_MIN), max)
 }
 
 function loadPanelWidth(): number {
   const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY))
-  return Number.isFinite(saved) && saved > 0 ? clampPanelWidth(saved) : PANEL_WIDTH_DEFAULT
+  // static bounds only — clamping against the window here would bake a
+  // transiently small viewport into the restored preference
+  return Number.isFinite(saved) && saved > 0
+    ? Math.min(Math.max(saved, PANEL_WIDTH_MIN), 720)
+    : PANEL_WIDTH_DEFAULT
 }
 
 interface ToolActivity {
@@ -48,11 +55,14 @@ export function AiPanel({
   api,
   onCollapse,
   preset,
+  onRunDone,
 }: {
   api: PdfAiDeps
   onCollapse: () => void
   /** Ribbon AI buttons push a one-shot prompt; a new nonce triggers an auto-run */
   preset?: { text: string; nonce: number } | null
+  /** Fired when a run that mutated the document finishes (drives the untitled-blank auto-save) */
+  onRunDone?: () => void
 }): ReactElement {
   const { lang, t } = useI18n()
   const [chat, setChat] = useState<ChatEntry[]>([])
@@ -61,7 +71,11 @@ export function AiPanel({
   const [phase, setPhase] = useState<Phase>('thinking')
   const chatRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
-  const [panelWidth, setPanelWidth] = useState(loadPanelWidth)
+  // preferred = the user's chosen width (the only value persisted); panelWidth =
+  // what fits the current window. Deriving the display width from the preference
+  // means a transiently small window never permanently shrinks the panel.
+  const preferredWidthRef = useRef(loadPanelWidth())
+  const [panelWidth, setPanelWidth] = useState(() => clampPanelWidth(preferredWidthRef.current))
   const [resizing, setResizing] = useState(false)
   const asideRef = useRef<HTMLElement>(null)
 
@@ -72,10 +86,34 @@ export function AiPanel({
     dock?.style.setProperty('--ai-panel-width', `${panelWidth}px`)
   }, [panelWidth])
   const settingsRef = useRef<AiSettings | null>(null)
+
+  /** gsk login state for the cloud-tools gate (refreshed on mount and window focus) */
+  const gskLoggedInRef = useRef(false)
+  useEffect(() => {
+    let alive = true
+    const refresh = () => {
+      void window.pdfApi
+        ?.gskStatus()
+        .then((s) => {
+          if (alive) gskLoggedInRef.current = !!s?.loggedIn
+        })
+        .catch(() => {})
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => {
+      alive = false
+      window.removeEventListener('focus', refresh)
+    }
+  }, [])
   const langRef = useRef(lang)
   langRef.current = lang
   const apiRef = useRef(api)
   apiRef.current = api
+  const onRunDoneRef = useRef(onRunDone)
+  onRunDoneRef.current = onRunDone
+  /** Any tool in the current run reported mutated: true */
+  const runMutatedRef = useRef(false)
 
   const patchLast = (patch: Partial<ChatEntry> | ((last: ChatEntry) => Partial<ChatEntry>)) => {
     setChat((prev) => {
@@ -102,6 +140,7 @@ export function AiPanel({
       gotoPage: (p) => apiRef.current.gotoPage(p),
       addMarkup: (type, idx, rects) => apiRef.current.addMarkup(type, idx, rects),
       editText: (input) => apiRef.current.editText(input),
+      insertText: (input) => apiRef.current.insertText(input),
       editFonts: () => apiRef.current.editFonts(),
       formEdits: () => apiRef.current.formEdits(),
       applyFormEdit: (v) => apiRef.current.applyFormEdit(v),
@@ -117,6 +156,7 @@ export function AiPanel({
       deleteImage: (ref) => apiRef.current.deleteImage(ref),
       searchImages: (query, max) => apiRef.current.searchImages(query, max),
       generateImage: (op) => apiRef.current.generateImage(op),
+      gskTools: () => gskLoggedInRef.current && settingsRef.current?.gskToolsEnabled !== false,
       fetchImage: (url) => apiRef.current.fetchImage(url),
     }
     loopRef.current = new AgentLoop({
@@ -130,6 +170,7 @@ export function AiPanel({
         },
         onToolExecuted: ({ call, execution }) => {
           setPhase('working')
+          if (execution.mutated) runMutatedRef.current = true
           patchLast((last) => ({
             tools: [
               ...(last.tools ?? []),
@@ -156,6 +197,10 @@ export function AiPanel({
             text: final || (last.tools?.length ? last.text : tGlobal('aiNoReply')),
           }))
           setBusy(false)
+          if (runMutatedRef.current) {
+            runMutatedRef.current = false
+            onRunDoneRef.current?.()
+          }
         },
         onError: (error) => {
           setChat((prev) => {
@@ -205,6 +250,7 @@ export function AiPanel({
     setPrompt('')
     setBusy(true)
     setPhase('thinking')
+    runMutatedRef.current = false
     void (async () => {
       try {
         settingsRef.current = await window.pdfApi.getAiSettings()
@@ -228,9 +274,10 @@ export function AiPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once per nonce
   }, [preset?.nonce])
 
-  // Re-clamp the persisted width when the window shrinks (max is 60% of the window)
+  // Re-derive the display width on window resize (max is 60% of the window);
+  // growing the window back restores the preferred width
   useEffect(() => {
-    const onResize = (): void => setPanelWidth((w) => clampPanelWidth(w))
+    const onResize = (): void => setPanelWidth(clampPanelWidth(preferredWidthRef.current))
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
@@ -246,7 +293,9 @@ export function AiPanel({
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
     const onMove = (ev: PointerEvent): void => {
-      setPanelWidth(clampPanelWidth(ev.clientX))
+      const w = clampPanelWidth(ev.clientX)
+      preferredWidthRef.current = w
+      setPanelWidth(w)
     }
     let done = false
     const cleanup = (): void => {
@@ -260,10 +309,7 @@ export function AiPanel({
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
       setResizing(false)
-      setPanelWidth((w) => {
-        localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(w)))
-        return w
-      })
+      localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(preferredWidthRef.current)))
     }
     resizeCleanupRef.current = cleanup
     window.addEventListener('pointermove', onMove)
@@ -305,12 +351,18 @@ export function AiPanel({
                 setBusy(false)
                 setChat([])
               }}
-              title={t('aiNewChat')}
+              data-tip={t('aiNewChat')}
+              aria-label={t('aiNewChat')}
             >
               <IconNewChat />
             </button>
           )}
-          <button className="ai-header-btn" onClick={onCollapse} title={t('aiCollapsePanel')}>
+          <button
+            className="ai-header-btn"
+            onClick={onCollapse}
+            data-tip={t('aiCollapsePanel')}
+            aria-label={t('aiCollapsePanel')}
+          >
             <IconCollapse />
           </button>
         </div>
@@ -492,14 +544,14 @@ function ToolChipList({ tools }: { tools: ToolActivity[] }) {
                     <button
                       type="button"
                       className="ai-step-title clickable"
-                      title={tool.name}
+                      data-tip={tool.name}
                       aria-expanded={isOpen}
                       onClick={() => toggle(j)}
                     >
                       {tool.summary}
                     </button>
                   ) : (
-                    <span className="ai-step-title" title={tool.name}>
+                    <span className="ai-step-title" data-tip={tool.name}>
                       {tool.summary}
                     </span>
                   )}

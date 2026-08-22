@@ -28,6 +28,10 @@ import type { ExportFormat, SaveMode } from '../shared/ipc'
 type LoadStatus = 'loading' | 'ready' | 'error'
 type SaveState = 'idle' | 'saving' | 'saved' | 'failed'
 
+const MIN_ZOOM = 50
+const MAX_ZOOM = 200
+const ZOOM_STEP = 10
+
 const EMPTY_ENVELOPE: DocEnvelope = {
   frontmatter: '',
   body: '',
@@ -48,6 +52,36 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
   }
   return btoa(binary)
+}
+
+function imageSourcesFromEditor(editor: Editor): string[] {
+  const sources: string[] = []
+  editor.state.doc.descendants((node) => {
+    if (node.type.name === 'image' && typeof node.attrs.src === 'string') {
+      sources.push(node.attrs.src)
+    }
+  })
+  return sources
+}
+
+function applyImageRewrites(
+  editor: Editor,
+  rewrites: ReadonlyArray<{ from: string; to: string }>,
+): void {
+  const bySource = new Map(rewrites.map(({ from, to }) => [from, to]))
+  if (bySource.size === 0) return
+  let transaction = editor.state.tr
+  let changed = false
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'image') return
+    const replacement = bySource.get(String(node.attrs.src ?? ''))
+    if (!replacement || replacement === node.attrs.src) return
+    transaction = transaction.setNodeMarkup(pos, undefined, { ...node.attrs, src: replacement })
+    changed = true
+  })
+  if (!changed) return
+  transaction.setMeta('addToHistory', false).setMeta('uiOnly', true)
+  editor.view.dispatch(transaction)
 }
 
 /** Measure a document image via the DOM (the editor already displays it) */
@@ -82,9 +116,11 @@ export default function App() {
   const [slashState, setSlashState] = useState<SlashMenuState | null>(null)
   const [fmOpen, setFmOpen] = useState(false)
   const [fmText, setFmText] = useState('')
-  const [aiOpen, setAiOpen] = useState(true)
+  // Persisted so a closed AI panel stays closed on next launch (docs/slides parity)
+  const [aiOpen, setAiOpen] = useState(() => localStorage.getItem('mdapp.showAi') !== '0')
   const [aiPreset, setAiPreset] = useState<AiPreset | null>(null)
   const [autoSave, setAutoSave] = useState(() => localStorage.getItem('mdapp.autoSave') === '1')
+  const [zoom, setZoom] = useState(100)
 
   const statusRef = useRef<LoadStatus>('loading')
   const dirtyRef = useRef(false)
@@ -94,6 +130,15 @@ export default function App() {
   const filePathRef = useRef<string | null>(null)
   const slashMenuRef = useRef<SlashMenuHandle>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  const zoomOut = useCallback(
+    () => setZoom((value) => Math.max(MIN_ZOOM, Math.round(value) - ZOOM_STEP)),
+    [],
+  )
+  const zoomIn = useCallback(
+    () => setZoom((value) => Math.min(MAX_ZOOM, Math.round(value) + ZOOM_STEP)),
+    [],
+  )
 
   const markDirty = useCallback(() => {
     if (statusRef.current !== 'ready' || dirtyRef.current) return
@@ -228,11 +273,16 @@ export default function App() {
       const fmAtSave = envelopeRef.current.frontmatter
       const body = current.getMarkdown()
       const text = serializeDocText(envelopeRef.current, body)
-      const result = await window.markdownApi.save({ text, mode, suggestedName })
+      const imageSources = imageSourcesFromEditor(current)
+      const result = await window.markdownApi.save({ text, imageSources, mode, suggestedName })
       if (result.ok && 'path' in result) {
-        setFilePath(result.path)
         const unchanged =
           editorRef.current?.state.doc === docAtSave && envelopeRef.current.frontmatter === fmAtSave
+        if (result.imageRewrites?.length && editorRef.current) {
+          applyImageRewrites(editorRef.current, result.imageRewrites)
+        }
+        setImageBaseDir(dirOf(result.path))
+        setFilePath(result.path)
         if (unchanged) {
           dirtyRef.current = false
           setDirty(false)
@@ -296,10 +346,63 @@ export default function App() {
     }
   }, [])
 
+  /**
+   * Print through the same self-contained HTML the PDF export uses, loaded into a
+   * hidden same-session iframe (md-asset:// images keep resolving) — printing the
+   * live page would drag the ribbon/panels along, and Electron has no built-in
+   * preview to crop them out.
+   */
+  const printingRef = useRef(false)
+  const printDoc = useCallback(async () => {
+    const current = editorRef.current
+    if (!current || statusRef.current !== 'ready' || printingRef.current) return
+    printingRef.current = true
+    const title =
+      (filePathRef.current
+        ? filePathRef.current.replace(/^.*[/\\]/, '').replace(/\.(md|markdown)$/i, '')
+        : deriveAutoFileName(current)) || 'Untitled'
+    const frame = document.createElement('iframe')
+    frame.style.position = 'fixed'
+    frame.style.right = '100%'
+    frame.style.bottom = '100%'
+    frame.style.width = '0'
+    frame.style.height = '0'
+    frame.style.border = '0'
+    try {
+      await new Promise<void>((resolve) => {
+        frame.onload = () => resolve()
+        frame.srcdoc = buildPrintHtml(current.view.dom, title)
+        document.body.appendChild(frame)
+      })
+      const fdoc = frame.contentDocument
+      const fwin = frame.contentWindow
+      if (!fdoc || !fwin) return
+      // the export path passes printToPDF margins instead; the dialog needs @page
+      const pageStyle = fdoc.createElement('style')
+      pageStyle.textContent = '@page { margin: 0.6in; }'
+      fdoc.head.appendChild(pageStyle)
+      await Promise.all([...fdoc.images].map((img) => img.decode().catch(() => {})))
+      // resolve on afterprint so the frame survives until the dialog closes (cancel included)
+      await new Promise<void>((resolve) => {
+        fwin.addEventListener('afterprint', () => resolve())
+        fwin.print()
+      })
+    } catch (err) {
+      console.error('[markdown] print failed:', err)
+    } finally {
+      frame.remove()
+      printingRef.current = false
+    }
+  }, [])
+
   useEffect(() => {
     const offExport = window.markdownApi.onExportRequest((format) => void runExport(format))
-    return offExport
-  }, [runExport])
+    const offPrint = window.markdownApi.onPrintRequest(() => void printDoc())
+    return () => {
+      offExport()
+      offPrint()
+    }
+  }, [runExport, printDoc])
 
   useEffect(() => {
     const offSave = window.markdownApi.onSaveRequest(
@@ -310,9 +413,23 @@ export default function App() {
     })
     const offRenamed = window.markdownApi.onFileRenamed((newPath) => setFilePath(newPath))
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 's') {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+      const key = event.key.toLowerCase()
+      if (key === 's') {
         event.preventDefault()
         void doSave(event.shiftKey ? 'saveAs' : 'save')
+      } else if (key === 'p' && !event.shiftKey) {
+        event.preventDefault()
+        void printDoc()
+      } else if (key === '=' || key === '+') {
+        event.preventDefault()
+        zoomIn()
+      } else if (key === '-' || key === '_') {
+        event.preventDefault()
+        zoomOut()
+      } else if (key === '0') {
+        event.preventDefault()
+        setZoom(100)
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
@@ -322,11 +439,28 @@ export default function App() {
       offRenamed()
       window.removeEventListener('keydown', onKeyDown, true)
     }
-  }, [doSave])
+  }, [doSave, printDoc, zoomIn, zoomOut])
+
+  // Chromium reports trackpad pinch as ctrl+wheel. Also support Cmd/Ctrl+scroll
+  // while the pointer is over the document canvas.
+  useEffect(() => {
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return
+      if (!(event.target as HTMLElement | null)?.closest?.('.editor-scroll')) return
+      event.preventDefault()
+      setZoom((value) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value - event.deltaY * 0.6)))
+    }
+    window.addEventListener('wheel', onWheel, { passive: false })
+    return () => window.removeEventListener('wheel', onWheel)
+  }, [])
 
   useEffect(() => {
     localStorage.setItem('mdapp.autoSave', autoSave ? '1' : '0')
   }, [autoSave])
+
+  useEffect(() => {
+    localStorage.setItem('mdapp.showAi', aiOpen ? '1' : '0')
+  }, [aiOpen])
 
   // autosave: every 30s and on window blur, silently persist pending changes
   // (same policy as the docs app; untitled documents are skipped — the first
@@ -411,7 +545,8 @@ export default function App() {
           {!aiOpen && (
             <button
               className="ai-rail"
-              title={t('aiOpenAssistant')}
+              data-tip={t('aiOpenAssistant')}
+              aria-label={t('aiOpenAssistant')}
               onClick={() => setAiOpen(true)}
             >
               <GensparkMark size={22} />
@@ -428,19 +563,56 @@ export default function App() {
           )}
         </div>
         )}
-        <div className="editor-scroll" ref={scrollRef}>
-          <div className="doc-page">
-            {fmOpen && <FrontmatterPanel value={fmText} onChange={onFrontmatterChange} />}
-            <EditorContent editor={editor} />
+        <div className="app-content">
+          <div className="editor-scroll" ref={scrollRef}>
+            <div className="doc-page" style={{ zoom: zoom / 100 }}>
+              {fmOpen && <FrontmatterPanel value={fmText} onChange={onFrontmatterChange} />}
+              <EditorContent editor={editor} />
+            </div>
           </div>
+          <footer className="status-bar">
+            <div className="status-left">
+              {fileName && <span className="status-item status-file">{fileName}</span>}
+            </div>
+            <div className="status-right">
+              {statusText && (
+                <span className={`status-save status-${saveState}`}>{statusText}</span>
+              )}
+              <button
+                type="button"
+                className="zoom-btn"
+                aria-label="Zoom out"
+                onClick={zoomOut}
+                disabled={zoom <= MIN_ZOOM}
+              >
+                −
+              </button>
+              <input
+                className="zoom-slider"
+                type="range"
+                min={MIN_ZOOM}
+                max={MAX_ZOOM}
+                step={ZOOM_STEP}
+                value={Math.round(zoom)}
+                aria-label="Zoom"
+                onChange={(event) => setZoom(Number(event.target.value))}
+              />
+              <button
+                type="button"
+                className="zoom-btn"
+                aria-label="Zoom in"
+                onClick={zoomIn}
+                disabled={zoom >= MAX_ZOOM}
+              >
+                +
+              </button>
+              <span className="zoom-value">{Math.round(zoom)}%</span>
+            </div>
+          </footer>
         </div>
       </div>
       <SlashMenu ref={slashMenuRef} state={slashState} onDismiss={() => setSlashState(null)} />
-      <TableMenu editor={editor} scrollRef={scrollRef} />
-      <div className="status-bar">
-        {fileName && <span className="status-file">{fileName}</span>}
-        {statusText && <span className={`status-save status-${saveState}`}>{statusText}</span>}
-      </div>
+      <TableMenu editor={editor} scrollRef={scrollRef} zoom={zoom} />
     </div>
   )
 }
