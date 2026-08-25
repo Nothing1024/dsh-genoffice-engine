@@ -47,12 +47,15 @@ export default defineConfig({
       // Node builtins → browser shims (gateway reuse; desktop build unaffected)
       { find: 'node:crypto', replacement: shims },
       { find: 'node:fs/promises', replacement: shims },
+      { find: 'node:fs', replacement: shims },
       { find: 'node:path', replacement: shims },
       { find: 'node:os', replacement: shims },
       { find: 'node:zlib', replacement: shims },
       { find: 'node:buffer', replacement: shims },
-      // safety net for bare specifiers some transitive deps use
-      { find: /^node:/, replacement: shims },
+      // safety net for bare specifiers some transitive deps use;
+      // .* so the WHOLE id is replaced (regex replacement splices, it does
+      // not substitute the module like string finds do)
+      { find: /^node:.*/, replacement: shims },
     ],
   },
   server: {

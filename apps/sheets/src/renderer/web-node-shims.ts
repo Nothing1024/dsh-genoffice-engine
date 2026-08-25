@@ -227,6 +227,13 @@ export const writeFile = (): never => nodeOnly('fs/promises.writeFile')
 export const mkdir = (): never => nodeOnly('fs/promises.mkdir')
 export const mkdtemp = (): never => nodeOnly('fs/promises.mkdtemp')
 
+// node:fs sync API (gateway writeXlsxAtomically / syncFileBestEffort — browser-unreachable)
+export const openSync = (): never => nodeOnly('fs.openSync')
+export const closeSync = (): never => nodeOnly('fs.closeSync')
+export const fsyncSync = (): never => nodeOnly('fs.fsyncSync')
+export const readFileSync = (): never => nodeOnly('fs.readFileSync')
+export const writeFileSync = (): never => nodeOnly('fs.writeFileSync')
+
 export const dirname = (p: string): string => p.replace(/[\\/][^\\/]*$/, '')
 export const join = (...parts: string[]): string => parts.join('/')
 export const resolve = (p: string): string => p
