@@ -30,8 +30,11 @@ import {
   getSlideNotes,
   insertBlankSlide,
   materializeSlide,
+  mergeSlideFromPptx,
+  moveSlide,
   openPptx,
   patchGroupChildText,
+  promoteSlideBackground,
   reorderElement,
   savePptx,
   setElementFont,
@@ -66,6 +69,7 @@ import type {
   EditTransformOp,
   OpenResult,
 } from '../shared/ipc'
+import { CLOUD_PAGE_PREFIX, readIssuedCloudPage } from '../shared/cloud-page-marker'
 
 // ── constants / converters (mirror slides-main.ts) ──────────────────────
 
@@ -704,4 +708,189 @@ export function getWebSession(): WebSlideSession | null {
 
 export function setWebSession(session: WebSlideSession | null): void {
   currentSession = session
+}
+
+export type HtmlToPptxMode = 'replace' | 'append' | 'replace_at' | 'insert_at'
+
+export type HtmlToPptxResult =
+  | (OpenResult & {
+      appendedFrom?: number
+      replacedIndex?: number
+      insertedIndex?: number
+      fallbackReason?: string
+      imageFailures?: { page: number; url: string }[]
+    })
+  | { error: string }
+
+function readCloudPage(marker: string): Uint8Array {
+  const bytes = readIssuedCloudPage(marker)
+  if (!bytes) {
+    if (!marker.startsWith(CLOUD_PAGE_PREFIX)) throw new Error('expected a cloud page marker')
+    throw new Error('unknown cloud page marker')
+  }
+  return bytes
+}
+
+async function assembleDeck(pagesHtml: string[]): Promise<Uint8Array> {
+  const perPage = pagesHtml.map(readCloudPage)
+  const first = perPage[0]
+  if (!first) throw new Error('no pages to assemble')
+  const base = await openPptx(first)
+  for (const one of perPage.slice(1)) await mergeSlideFromPptx(base, one)
+  for (const s of base.deck.slides) promoteSlideBackground(s, base.deck.size)
+  return savePptx(base)
+}
+
+function carryHistoryForReplacement(
+  previous: WebSlideSession | null,
+  replacement: WebSlideSession,
+): void {
+  if (!previous) return
+  pushHistory(previous)
+  replacement.undoStack = previous.undoStack
+  replacement.redoStack = previous.redoStack
+  replacement.historyBatch = previous.historyBatch
+}
+
+function openResult(session: WebSlideSession): OpenResult {
+  return {
+    path: session.path,
+    slides: buildAllRenderSlides(session.opened, session.fitWidthPx),
+    size: { cx: session.opened.deck.size.cx, cy: session.opened.deck.size.cy },
+  }
+}
+
+/**
+ * Consume `cloudpptx:` markers into the current web session. Semantics match
+ * slides-main.ts `slides:html-to-pptx` (replace / append / replace_at / insert_at).
+ */
+export async function webHtmlToPptx(
+  pagesHtml: string[],
+  fitWidthPx: number,
+  mode: HtmlToPptxMode = 'replace',
+  atIndex?: number,
+): Promise<HtmlToPptxResult> {
+  try {
+    if (mode === 'append') {
+      const existing = getWebSession()
+      if (!existing) {
+        return {
+          error:
+            'No deck to append to (session missing). Generate the first page with mode:"replace" or add pages with the native tools.',
+        }
+      }
+      const opened = existing.opened
+      const beforeCount = opened.deck.slides.length
+      pushHistory(existing)
+      let merged = 0
+      let lastErr: string | undefined
+      for (const html of pagesHtml) {
+        try {
+          const slide = await mergeSlideFromPptx(opened, readCloudPage(html))
+          if (slide) {
+            promoteSlideBackground(slide, opened.deck.size)
+            merged += 1
+          } else lastErr = 'Failed to merge slide (source single-page pptx has no valid slide)'
+        } catch (pageErr) {
+          lastErr = pageErr instanceof Error ? pageErr.message : String(pageErr)
+        }
+      }
+      if (merged === 0) {
+        existing.undoStack.pop()
+        return { error: `Append failed: ${lastErr ?? 'unknown error'}` }
+      }
+      existing.fitWidthPx = fitWidthPx
+      return {
+        ...openResult(existing),
+        appendedFrom: beforeCount,
+        ...(lastErr && merged < pagesHtml.length
+          ? { fallbackReason: `Some pages failed to append: ${lastErr}` }
+          : {}),
+      }
+    }
+
+    if (mode === 'replace_at') {
+      const existing = getWebSession()
+      if (!existing) {
+        return { error: 'No deck is open (session missing); cannot redo the page.' }
+      }
+      const opened = existing.opened
+      const total = opened.deck.slides.length
+      if (atIndex == null || !Number.isInteger(atIndex) || atIndex < 0 || atIndex >= total) {
+        return { error: `atIndex out of range (0-${total - 1})` }
+      }
+      const html = pagesHtml[0]
+      if (!html || pagesHtml.length !== 1) {
+        return { error: 'replace_at mode requires exactly one HTML page' }
+      }
+      const one = readCloudPage(html)
+      pushHistory(existing)
+      const rollback = () => {
+        const snap = existing.undoStack.pop()
+        if (snap) restoreSnapshot(existing, snap)
+      }
+      const merged = await mergeSlideFromPptx(opened, one)
+      if (!merged) {
+        rollback()
+        return { error: 'Failed to merge slide (source single-page pptx has no valid slide)' }
+      }
+      promoteSlideBackground(merged, opened.deck.size)
+      if (!moveSlide(opened, total, atIndex) || !deleteSlideFromDeck(opened, atIndex + 1)) {
+        rollback()
+        return { error: 'In-place page replacement failed (error moving/deleting the old page)' }
+      }
+      existing.fitWidthPx = fitWidthPx
+      return { ...openResult(existing), replacedIndex: atIndex }
+    }
+
+    if (mode === 'insert_at') {
+      const existing = getWebSession()
+      if (!existing) {
+        return { error: 'No deck is open (session missing); cannot insert the page.' }
+      }
+      const opened = existing.opened
+      const total = opened.deck.slides.length
+      if (atIndex == null || !Number.isInteger(atIndex) || atIndex < 0 || atIndex > total) {
+        return { error: `atIndex out of range (0-${total})` }
+      }
+      const html = pagesHtml[0]
+      if (!html || pagesHtml.length !== 1) {
+        return { error: 'insert_at mode requires exactly one HTML page' }
+      }
+      const one = readCloudPage(html)
+      pushHistory(existing)
+      const rollback = () => {
+        const snap = existing.undoStack.pop()
+        if (snap) restoreSnapshot(existing, snap)
+      }
+      const merged = await mergeSlideFromPptx(opened, one)
+      if (!merged) {
+        rollback()
+        return { error: 'Failed to merge slide (source single-page pptx has no valid slide)' }
+      }
+      promoteSlideBackground(merged, opened.deck.size)
+      if (atIndex < total && !moveSlide(opened, total, atIndex)) {
+        rollback()
+        return { error: 'Page insertion failed (error moving the new page)' }
+      }
+      existing.fitWidthPx = fitWidthPx
+      return { ...openResult(existing), insertedIndex: atIndex }
+    }
+
+    const bytes = await assembleDeck(pagesHtml)
+    const opened = await openPptx(bytes)
+    const previous = getWebSession()
+    const replaceSession: WebSlideSession = {
+      path: previous?.path ?? '',
+      opened,
+      fitWidthPx,
+      undoStack: [],
+      redoStack: [],
+    }
+    carryHistoryForReplacement(previous, replaceSession)
+    setWebSession(replaceSession)
+    return openResult(replaceSession)
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
 }

@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { openPptx, type TextElement, type PictureElement } from '@genoffice/pptx-engine'
-import { parsePageSpec, buildPagePptx, type PageSpec } from '../src/main/page-spec'
+import { parsePageSpec, buildPagePptx, type PageSpec } from '../src/shared/page-spec'
 
 // 1x1 red PNG
 const PNG_1PX = Uint8Array.from(
@@ -155,5 +155,22 @@ describe('buildPagePptx', () => {
     expect(pics).toHaveLength(1)
     // 200x100 source into a 640x720 portrait frame → horizontal crop applied
     expect(pics[0]!.srcRect?.l ?? 0).toBeGreaterThan(0)
+  })
+
+  it('builds the web-handoff spec JSON into a one-slide pptx with real text', async () => {
+    const raw =
+      '{"background":"#16395C","elements":[{"type":"text","x":80,"y":60,"w":800,"h":90,"paragraphs":[{"runs":[{"text":"hello","sizePt":24}]}]}]}'
+    const parsed = parsePageSpec(raw)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    const { bytes, imageFailures } = await buildPagePptx(parsed.spec, noImages)
+    expect(imageFailures).toEqual([])
+    expect(bytes.byteLength).toBeGreaterThan(1000)
+    const opened = await openPptx(bytes)
+    expect(opened.deck.slides).toHaveLength(1)
+    const texts = opened.deck.slides[0]!.elements.filter((e): e is TextElement => e.type === 'text')
+    expect(texts.some((el) => el.text?.paragraphs.some((p) => p.runs.some((r) => r.text === 'hello')))).toBe(
+      true,
+    )
   })
 })

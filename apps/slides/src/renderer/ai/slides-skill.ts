@@ -8,6 +8,7 @@ import type {
 } from '@genoffice/pptx-render'
 import type { AddSmartArtOp, AgentToolCall, AgentToolDef, EditParagraph } from '../../shared/ipc'
 import { opVocabulary } from '../../shared/op-docs'
+import { parsePageSpec } from '../../shared/page-spec'
 import { auditSlideLayout, formatAudit } from './layout-audit'
 import { runLayoutScript, type LayoutScriptElement, type SlideStylePatch } from './layout-script'
 import { t } from '../i18n/locale'
@@ -217,6 +218,11 @@ export interface DeckAccess {
    * (decks must be built from attachment content, not generic filler).
    */
   unreadTextAttachments?(): string[]
+  /**
+   * Control-mode landing only: host submits PageSpec[]; iframe must not call
+   * getAiSettings / planDeckOutline / generatePageLocal LLM. Set by createControlDeckAccess.
+   */
+  hostAuthoredSpecsOnly?: boolean
 }
 
 /** Single survey question structure (with options). */
@@ -848,6 +854,34 @@ const TOOLS: AgentToolDef[] = [
     },
   },
   {
+    name: 'land_pages',
+    description:
+      '[Host-authored landing] Parse PageSpec[] and land them as editable slides. No LLM. ' +
+      'Control-mode hosts must use this (or generate_deck with pages_spec) instead of topic-only generate_deck. ' +
+      'insert_mode: replace (default), append, replace_at / insert_at (exactly one page + integer at_index).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pages: {
+          type: 'array',
+          description:
+            'PageSpec objects: {background?, elements:[{type:shape|text|image, x,y,w,h, ...}]}. Canvas 1280×720.',
+        },
+        insert_mode: {
+          type: 'string',
+          enum: ['replace', 'append', 'replace_at', 'insert_at'],
+          description: 'replace (default) = whole deck; append = end; replace_at/insert_at need at_index',
+        },
+        at_index: {
+          type: 'integer',
+          description: '0-based slide index for replace_at / insert_at',
+        },
+        deck_name: { type: 'string', description: 'Optional presentation name for a replace landing' },
+      },
+      required: ['pages'],
+    },
+  },
+  {
     name: 'save_style_template',
     description:
       '[Save the current deck\'s style as a reusable template] Saves the current presentation\'s Style Skill (visual style guide) under the given name; next time you generate a deck, pass the style_template argument to reuse it directly and skip style generation. Call when the user says "save this style" / "save as template".',
@@ -1162,6 +1196,7 @@ const TOOLS: AgentToolDef[] = [
           type: 'array',
           items: { type: 'object' },
           description: 'The op list, applied in order as one transaction (at most 50)',
+          maxItems: 50,
         },
         dry_run: { type: 'boolean', description: 'Validate the plan only; the deck is untouched' },
         isolation: {
@@ -1648,6 +1683,102 @@ const fail = (summary: string, output: string) => ({
   mutated: false,
   summary,
 })
+
+const CONTROL_PAGES_SPEC_REQUIRED = 'control mode requires pages_spec; use land_pages'
+
+type LandInsertMode = 'replace' | 'append' | 'replace_at' | 'insert_at'
+
+function hostAuthoredPageSpecs(input: Record<string, unknown>): unknown[] | null {
+  if (Array.isArray(input.pages_spec)) return input.pages_spec
+  const pages = input.pages
+  if (!Array.isArray(pages) || pages.length === 0) return null
+  const first = pages[0]
+  if (!first || typeof first !== 'object' || Array.isArray(first)) return null
+  return 'elements' in first && Array.isArray(first.elements) ? pages : null
+}
+
+function parseLandInsertMode(
+  input: Record<string, unknown>,
+): { ok: true; mode: LandInsertMode; atIndex?: number } | { ok: false; error: string } {
+  const raw = String(input.insert_mode ?? 'replace').trim() || 'replace'
+  if (raw !== 'replace' && raw !== 'append' && raw !== 'replace_at' && raw !== 'insert_at') {
+    return { ok: false, error: `invalid insert_mode: ${raw}` }
+  }
+  if (raw === 'replace' || raw === 'append') return { ok: true, mode: raw }
+  const atIndex = Number(input.at_index)
+  if (!Number.isInteger(atIndex)) {
+    return { ok: false, error: `${raw} requires an integer at_index` }
+  }
+  return { ok: true, mode: raw, atIndex }
+}
+
+async function executeLandPages(
+  access: DeckAccess,
+  input: Record<string, unknown>,
+  state: SkillState | undefined,
+) {
+  const pages = input.pages
+  if (!Array.isArray(pages) || pages.length === 0) {
+    return fail('land_pages', 'land_pages requires a non-empty pages array')
+  }
+  const modeRes = parseLandInsertMode(input)
+  if (!modeRes.ok) return fail('land_pages', modeRes.error)
+  if ((modeRes.mode === 'replace_at' || modeRes.mode === 'insert_at') && pages.length !== 1) {
+    return fail('land_pages', `${modeRes.mode} requires exactly one page`)
+  }
+  if (!access.generateFromHtml) {
+    return fail('land_pages', 'The current environment does not support the page landing pipeline')
+  }
+  if (modeRes.mode === 'replace_at' && !access.regenerateSlide) {
+    return fail('land_pages', 'The current environment does not support in-place page replacement')
+  }
+
+  const parsedSpecs: string[] = []
+  for (let i = 0; i < pages.length; i++) {
+    const parsed = parsePageSpec(JSON.stringify(pages[i]))
+    if (!parsed.ok) return fail('land_pages', `invalid page spec: ${parsed.error}`)
+    parsedSpecs.push(JSON.stringify(parsed.spec))
+  }
+
+  const markers: string[] = []
+  const imageFails: { page: number; url: string }[] = []
+  for (let i = 0; i < parsedSpecs.length; i++) {
+    const res = await window.slidesApi.localGeneratePage({ specJson: parsedSpecs[i]! })
+    if (!res?.ok || !res.marker) {
+      return fail(
+        'land_pages',
+        `invalid page spec: ${res?.error ?? 'localGeneratePage failed'}`,
+      )
+    }
+    markers.push(res.marker)
+    if (Array.isArray(res.imageFailures)) {
+      imageFails.push(...res.imageFailures.map((url) => ({ page: i + 1, url })))
+    }
+  }
+
+  const deckName = String(input.deck_name ?? '').trim() || undefined
+  let land:
+    | { ok: boolean; pages?: number; error?: string; imageFailures?: { page: number; url: string }[] }
+    | undefined
+  if (modeRes.mode === 'replace_at') {
+    land = await access.regenerateSlide!(modeRes.atIndex!, markers[0]!)
+  } else if (modeRes.mode === 'insert_at') {
+    land = await access.generateFromHtml(markers, 'insert_at', deckName, modeRes.atIndex)
+  } else {
+    land = await access.generateFromHtml(markers, modeRes.mode, deckName)
+  }
+  if (!land.ok) return fail('land_pages', land.error ?? 'landing failed')
+  if (state) state.htmlGenerated = true
+  const allFails = [...imageFails, ...(land.imageFailures ?? [])]
+  const pageCount = land.pages ?? access.getSlides().length
+  return {
+    output:
+      `Landed ${markers.length} host-authored page(s) (insert_mode:${modeRes.mode}). Deck now has ${pageCount} page(s).` +
+      imageFailNote(allFails.length ? allFails : undefined),
+    mutated: true,
+    summary: `land_pages ${markers.length}`,
+  }
+}
 
 // ── Figure-provenance gate ────────────────────────────────────
 // Prompt rules ("search before writing data") did not stop invented numbers being
@@ -2222,6 +2353,9 @@ async function executeTool(
     }
 
     case 'plan_deck': {
+      if (access.hostAuthoredSpecsOnly) {
+        return fail('plan_deck', CONTROL_PAGES_SPEC_REQUIRED)
+      }
       const coreHook = String(call.input.core_hook ?? '').trim()
       const style = String(call.input.style ?? '').trim()
       const pages = Array.isArray(call.input.pages) ? call.input.pages : []
@@ -2252,6 +2386,16 @@ async function executeTool(
     }
 
     case 'regenerate_slide': {
+      if (access.hostAuthoredSpecsOnly) {
+        const specs = hostAuthoredPageSpecs(call.input)
+        if (!specs) return fail(t('aiFailRegen'), CONTROL_PAGES_SPEC_REQUIRED)
+        const atIndex = Number(call.input.slideIndex)
+        return executeLandPages(
+          access,
+          { pages: specs, insert_mode: 'replace_at', at_index: atIndex },
+          state,
+        )
+      }
       const idx = Number(call.input.slideIndex)
       if (!slides[idx])
         return fail(t('aiFailRegen'), `slideIndex out of range (0-${slides.length - 1})`)
@@ -2342,6 +2486,20 @@ async function executeTool(
     }
 
     case 'generate_deck': {
+      if (access.hostAuthoredSpecsOnly) {
+        const specs = hostAuthoredPageSpecs(call.input)
+        if (!specs) return fail(t('aiFailGenDeck'), CONTROL_PAGES_SPEC_REQUIRED)
+        return executeLandPages(
+          access,
+          {
+            pages: specs,
+            insert_mode: call.input.insert_mode,
+            at_index: call.input.at_index,
+            deck_name: call.input.deck_name,
+          },
+          state,
+        )
+      }
       // ── Self-driven pipeline:
       //   1) Plan: use pages if passed; with topic, the tool plans the outline via LLM (batched recursion over threshold) — fixes missing pages at the input side.
       //   2) Generate: batched concurrent page generation (one retry per page), **each batch lands immediately → frontend shows pages one by one**.
@@ -2963,6 +3121,9 @@ async function executeTool(
       }
     }
 
+
+    case 'land_pages':
+      return executeLandPages(access, call.input, state)
     case 'add_slide': {
       const src = Number(call.input.sourceIndex)
       if (!slides[src])

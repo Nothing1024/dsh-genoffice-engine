@@ -43,6 +43,7 @@ import { toPickerHex } from './color-input'
 import { InkOverlay } from './InkOverlay'
 import { initControlMode, CONTROL_MODE } from './control'
 import type { DeckAccess, ClarifyQuestion } from './ai/slides-skill'
+import { createControlDeckAccess } from './ai/control-deck-access'
 import { inkNodesOf, type InkPenSettings, type InkStroke, type InkTool } from './ink'
 import type { SlideThemePreset } from './themes'
 import { Ribbon, type FormatCmd, type SlidesViewMode } from './components/Ribbon'
@@ -1130,7 +1131,7 @@ export function App() {
       getDeckAccess: (): DeckAccess | null => {
         const ctx = ctxRef.current
         if (!ctx) return null
-        return {
+        return createControlDeckAccess({
           getSlides: () => ctx.slides,
           getCurrent: () => ctx.current,
           getSelectedIds: () => ctx.selectedIds,
@@ -1146,7 +1147,7 @@ export function App() {
               setControlClarify(questions)
             })
           },
-        }
+        })
       },
     })
     return () => handle?.close()

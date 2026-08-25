@@ -9,7 +9,7 @@
  *   1. makes sure the relay server (web/server.mjs) is running on :8787
  *   2. uploads the file bytes to it (POST /api/inject → one-shot token)
  *   3. opens the matching editor URL in the default browser
- *      (.docx → /docs/?open=inject:<token>, .md → /markdown/?open=inject:<token>)
+ *      (.docx → /docs, .md → /markdown, .xlsx → /sheets, .pptx → /slides, .pdf → /pdf)
  *
  * The browser page pulls the bytes back from the relay and registers the file
  * in its IndexedDB — no filesystem access from the browser is needed, so any
@@ -33,17 +33,17 @@ const args = process.argv.slice(2)
 const noBrowser = args.includes('--no-browser') || args.includes('--print-url')
 const fileArg = args.find((a) => !a.startsWith('--'))
 if (!fileArg) {
-  console.error('用法: node web/open.mjs <文件路径>   (支持 .docx / .md)')
+  console.error('用法: node web/open.mjs <文件路径>   (支持 .docx / .md / .xlsx / .pptx / .pdf)')
   console.error('示例: node web/open.mjs ~/Desktop/报告.docx')
   process.exit(1)
 }
 
 const filePath = resolve(fileArg.replace(/^~(?=\/)/, process.env.HOME ?? ''))
 const ext = extname(filePath).toLowerCase().replace('.', '')
-const APP_BY_EXT = { docx: 'docs', md: 'markdown', markdown: 'markdown' }
+const APP_BY_EXT = { docx: 'docs', md: 'markdown', markdown: 'markdown', xlsx: 'sheets', pptx: 'slides', pdf: 'pdf' }
 const app = APP_BY_EXT[ext]
 if (!app) {
-  console.error(`暂不支持 .${ext} 文件（当前支持 .docx / .md）`)
+  console.error(`暂不支持 .${ext} 文件（当前支持 .docx / .md / .xlsx / .pptx / .pdf）`)
   process.exit(1)
 }
 

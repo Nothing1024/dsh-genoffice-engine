@@ -10,7 +10,9 @@
  *     text/transform/fill/stroke/background edits, element add/delete,
  *     slide add/delete, undo/redo, notes, render rebuilds, theme/language,
  *     picture crop/opacity/replace/insert-url, group/ungroup, flip, text
- *     anchor, image fill, tables, charts, SmartArt, localStorage style templates
+ *     anchor, image fill, tables, charts, SmartArt, localStorage style templates,
+ *     local generate_deck (spec JSON → pptx-engine → cloudpptx: marker landing),
+ *     BYOK aiStream (no Genspark cloud page gen)
  *   - NOT implemented (explicit `console.warn` + null/default — never silent):
  *     presenter/audience, PDF/image export, print, master view, cloud gen,
  *     clipboard, animations, comments, sections, find-replace
@@ -58,8 +60,8 @@ import type {
 } from '../shared/ipc'
 import { runTxn } from '../main/ops/executor'
 import type { RenderSlide } from '@genoffice/pptx-render'
-import type { AiSettings, AiStreamChunk } from '@genoffice/ai-provider'
-import { defaultAiSettings } from '@genoffice/ai-provider'
+import type { AiSettings, AiStreamChunk, AiStreamRequest } from '@genoffice/ai-provider'
+import { defaultAiSettings, streamForProvider } from '@genoffice/ai-provider'
 import {
   addChart,
   addPicture,
@@ -115,6 +117,7 @@ import {
   webEditText,
   webEditTransform,
   webGetNotes,
+  webHtmlToPptx,
   webNewBlank,
   webOpenBytes,
   webRedo,
@@ -126,6 +129,8 @@ import {
   webUndo,
   type WebSlideSession,
 } from './web-slides-session'
+import { parsePageSpec, buildPagePptx } from '../shared/page-spec'
+import { issueCloudPage } from '../shared/cloud-page-marker'
 
 declare global {
   interface Window {
@@ -225,6 +230,96 @@ const closeSaveListeners = new Set<() => void>()
 const aiStreamListeners = new Set<(chunk: AiStreamChunk) => void>()
 const themeListeners = new Set<(theme: UiTheme) => void>()
 const historyChangedListeners = new Set<(state: { canUndo: boolean; canRedo: boolean }) => void>()
+const activeAiStreams = new Map<string, AbortController>()
+
+function emitAiChunk(chunk: AiStreamChunk): void {
+  for (const listener of aiStreamListeners) {
+    try {
+      listener(chunk)
+    } catch {
+      /* listener errors are non-fatal */
+    }
+  }
+}
+
+async function runAiStream(request: AiStreamRequest): Promise<void> {
+  const { requestId, settings, system, messages } = request
+  const tools = request.tools ?? []
+  const maxTokens = request.maxTokens ?? 8192
+  const provider = settings.provider
+  const config = settings.providers?.[provider]
+  if (!config?.apiKey || provider === 'genspark') {
+    emitAiChunk({
+      requestId,
+      type: 'error',
+      error: 'web control mode has no local LLM',
+    })
+    return
+  }
+  if (!config.model) {
+    emitAiChunk({ requestId, type: 'error', error: 'web control mode has no local LLM' })
+    return
+  }
+  const controller = new AbortController()
+  activeAiStreams.set(requestId, controller)
+  let lastPing = 0
+  const ping = () => {
+    const now = Date.now()
+    if (now - lastPing < 5_000) return
+    lastPing = now
+    emitAiChunk({ requestId, type: 'ping' })
+  }
+  try {
+    let stopReason: string | undefined
+    await streamForProvider(provider, config, system, messages, tools, maxTokens, {
+      signal: controller.signal,
+      onDelta: (text) => emitAiChunk({ requestId, type: 'delta', text }),
+      onToolCall: (toolCall) => emitAiChunk({ requestId, type: 'tool-call', toolCall }),
+      onActivity: ping,
+      onStopReason: (reason) => {
+        stopReason = reason
+      },
+    })
+    emitAiChunk({ requestId, type: 'done', stopReason })
+  } catch (err) {
+    if (controller.signal.aborted) {
+      emitAiChunk({ requestId, type: 'done' })
+    } else {
+      const message = err instanceof Error ? err.message : String(err)
+      const isTimeout = message.includes('timeout') || message.includes('Timeout')
+      emitAiChunk({
+        requestId,
+        type: 'error',
+        error: message,
+        errorCode: isTimeout ? 'timeout' : undefined,
+      })
+    }
+  } finally {
+    activeAiStreams.delete(requestId)
+  }
+}
+
+async function imageDimsForSpec(
+  bytes: Uint8Array,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    if (typeof createImageBitmap === 'function') {
+      const bitmap = await createImageBitmap(new Blob([bytes as unknown as BlobPart]))
+      const size = { width: bitmap.width, height: bitmap.height }
+      bitmap.close()
+      return size.width > 0 && size.height > 0 ? size : null
+    }
+  } catch {
+    /* fall through to Image */
+  }
+  try {
+    const size = await imageNaturalSize(bytes)
+    return size.width > 0 && size.height > 0 ? size : null
+  } catch {
+    return null
+  }
+}
+
 
 // ── explicit not-available stub (防呆: never silent) ────────────────────
 
@@ -523,14 +618,28 @@ const slidesApi: SlidesApi = {
 
   newBlank: async (fitWidthPx) => webNewBlank(fitWidthPx),
 
-  htmlToPptx: async () => ({ error: '网页版暂不支持 HTML 转 PPTX' }),
+  htmlToPptx: async (pagesHtml, fitWidthPx, mode, atIndex) =>
+    webHtmlToPptx(pagesHtml, fitWidthPx, mode, atIndex),
 
   cloudGenStatus: async () => ({ enabled: false }),
 
   cloudGeneratePage: async () => ({ ok: false, error: '网页版暂不支持云端生成' }),
-  localGeneratePage: async () => {
-    console.warn('[web-slides] localGeneratePage is not available in the web version')
-    return { ok: false, error: '网页版暂不支持本地单页生成' }
+  localGeneratePage: async (op) => {
+    const parsed = parsePageSpec(String(op?.specJson ?? ''))
+    if (!parsed.ok) return { ok: false, error: parsed.error }
+    try {
+      const { bytes, imageFailures } = await buildPagePptx(parsed.spec, {
+        fetchImage: fetchImageBytes,
+        imageDims: imageDimsForSpec,
+      })
+      return {
+        ok: true,
+        marker: issueCloudPage(bytes, crypto.randomUUID()),
+        ...(imageFailures.length ? { imageFailures } : {}),
+      }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
   },
 
   editText: async (op: EditTextOp) => {
@@ -1463,8 +1572,12 @@ const slidesApi: SlidesApi = {
     localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(settings))
   },
 
-  aiStream: async () => {},
-  aiStreamCancel: async () => {},
+  aiStream: async (request) => {
+    void runAiStream(request)
+  },
+  aiStreamCancel: async (requestId) => {
+    activeAiStreams.get(requestId)?.abort()
+  },
   aiGskLogin: async () => {
     window.open('https://www.genspark.ai', '_blank', 'noopener')
   },
