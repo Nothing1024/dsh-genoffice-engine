@@ -2,7 +2,7 @@
  * Control-mode adapter for the GenOffice Markdown renderer
  * (genoffice-dsh-control).
  *
- * INV-004 mirror: contracts/control-api.md — same contract as the docs
+ * INV-004 mirror: contracts/control-api.md §2.1 saved + §2.8 dirty — same contract as the docs
  * adapter (SSE downstream + POST notify upstream, docId = sha256(absolute
  * path)). Active only with `control=1` + `path:` target (BR-001); non-control
  * loads take zero side effects (INV-001). All edits go through the Tiptap
@@ -67,6 +67,10 @@ export interface ControlAdapterOptions {
   getEditor: () => Editor | null
   /** serialize the CURRENT editor state to document bytes (markdown: serialized text) */
   exportBytes: () => Promise<{ bytes: Uint8Array; name: string } | null>
+  /** persisted-content dirty (desktop close-guard same signal); optional for INV-003 old callers */
+  getDirty?: () => boolean
+  /** clear the editor dirty source after a successful write-back (BR-004) */
+  onSaved?: () => void
 }
 
 export interface ControlHandle {
@@ -90,6 +94,14 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   let closed = false
 
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let dirtyTimer: ReturnType<typeof setInterval> | null = null
+  let lastDirty: boolean | undefined
+  const reportDirty = (id: string, dirty: boolean): void => {
+    lastDirty = dirty
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: 'genoffice:dirty', docId: id, dirty }, '*')
+    }
+  }
   const openStream = async (): Promise<void> => {
     const docId = await docIdPromise
     if (closed) return
@@ -105,6 +117,18 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     })
     es.addEventListener('export', (ev) => {
       void handleExport(docId, ev as MessageEvent)
+    })
+    // INV-004: contracts/control-api.md §2.1 saved + §2.8 dirty
+    es.addEventListener('saved', (ev) => {
+      let data: { mtimeMs?: unknown } = {}
+      try {
+        data = JSON.parse((ev as MessageEvent).data)
+      } catch {
+        return
+      }
+      if (typeof data.mtimeMs === 'number') mtimeMs = data.mtimeMs
+      opts.onSaved?.()
+      reportDirty(docId, false)
     })
     es.onerror = () => {
       // Never leave the browser's auto-reconnect running: a detached iframe
@@ -211,6 +235,20 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   }
   void captureMtime()
 
+  if (opts.getDirty) {
+    void (async () => {
+      const id = await docIdPromise
+      if (closed) return
+      const tick = (): void => {
+        const dirty = Boolean(opts.getDirty?.())
+        if (dirty === lastDirty) return
+        reportDirty(id, dirty)
+      }
+      tick()
+      dirtyTimer = setInterval(tick, 1000)
+    })()
+  }
+
   const onVisibility = (): void => {
     // Reconnect only when the stream is actually down — reopening an already
     // open EventSource would blip the registration on every tab focus.
@@ -227,6 +265,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   const close = (): void => {
     closed = true
     if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+    if (dirtyTimer !== null) clearInterval(dirtyTimer)
     document.removeEventListener('visibilitychange', onVisibility)
     window.removeEventListener('online', onOnline)
     es?.close()

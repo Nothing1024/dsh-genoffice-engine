@@ -1386,6 +1386,8 @@ export default function App() {
     deleted.size > 0 ||
     order !== null ||
     metadata !== null
+  const dirtyFlagRef = useRef(false)
+  dirtyFlagRef.current = dirty
 
   // Mirror dirty state to the main process (close-tab/close-window guard)
   useEffect(() => {
@@ -4873,6 +4875,7 @@ export default function App() {
       getDeps: () => aiApiRef.current,
       getSaveRequest: () => buildSaveRequestRef.current?.() ?? null,
       exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
+      getDirty: () => dirtyFlagRef.current,
     })
     return () => handle?.close()
   }, [])

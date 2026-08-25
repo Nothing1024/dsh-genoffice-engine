@@ -200,6 +200,12 @@ export default function App() {
           filePathRef.current?.split('/').pop() ?? CONTROL_PATH?.split('/').pop() ?? 'document.md'
         return { bytes: new TextEncoder().encode(text), name }
       },
+      getDirty: () => dirtyRef.current,
+      onSaved: () => {
+        dirtyRef.current = false
+        setDirty(false)
+        window.markdownApi.setDirty(false)
+      },
     })
     return () => handle?.close()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- control mode arms once per editor instance

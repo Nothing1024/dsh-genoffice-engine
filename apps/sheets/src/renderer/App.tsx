@@ -405,6 +405,8 @@ export function App(): React.JSX.Element {
   const [_revision, setRevision] = useState(0)
   const [workbookFile, setWorkbookFile] = useState<WorkbookFile | null>(null)
   const [pendingEdits, setPendingEdits] = useState(0)
+  const pendingEditsRef = useRef(0)
+  pendingEditsRef.current = pendingEdits
   /// Whether any cell in the workbook has content — the ribbon's one-click AI
   /// action buttons are greyed out on a fully empty sheet.
   const [sheetHasContent, setSheetHasContent] = useState(false)
@@ -1355,6 +1357,8 @@ export function App(): React.JSX.Element {
       getDeps: () => (lazyWorkbookRef.current ? sheetsSkillDeps() : null),
       getSaveContext: () => saveContext(),
       exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
+      getDirty: () => pendingEditsRef.current > 0,
+      onSaved: () => { setPendingEdits(0) },
     })
     // live theme switching: main.tsx updates data-theme first (its listener
     // registered at bootstrap), so reading the attribute here is safe; the

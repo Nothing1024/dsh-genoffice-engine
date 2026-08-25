@@ -1377,6 +1377,10 @@ export function App() {
           fileCtxRef.current.doc?.fileName ?? CONTROL_PATH?.split('/').pop() ?? 'document.docx'
         return { bytes, name }
       },
+      getDirty: () => isDocDirty(fileCtxRef.current),
+      onSaved: () => {
+        fileCtxRef.current.dirtyRef.current = false
+      },
     })
     return () => handle?.close()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- control mode arms once per editor instance

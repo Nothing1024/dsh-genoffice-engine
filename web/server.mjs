@@ -26,7 +26,7 @@
  */
 import { createServer } from 'node:http'
 import { execFile } from 'node:child_process'
-import { readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { link, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -160,8 +160,10 @@ async function readJsonCapped(req, maxBytes) {
   return JSON.parse(raw)
 }
 
-/** atomic write-back: tmp in the same directory + rename (BR-004, INV-003) */
-async function writeFileAtomic(absPath, buf, expectedMtimeMs) {
+/** atomic write-back: tmp in the same directory + rename (BR-004, INV-003).
+ *  exclusive: skip mtime, wx tmp then link(tmp, dest); EEXIST → exists; never overwrite dest. */
+async function writeFileAtomic(absPath, buf, expectedMtimeMs, opts = {}) {
+  const exclusive = opts.exclusive === true
   const parent = dirname(absPath)
   if (!existsSync(parent) || !statSync(parent).isDirectory()) {
     return { ok: false, error: `parent directory does not exist: ${parent}` }
@@ -169,6 +171,17 @@ async function writeFileAtomic(absPath, buf, expectedMtimeMs) {
   const tmpPath = join(parent, `.genoffice-write-${randomUUID()}.tmp`)
   try {
     await writeFile(tmpPath, buf, { flag: 'wx' })
+    if (exclusive) {
+      try {
+        await link(tmpPath, absPath)
+      } catch (e) {
+        if (e && typeof e === 'object' && e.code === 'EEXIST') {
+          return { ok: false, error: 'exists' }
+        }
+        throw e
+      }
+      return { ok: true }
+    }
     if (expectedMtimeMs !== undefined && expectedMtimeMs !== null) {
       let st = null
       try {
@@ -789,13 +802,17 @@ async function handleApi(req, res, pathname, body, url) {
     }
 
     if (op === 'export') {
-      const conn = executors.get(docId)
-      if (!conn) {
-        return json(res, 200, { ok: false, error: 'executor not registered' })
-      }
       const requestPath = typeof parsed.path === 'string' ? parsed.path : null
       if (requestPath !== null && !isAbsolute(requestPath)) {
         return json(res, 400, { ok: false, error: 'invalid path' })
+      }
+      const saveAs = typeof parsed.saveAs === 'string' ? parsed.saveAs : null
+      if (saveAs !== null && !isAbsolute(saveAs)) {
+        return json(res, 200, { ok: false, error: 'invalid saveAs' })
+      }
+      const conn = executors.get(docId)
+      if (!conn) {
+        return json(res, 200, { ok: false, error: 'executor not registered' })
       }
       const requestId = randomUUID()
       const resultPromise = waitForResult(requestId, docId, EXPORT_TTL_MS, conn)
@@ -828,10 +845,23 @@ async function handleApi(req, res, pathname, body, url) {
       if (buf.length > MAX_FILE_BYTES) {
         return json(res, 413, { ok: false, error: 'file too large' })
       }
-      const expected = mtimeMs !== undefined && mtimeMs !== null ? mtimeMs : parsed.expectedMtimeMs
-      const written = await writeFileAtomic(path, buf, expected)
+      const dest = saveAs ?? path
+      const exclusive = saveAs !== null
+      const expected = exclusive
+        ? undefined
+        : (mtimeMs !== undefined && mtimeMs !== null ? mtimeMs : parsed.expectedMtimeMs)
+      const written = await writeFileAtomic(dest, buf, expected, { exclusive })
       if (!written.ok) return json(res, 200, written)
-      return json(res, 200, { ok: true, path, name })
+      let destMtimeMs = null
+      try {
+        destMtimeMs = (await stat(dest)).mtimeMs
+      } catch (e) {
+        console.error('[export] stat after write failed', dest, e)
+      }
+      if (!saveAs) {
+        pushTo(docId, 'saved', { mtimeMs: destMtimeMs })
+      }
+      return json(res, 200, { ok: true, path: dest, name, mtimeMs: destMtimeMs })
     }
   }
 
@@ -900,7 +930,13 @@ async function handleApi(req, res, pathname, body, url) {
     }
     const written = await writeFileAtomic(target, buf, parsed.expectedMtimeMs)
     if (!written.ok) return json(res, 200, written)
-    return json(res, 200, { ok: true, path: target })
+    let mtimeMs = null
+    try {
+      mtimeMs = (await stat(target)).mtimeMs
+    } catch (e) {
+      console.error('[file] stat after write failed', target, e)
+    }
+    return json(res, 200, { ok: true, path: target, mtimeMs })
   }
 
   // directory listing for the sidebar file browser: same security policy as
@@ -1180,6 +1216,15 @@ const server = createServer(async (req, res) => {
 })
 
 // loopback-only by default (localhost tooling; set HOST=0.0.0.0 to expose)
+server.on('error', (err) => {
+  const code = err && err.code
+  if (code === 'EADDRINUSE') {
+    console.error(`[genoffice-web] listen EADDRINUSE ${HOST}:${PORT} — another process already bound this port`)
+  } else {
+    console.error('[genoffice-web] listen error:', err)
+  }
+  process.exit(1)
+})
 server.listen(PORT, HOST, () => {
   console.log(`[genoffice-web] serving: ${roots.map((r) => r.app).join(', ')}`)
   console.log(`[genoffice-web] http://localhost:${PORT}   (health: /api/health)`)

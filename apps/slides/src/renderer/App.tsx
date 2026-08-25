@@ -282,6 +282,8 @@ export function App() {
   const zoomBoxRef = useRef<HTMLDivElement | null>(null)
   const [scaleBox, setScaleBox] = useState<{ w: number; h: number } | null>(null)
   const [dirty, setDirty] = useState(false)
+  const dirtyFlagRef = useRef(false)
+  dirtyFlagRef.current = dirty
   const [status, setStatus] = useState('')
   // Status messages auto-dismiss after 4s: operation feedback needs only a brief showing; persistent info (page number/file name) lives on the left and in the title bar
   useEffect(() => {
@@ -1128,6 +1130,8 @@ export function App() {
   useEffect(() => {
     const handle = initControlMode({
       exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
+      getDirty: () => dirtyFlagRef.current,
+      onSaved: () => { setDirty(false) },
       getDeckAccess: (): DeckAccess | null => {
         const ctx = ctxRef.current
         if (!ctx) return null
