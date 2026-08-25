@@ -1268,6 +1268,20 @@ export function App(): React.JSX.Element {
     void window.desktopApi.getAiSettings().then(setAiSettingsState)
   }, [])
 
+  // Register the control executor before Univer finishes booting (UF-004):
+  // waiting on createUniver left xlsx registered:false past the 20s open poll.
+  useEffect(() => {
+    const handle = initControlMode({
+      getDeps: () => (lazyWorkbookRef.current ? sheetsSkillDeps() : null),
+      getSaveContext: () => saveContext(),
+      exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
+      getDirty: () => pendingEditsRef.current > 0,
+      onSaved: () => { setPendingEdits(0) },
+    })
+    return () => handle?.close()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- arm once; call-time state via refs
+  }, [])
+
   useEffect(() => {
     // Univer paints the grid on canvas, so it can't follow the CSS tokens —
     // mirror the <html data-theme> state into its official darkMode flag
@@ -1353,13 +1367,6 @@ export function App(): React.JSX.Element {
     // Control-mode adapter (genoffice-dsh-office): registers the executor and
     // serves tool/context/export over the relay control plane (BR-001/BR-003).
     // Non-control loads return null — zero side effects (INV-001).
-    const controlHandle = initControlMode({
-      getDeps: () => (lazyWorkbookRef.current ? sheetsSkillDeps() : null),
-      getSaveContext: () => saveContext(),
-      exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
-      getDirty: () => pendingEditsRef.current > 0,
-      onSaved: () => { setPendingEdits(0) },
-    })
     // live theme switching: main.tsx updates data-theme first (its listener
     // registered at bootstrap), so reading the attribute here is safe; the
     // matchMedia listener covers OS appearance flips while in system mode
@@ -2310,7 +2317,6 @@ export function App(): React.JSX.Element {
     return () => {
       unsubscribeMenu()
       unsubscribeCloseSave()
-      controlHandle?.close()
       offThemeChanged?.()
       undoRedoSub.unsubscribe()
       prefersDark.removeEventListener('change', applyUniverDark)

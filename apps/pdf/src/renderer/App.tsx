@@ -235,7 +235,14 @@ import {
   IconAiKeyPoints,
 } from './icons'
 
-GlobalWorkerOptions.workerSrc = workerUrl
+try {
+  // Real module Worker avoids pdf.js falling through to the "fake worker"
+  // dynamic import (that path 404s as HTML when the relay is bouncing).
+  GlobalWorkerOptions.workerPort = new Worker(workerUrl, { type: 'module' })
+} catch (err) {
+  console.warn('[pdf] module worker failed, falling back to workerSrc', err)
+  GlobalWorkerOptions.workerSrc = workerUrl
+}
 
 const DRAW_TOOLS = [
   { tool: 'ink' as const, icon: IconInk, key: 'drawInk' as const },

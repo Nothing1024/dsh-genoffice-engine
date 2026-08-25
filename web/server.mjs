@@ -26,12 +26,13 @@
  */
 import { createServer } from 'node:http'
 import { execFile } from 'node:child_process'
-import { link, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { extname, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { preflightDest, writeFileAtomic } from './write-atomic.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -160,52 +161,6 @@ async function readJsonCapped(req, maxBytes) {
   return JSON.parse(raw)
 }
 
-/** atomic write-back: tmp in the same directory + rename (BR-004, INV-003).
- *  exclusive: skip mtime, wx tmp then link(tmp, dest); EEXIST → exists; never overwrite dest. */
-async function writeFileAtomic(absPath, buf, expectedMtimeMs, opts = {}) {
-  const exclusive = opts.exclusive === true
-  const parent = dirname(absPath)
-  if (!existsSync(parent) || !statSync(parent).isDirectory()) {
-    return { ok: false, error: `parent directory does not exist: ${parent}` }
-  }
-  const tmpPath = join(parent, `.genoffice-write-${randomUUID()}.tmp`)
-  try {
-    await writeFile(tmpPath, buf, { flag: 'wx' })
-    if (exclusive) {
-      try {
-        await link(tmpPath, absPath)
-      } catch (e) {
-        if (e && typeof e === 'object' && e.code === 'EEXIST') {
-          return { ok: false, error: 'exists' }
-        }
-        throw e
-      }
-      return { ok: true }
-    }
-    if (expectedMtimeMs !== undefined && expectedMtimeMs !== null) {
-      let st = null
-      try {
-        st = statSync(absPath)
-      } catch {
-        /* original missing → conflict */
-      }
-      if (!st || Math.abs(st.mtimeMs - Number(expectedMtimeMs)) > 100) {
-        return { ok: false, error: 'conflict' }
-      }
-    }
-    await rename(tmpPath, absPath)
-    return { ok: true }
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) }
-  } finally {
-    try {
-      await rm(tmpPath, { force: true })
-    } catch {
-      /* best-effort tmp cleanup */
-    }
-  }
-}
-
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -224,6 +179,7 @@ const MIME = {
   '.otf': 'font/otf',
   '.ico': 'image/x-icon',
   '.map': 'application/json',
+  '.wasm': 'application/wasm',
 }
 
 /** find the first existing web-dist dir among the apps (shell first = the home screen) */
@@ -810,6 +766,11 @@ async function handleApi(req, res, pathname, body, url) {
       if (saveAs !== null && !isAbsolute(saveAs)) {
         return json(res, 200, { ok: false, error: 'invalid saveAs' })
       }
+      const destHint = saveAs ?? requestPath
+      if (destHint !== null) {
+        const pre = await preflightDest(destHint, saveAs !== null)
+        if (!pre.ok) return json(res, 200, pre)
+      }
       const conn = executors.get(docId)
       if (!conn) {
         return json(res, 200, { ok: false, error: 'executor not registered' })
@@ -1145,9 +1106,9 @@ async function serveStatic(res, pathname, roots) {
   const safe = normalize(rest).replace(/^(\.\.[/\\])+/, '')
   let filePath = join(app.dir, safe)
   if (!filePath.startsWith(app.dir)) filePath = join(app.dir, 'index.html')
+  const ext = extname(filePath).toLowerCase()
   try {
     let data = await readFile(filePath)
-    const ext = extname(filePath).toLowerCase()
     if (ext === '' || ext === '.html') {
       // SPA fallback for extensionless asset paths
       if (!existsSync(filePath)) filePath = join(app.dir, 'index.html')
@@ -1158,6 +1119,12 @@ async function serveStatic(res, pathname, roots) {
     res.writeHead(200, { 'Content-Type': MIME[ext] ?? 'application/octet-stream' })
     res.end(data)
   } catch {
+    // Never SPA-fallback hashed assets (.mjs/.js/.wasm/…): a 200 HTML body
+    // makes pdf.js "fake worker" dynamic import fail with a useless 200.
+    if (ext !== '' && ext !== '.html' && ext !== '.htm') {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+      return res.end('404')
+    }
     try {
       const data = await readFile(join(app.dir, 'index.html'))
       res.writeHead(200, { 'Content-Type': MIME['.html'] })
