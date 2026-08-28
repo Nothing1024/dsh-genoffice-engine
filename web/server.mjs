@@ -539,7 +539,17 @@ async function bingImageSearch(query, maxResults) {
 
 async function handleApi(req, res, pathname, body, url) {
   if (req.method === 'GET' && pathname === '/api/health') {
-    return json(res, 200, { ok: true, name: 'genoffice-web-relay', port: PORT })
+    // ready/roots are recomputed per request: a moved/renamed engine checkout
+    // keeps the API alive while static serving 404s (liveness ≠ readiness).
+    const live = findStaticRoots()
+    return json(res, 200, {
+      ok: true,
+      name: 'genoffice-web-relay',
+      port: PORT,
+      ready: live.length > 0,
+      roots: live.map((r) => r.app),
+      executors: executors.size,
+    })
   }
 
   // remote file proxy: /docs/?open=https://… opens files from any CORS-free host
@@ -975,7 +985,7 @@ async function handleApi(req, res, pathname, body, url) {
     } catch {
       /* keep raw */
     }
-    const token = crypto.randomUUID()
+    const token = randomUUID()
     injectedFiles.set(token, { bytes: buf, name: decodedName, at: Date.now() })
     return json(res, 200, { ok: true, token, name: decodedName })
   }
@@ -1130,8 +1140,17 @@ async function serveStatic(res, pathname, roots) {
       res.writeHead(200, { 'Content-Type': MIME['.html'] })
       return res.end(data)
     } catch {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-      return res.end('404 Not Found — run `npm run web` to build the app first')
+      // Human-readable degrade page: the plugin iframe lands here when the
+      // engine checkout moved or web-dist was never built.
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' })
+      return res.end(
+        '<!doctype html><meta charset="utf-8"><title>GenOffice 404</title>'
+        + '<body style="font: 14px/1.7 system-ui; padding: 2em; color: #444">'
+        + '<h3>GenOffice 静态资源不可达</h3>'
+        + '<p>web-dist 未构建，或 relay 启动后引擎目录被移动/改名（API 仍活着但静态页丢失）。</p>'
+        + '<pre>cd engine &amp;&amp; npm run web          # 构建 web-dist\n'
+        + 'node scripts/dev.mjs start-relay   # 重启/替换 relay</pre>',
+      )
     }
   }
 }
