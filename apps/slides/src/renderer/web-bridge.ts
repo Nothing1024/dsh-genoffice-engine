@@ -94,6 +94,7 @@ import {
   type TableStructureOp,
   type TableStyleEdit,
 } from '@genoffice/pptx-engine'
+import { matchesElementRef } from '@genoffice/pptx-engine/identity'
 import {
   beginHistoryBatch,
   EMU_PER_PT,
@@ -794,7 +795,7 @@ const slidesApi: SlidesApi = {
     if (!session) return null
     const slide = session.opened.deck.slides[op.slideIndex]
     if (!slide) return null
-    const elIdx = slide.elements.findIndex((el) => el.id === op.sourceId)
+    const elIdx = slide.elements.findIndex((el) => matchesElementRef(el, op.sourceId))
     pushHistory(session)
     const edit = tableStyleEditFromOp(session, op)
     if (!editTableStyle(slide, op.sourceId, edit)) {
@@ -845,7 +846,7 @@ const slidesApi: SlidesApi = {
       return null
     }
     if (op.boxPx && op.fitWidthPx) {
-      const el = slide.elements.find((x) => x.id === op.sourceId)
+      const el = slide.elements.find((x) => matchesElementRef(x, op.sourceId))
       if (el) {
         el.transform = {
           ...el.transform,
@@ -1090,7 +1091,7 @@ const slidesApi: SlidesApi = {
       .map((id) =>
         op.groupId
           ? findGroupChild(slide, op.groupId, id)?.child
-          : slide.elements.find((el) => el.id === id),
+          : slide.elements.find((el) => matchesElementRef(el, id)),
       )
       .filter((el): el is NonNullable<typeof el> => !!el)
     if (targets.length === 0) return null
@@ -1387,7 +1388,7 @@ const slidesApi: SlidesApi = {
     if (!session) return null
     const slide = session.opened.deck.slides[op.slideIndex]
     if (!slide) return null
-    const elIdx = slide.elements.findIndex((el) => el.id === op.sourceId)
+    const elIdx = slide.elements.findIndex((el) => matchesElementRef(el, op.sourceId))
     const chartEl = slide.elements[elIdx] as { type?: string; descr?: string } | undefined
     if (chartEl?.type === 'chart' && chartEl.descr !== 'aislides-chart') {
       const ok = window.confirm(

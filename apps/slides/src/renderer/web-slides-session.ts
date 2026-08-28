@@ -49,6 +49,7 @@ import {
   type Slide,
   type TextElement,
 } from '@genoffice/pptx-engine'
+import { matchesElementRef } from '@genoffice/pptx-engine/identity'
 import {
   buildRenderSlide,
   HeuristicMetrics,
@@ -261,7 +262,7 @@ export function rebuildSlideWithReparse(
 // ── element lookup ──────────────────────────────────────────────────────
 
 function findEl(slide: Slide, sourceId: string): TextElement | undefined {
-  const el = slide.elements.find((e) => e.id === sourceId)
+  const el = slide.elements.find((e) => matchesElementRef(e, sourceId))
   if (el && (el.type === 'text' || el.type === 'shape')) return el as TextElement
   return undefined
 }
@@ -389,7 +390,7 @@ export function webEditTransform(
 ): RenderSlide | null {
   const slide = session.opened.deck.slides[op.slideIndex]
   if (!slide) return null
-  const el = op.groupId ? null : slide.elements.find((x) => x.id === op.sourceId)
+  const el = op.groupId ? null : slide.elements.find((x) => matchesElementRef(x, op.sourceId))
   const grpChild = op.groupId ? findGroupChild(slide, op.groupId, op.sourceId) : null
   if (!el && !grpChild) return null
   if (!op.preview) pushHistory(session)
@@ -442,7 +443,7 @@ export function webBatchEditTransform(
   const pairs: Array<{ el: (typeof slide.elements)[0]; item: BatchEditTransformOp['items'][0] }> =
     []
   for (const item of op.items) {
-    const el = slide.elements.find((x) => x.id === item.sourceId)
+    const el = slide.elements.find((x) => matchesElementRef(x, item.sourceId))
     if (!el) return null
     pairs.push({ el, item })
   }
@@ -531,7 +532,8 @@ export function webEditStroke(session: WebSlideSession, op: EditStrokeOp): Rende
   // Unlike findEl, pictures are strokable too (picture border)
   const el = slide.elements.find(
     (x) =>
-      x.id === op.sourceId && (x.type === 'text' || x.type === 'shape' || x.type === 'picture'),
+      matchesElementRef(x, op.sourceId) &&
+      (x.type === 'text' || x.type === 'shape' || x.type === 'picture'),
   ) as TextElement | undefined
   if (!el) return null
   pushHistory(session)
@@ -614,7 +616,7 @@ export function webDeleteElement(
 ): RenderSlide | null {
   const slide = session.opened.deck.slides[op.slideIndex]
   if (!slide) return null
-  const index = slide.elements.findIndex((e) => e.id === op.sourceId)
+  const index = slide.elements.findIndex((e) => matchesElementRef(e, op.sourceId))
   if (index < 0) return null
   pushHistory(session)
   slide.elements.splice(index, 1)
