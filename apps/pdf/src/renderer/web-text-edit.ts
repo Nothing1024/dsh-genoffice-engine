@@ -1542,24 +1542,30 @@ export function verifyTextEdits(
           // compatibility ideograph U+F900 extracts as U+8C48) — the glyph on the page is
           // right, only the reverse mapping differs, and that must not abort the save
           const canon = (s: string) => norm(s.normalize('NFC'))
-          const pageText = canon(
-            collectTextObjects(m, page, textPage)
-              .map((o) => o.text)
-              .join(''),
-          )
+          const objects = collectTextObjects(m, page, textPage)
+          const pageText = canon(objects.map((o) => o.text).join(''))
+          // pdfium's text page drops characters whose boxes coincide with ones it has
+          // already collected, so a run drawn on the same spot as an earlier one extracts
+          // as an empty object (repeated inserts at one origin hit this). Its glyphs are
+          // on the page: reading that as data loss would refuse the save and leave the
+          // document unsaveable, so an empty object stands in for one unextractable line.
+          let deduped = objects.filter((o) => o.text.length === 0).length
           for (const newText of texts) {
             // Every non-empty line must be extractable (rebuilt runs are one object per line)
             const missing = newText
               .split('\n')
               .map(canon)
               .filter((l) => l.length > 0 && !pageText.includes(l))
-            if (missing.length > 0) {
-              const snippet = missing[0]!.slice(0, 20)
-              failures.push({
-                pageIndex,
-                reason: `replacement text missing from saved output ("${snippet}")`,
-              })
+            if (missing.length === 0) continue
+            if (deduped >= missing.length) {
+              deduped -= missing.length
+              continue
             }
+            const snippet = missing[0]!.slice(0, 20)
+            failures.push({
+              pageIndex,
+              reason: `replacement text missing from saved output ("${snippet}")`,
+            })
           }
         } finally {
           m._FPDFText_ClosePage(textPage)

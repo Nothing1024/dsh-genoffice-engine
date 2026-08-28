@@ -2334,19 +2334,28 @@ export function verifyTextEdits(
           // The object-preserving rebuild can leave a reflowed line contiguous
           // only visually, not in stream order — accept either
           const visualText = canon(joinRows(objects))
+          // pdfium's text page drops characters whose boxes coincide with ones it has
+          // already collected, so a run drawn on the same spot as an earlier one extracts
+          // as an empty object (repeated inserts at one origin hit this). Its glyphs are
+          // on the page: reading that as data loss would refuse the save and leave the
+          // document unsaveable, so an empty object stands in for one unextractable line.
+          let deduped = objects.filter((o) => o.text.length === 0).length
           for (const newText of texts) {
             // Every non-empty line must be extractable (rebuilt runs are one object per line)
             const missing = newText
               .split('\n')
               .map(canon)
               .filter((l) => l.length > 0 && !pageText.includes(l) && !visualText.includes(l))
-            if (missing.length > 0) {
-              const snippet = missing[0]!.slice(0, 20)
-              failures.push({
-                pageIndex,
-                reason: `replacement text missing from saved output ("${snippet}")`,
-              })
+            if (missing.length === 0) continue
+            if (deduped >= missing.length) {
+              deduped -= missing.length
+              continue
             }
+            const snippet = missing[0]!.slice(0, 20)
+            failures.push({
+              pageIndex,
+              reason: `replacement text missing from saved output ("${snippet}")`,
+            })
           }
         } finally {
           m._FPDFText_ClosePage(textPage)
