@@ -27,6 +27,7 @@ import type {
   AddSlideOp,
   AddBlankSlideOp,
   AddTableOp,
+  ApplyEditScriptOp,
   ApplyTxnOp,
   ApplyTxnResult,
   BatchEditTransformOp,
@@ -58,7 +59,10 @@ import type {
   UngroupElementOp,
   UiTheme,
 } from '../shared/ipc'
-import { runTxn } from '../main/ops/executor'
+// The barrel, not ./ops/executor: importing the executor alone leaves the op
+// registry empty, and every transaction fails with `unknown op`.
+import { runTxn } from '../main/ops'
+import { mapScriptOps } from '../main/ops/script-map'
 import type { RenderSlide } from '@genoffice/pptx-render'
 import type { AiSettings, AiStreamChunk, AiStreamRequest } from '@genoffice/ai-provider'
 import { defaultAiSettings, streamForProvider } from '@genoffice/ai-provider'
@@ -735,7 +739,25 @@ const slidesApi: SlidesApi = {
     endHistoryBatch(session)
     return null
   },
-  applyEditScript: async () => notAvailable('applyEditScript'),
+  // Mirrors the Electron `slides:apply-edit-script` handler: the script's collected
+  // primitives compile to ops (script-map) and apply as one transaction. Autofit
+  // write-back is a main-process render concern the web session does not model.
+  applyEditScript: async (req: ApplyEditScriptOp) => {
+    const session = getWebSession()
+    if (!session) return null
+    const ops = mapScriptOps(session.opened, req)
+    if (ops.length === 0) return null
+    const plan = runTxn(session.opened, { ops, dryRun: true })
+    if (plan.failures?.length) return { error: plan.failures[0]!.error }
+    pushHistory(session)
+    const r = runTxn(session.opened, { ops })
+    if (!r.applied) {
+      session.undoStack.pop()
+      return { error: r.failures?.[0]?.error ?? 'the transaction could not be applied' }
+    }
+    const rendered = rebuildSlide(session, req.slideIndex)
+    return rendered ? { slide: rendered } : null
+  },
   applyTxn: async (req: ApplyTxnOp): Promise<ApplyTxnResult | null> => {
     const session = getWebSession()
     if (!session) return null
