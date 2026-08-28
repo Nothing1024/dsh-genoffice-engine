@@ -80,6 +80,14 @@ export interface ControlAdapterOptions {
   getDirty?: () => boolean
   /** clear the editor dirty source after a successful write-back (BR-004) */
   onSaved?: () => void
+  /**
+   * The pending edits are now part of the session document (BR-008 applies the save
+   * request to the in-memory bytes before serializing). Unlike the other adapters —
+   * which serialize whole editor state and are therefore idempotent — a PDF export
+   * merges a delta, so the renderer must drop what was merged here; leaving it pending
+   * makes the next export apply the same markups and inserted runs a second time.
+   */
+  onMerged?: () => void
 }
 
 export interface ControlHandle {
@@ -105,6 +113,8 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let dirtyTimer: ReturnType<typeof setInterval> | null = null
   let lastDirty: boolean | undefined
+  /** merged into the session document but not yet acknowledged on disk */
+  let unwritten = false
   const reportDirty = (id: string, dirty: boolean): void => {
     lastDirty = dirty
     if (window.parent !== window) {
@@ -117,7 +127,9 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     es?.close()
     es = new EventSource(`/api/control/stream?docId=${docId}`)
     es.onopen = () => console.log(`[control] stream open (docId=${docId.slice(0, 8)}…)`)
-    es.addEventListener('hello', () => console.log(`[control] executor registered (${CONTROL_PATH})`))
+    es.addEventListener('hello', () =>
+      console.log(`[control] executor registered (${CONTROL_PATH})`),
+    )
     es.addEventListener('tool', (ev) => {
       void handleTool(docId, ev as MessageEvent)
     })
@@ -136,6 +148,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
         return
       }
       if (typeof data.mtimeMs === 'number') mtimeMs = data.mtimeMs
+      unwritten = false
       opts.onSaved?.()
       reportDirty(docId, false)
     })
@@ -143,7 +156,9 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
       console.warn('[control] stream error — reconnecting…')
       es?.close()
       if (document.visibilityState === 'visible') {
-        reconnectTimer = setTimeout(() => { void openStream() }, 1000)
+        reconnectTimer = setTimeout(() => {
+          void openStream()
+        }, 1000)
       }
     }
   }
@@ -157,8 +172,18 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     }
     const requestId = data.requestId
     const call = data.call
-    if (!call || typeof call.input !== 'object' || call.input === null || Array.isArray(call.input)) {
-      await notify(docId, 'tool-result', requestId, errorExecution('invalid input', call?.name ?? 'unknown'))
+    if (
+      !call ||
+      typeof call.input !== 'object' ||
+      call.input === null ||
+      Array.isArray(call.input)
+    ) {
+      await notify(
+        docId,
+        'tool-result',
+        requestId,
+        errorExecution('invalid input', call?.name ?? 'unknown'),
+      )
       return
     }
     const deps = opts.getDeps()
@@ -175,7 +200,10 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
         docId,
         'tool-result',
         requestId,
-        errorExecution(`tool execution failed: ${e instanceof Error ? e.message : String(e)}`, call.name),
+        errorExecution(
+          `tool execution failed: ${e instanceof Error ? e.message : String(e)}`,
+          call.name,
+        ),
       )
     }
   }
@@ -206,6 +234,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     try {
       // Apply the CURRENT renderer state to the in-memory bytes first (BR-008:
       // the save request is the same payload a ⌘S/autosave would produce)
+      const hadEdits = Boolean(opts.getDirty?.())
       const request = opts.getSaveRequest()
       if (request) {
         const result = await window.pdfApi.save(request)
@@ -213,6 +242,12 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
           await notify(docId, 'export', requestId, { error: `export failed: ${result.error}` })
           return
         }
+        // Merged, not yet on disk: the renderer stops listing these edits as pending,
+        // so `unwritten` carries the dirty signal until the write is confirmed —
+        // otherwise a rejected write (conflict, unwritable target) would leave the host
+        // thinking the document is clean while the file still lacks the changes.
+        if (hadEdits) unwritten = true
+        opts.onMerged?.()
       }
       const exported = await opts.exportBytes()
       if (!exported) {
@@ -255,7 +290,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
       const id = await docIdPromise
       if (closed) return
       const tick = (): void => {
-        const dirty = Boolean(opts.getDirty?.())
+        const dirty = Boolean(opts.getDirty?.()) || unwritten
         if (dirty === lastDirty) return
         reportDirty(id, dirty)
       }
@@ -265,7 +300,10 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   }
 
   const onVisibility = (): void => {
-    if (document.visibilityState === 'visible' && (es === null || es.readyState === EventSource.CLOSED)) {
+    if (
+      document.visibilityState === 'visible' &&
+      (es === null || es.readyState === EventSource.CLOSED)
+    ) {
       void openStream()
     }
   }

@@ -3008,6 +3008,49 @@ export default function App() {
     ...(metadata ? { metadata } : {}),
   })
 
+  /** What a save hands to the writer — the post-write reload subtracts exactly this,
+      keeping any edit the user makes while the write is in flight */
+  const savedSnapshot = (
+    edits: LocalTextEdit[],
+    noteFlush: { drawings: LocalDrawing[]; noteEdits: LocalNoteEdit[] },
+  ): SavedSnapshot => ({
+    markupIds: new Set(markups.map((mk) => mk.id)),
+    annotDeleteIds: new Set(annotDeletes.map((d) => d.id)),
+    noteEditIds: new Set(noteFlush.noteEdits.map((e) => e.id)),
+    noteEditWritten: new Map(noteFlush.noteEdits.map((e) => [e.annot.objNum, e.contents])),
+    drawingIds: new Set(noteFlush.drawings.map((dr) => dr.id)),
+    textEditIds: new Set(edits.map((te) => te.id)),
+    textInsertIds: new Set(textInserts.map((insert) => insert.id)),
+    imageEditIds: new Set(imageEdits.map((ie) => ie.id)),
+    stampCfg,
+    formEdits,
+    rotations,
+    metadata,
+    pageMap: new Map(visList.map((origIdx, i) => [origIdx, i])),
+  })
+
+  /** Re-read the document once its edits are part of the bytes and drop the pending ops
+      that were written; the canvas then renders them directly instead of as overlays. */
+  const reloadWithoutSaved = async (snapshot: SavedSnapshot): Promise<void> => {
+    if (!filePath) return
+    try {
+      const el = scrollRef.current
+      const scrollTop = el?.scrollTop ?? 0
+      // Page structure/rotation changes cannot retain their old overlays because
+      // their geometry or page numbers no longer match the newly saved document.
+      const canRetainPreview = rotations.size === 0 && deleted.size === 0 && order === null
+      const renderedPageNos = canRetainPreview
+        ? [...visibleRows].flatMap((rowIdx) => (rows[rowIdx] ?? []).map((origIdx) => origIdx + 1))
+        : []
+      await loadDoc(filePath, doc, snapshot, renderedPageNos)
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollTop
+      })
+    } catch {
+      /* Save already succeeded; a reload failure doesn't block (takes effect on next open) */
+    }
+  }
+
   /** Resolved when the running save() lands; queued saves and Save As serialize behind it */
   const saveInFlightRef = useRef<Promise<boolean> | null>(null)
   /** objNum → /Contents the in-flight save is writing via noteEdits. appliedNoteEdit
@@ -3046,23 +3089,7 @@ export default function App() {
     if (!anythingToSave || !filePath) return Promise.resolve(!anythingToSave)
     // An explicit save opts this file into autosave
     if (!autosave) savedOnceRef.current = true
-    // What this save writes — the post-save reload subtracts exactly this, keeping
-    // any edits the user makes while the write is in flight
-    const snapshot: SavedSnapshot = {
-      markupIds: new Set(markups.map((mk) => mk.id)),
-      annotDeleteIds: new Set(annotDeletes.map((d) => d.id)),
-      noteEditIds: new Set(noteFlush.noteEdits.map((e) => e.id)),
-      noteEditWritten: new Map(noteFlush.noteEdits.map((e) => [e.annot.objNum, e.contents])),
-      drawingIds: new Set(noteFlush.drawings.map((dr) => dr.id)),
-      textEditIds: new Set(edits.map((te) => te.id)),
-      textInsertIds: new Set(textInserts.map((insert) => insert.id)),
-      imageEditIds: new Set(imageEdits.map((ie) => ie.id)),
-      stampCfg,
-      formEdits,
-      rotations,
-      metadata,
-      pageMap: new Map(visList.map((origIdx, i) => [origIdx, i])),
-    }
+    const snapshot = savedSnapshot(edits, noteFlush)
     inFlightNoteWritesRef.current = snapshot.noteEditWritten
     inFlightPageMapRef.current = snapshot.pageMap
     const run = (async (): Promise<boolean> => {
@@ -3081,23 +3108,7 @@ export default function App() {
       if (result.skippedImageEdits && result.skippedImageEdits.length > 0) {
         noticeSkippedImages(result.skippedImageEdits)
       }
-      // Reload: changes are in the file now, canvas renders directly, saved pending ops are cleared
-      try {
-        const el = scrollRef.current
-        const scrollTop = el?.scrollTop ?? 0
-        // Page structure/rotation changes cannot retain their old overlays because
-        // their geometry or page numbers no longer match the newly saved document.
-        const canRetainPreview = rotations.size === 0 && deleted.size === 0 && order === null
-        const renderedPageNos = canRetainPreview
-          ? [...visibleRows].flatMap((rowIdx) => (rows[rowIdx] ?? []).map((origIdx) => origIdx + 1))
-          : []
-        await loadDoc(filePath, doc, snapshot, renderedPageNos)
-        requestAnimationFrame(() => {
-          if (scrollRef.current) scrollRef.current.scrollTop = scrollTop
-        })
-      } catch {
-        /* Save already succeeded; a reload failure doesn't block (takes effect on next open) */
-      }
+      await reloadWithoutSaved(snapshot)
       // Content-derived naming (docs/sheets analog): a shell-created blank still
       // carrying its untitled name takes its file name from the topmost text this
       // save inserted; the main process no-ops for every other file, so
@@ -4759,7 +4770,8 @@ export default function App() {
   const aiApi: PdfAiDeps = {
     doc: () => doc,
     fileName: () => fileName,
-    pageCount: () => sizes.length,    currentPage: () => (visList[currentPage - 1] ?? 0) + 1,
+    pageCount: () => sizes.length,
+    currentPage: () => (visList[currentPage - 1] ?? 0) + 1,
     readOnly: () => readOnly,
     outline: () => outline,
     searchIndex: getSearchIndex,
@@ -4875,14 +4887,30 @@ export default function App() {
   const aiApiRef = useRef<PdfAiDeps | null>(null)
   aiApiRef.current = aiApi
   const buildSaveRequestRef = useRef<(() => SavePdfRequest | null) | null>(null)
-  buildSaveRequestRef.current = () =>
-    filePath ? { path: filePath, ...editsPayload() } : null
+  /** The pending ops the last export handed to the merge, waiting to be subtracted */
+  const controlMergedRef = useRef<SavedSnapshot | null>(null)
+  buildSaveRequestRef.current = () => {
+    if (!filePath) return null
+    // Fold open drafts in, exactly like the ⌘S path: the exported bytes must contain
+    // what the user sees, and the snapshot must cover what the merge consumed
+    const edits = commitTextDraft()
+    const noteFlush = commitNoteEdit()
+    controlMergedRef.current = savedSnapshot(edits, noteFlush)
+    return { path: filePath, ...editsPayload(edits, noteFlush) }
+  }
+  const controlMergedCbRef = useRef<() => void>(() => {})
+  controlMergedCbRef.current = () => {
+    const snapshot = controlMergedRef.current
+    controlMergedRef.current = null
+    if (snapshot) void reloadWithoutSaved(snapshot)
+  }
   useEffect(() => {
     const handle = initControlMode({
       getDeps: () => aiApiRef.current,
       getSaveRequest: () => buildSaveRequestRef.current?.() ?? null,
       exportBytes: () => window.__genofficeExportBytes?.() ?? Promise.resolve(null),
       getDirty: () => dirtyFlagRef.current,
+      onMerged: () => controlMergedCbRef.current(),
     })
     return () => handle?.close()
   }, [])
@@ -5515,44 +5543,44 @@ export default function App() {
             <>
               {/* ---- Genspark AI (first slot: entry + one-click AI actions, docs parity) ---- */}
               {!CONTROL_MODE && (
-              <div className="ribbon-group">
-                <div className="ribbon-group-items">
-                  <button
-                    className={`rb-big ai-entry${aiCollapsed ? '' : ' active'}`}
-                    data-tip={t('aiOpenAssistant')}
-                    onClick={() => setAiCollapsed((v) => !v)}
-                  >
-                    <span className="rb-big-icon">
-                      <GensparkMark size={26} />
-                    </span>
-                    <span>Genspark AI</span>
-                  </button>
-                  <button
-                    className="rb-big ai-entry"
-                    data-tip={t('aiSummarizeBtn')}
-                    onClick={() => runAiPreset(t('aiQuickSummaryPrompt'))}
-                  >
-                    <span className="rb-big-icon">
-                      <span className="ai-feature-icon" aria-hidden="true">
-                        <IconAiSummarize />
+                <div className="ribbon-group">
+                  <div className="ribbon-group-items">
+                    <button
+                      className={`rb-big ai-entry${aiCollapsed ? '' : ' active'}`}
+                      data-tip={t('aiOpenAssistant')}
+                      onClick={() => setAiCollapsed((v) => !v)}
+                    >
+                      <span className="rb-big-icon">
+                        <GensparkMark size={26} />
                       </span>
-                    </span>
-                    <span>{t('aiSummarizeBtn')}</span>
-                  </button>
-                  <button
-                    className="rb-big ai-entry"
-                    data-tip={t('aiKeyPointsBtn')}
-                    onClick={() => runAiPreset(t('aiQuickKeyPointsPrompt'))}
-                  >
-                    <span className="rb-big-icon">
-                      <span className="ai-feature-icon" aria-hidden="true">
-                        <IconAiKeyPoints />
+                      <span>Genspark AI</span>
+                    </button>
+                    <button
+                      className="rb-big ai-entry"
+                      data-tip={t('aiSummarizeBtn')}
+                      onClick={() => runAiPreset(t('aiQuickSummaryPrompt'))}
+                    >
+                      <span className="rb-big-icon">
+                        <span className="ai-feature-icon" aria-hidden="true">
+                          <IconAiSummarize />
+                        </span>
                       </span>
-                    </span>
-                    <span>{t('aiKeyPointsBtn')}</span>
-                  </button>
+                      <span>{t('aiSummarizeBtn')}</span>
+                    </button>
+                    <button
+                      className="rb-big ai-entry"
+                      data-tip={t('aiKeyPointsBtn')}
+                      onClick={() => runAiPreset(t('aiQuickKeyPointsPrompt'))}
+                    >
+                      <span className="rb-big-icon">
+                        <span className="ai-feature-icon" aria-hidden="true">
+                          <IconAiKeyPoints />
+                        </span>
+                      </span>
+                      <span>{t('aiKeyPointsBtn')}</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
               )}
               <div className="ribbon-sep" />
               {markupGroup}
@@ -6086,24 +6114,24 @@ export default function App() {
             CONTROL_MODE must skip the whole dock — an empty .ai-dock still
             occupies --ai-panel-width (360px) and leaves a blank column. */}
         {!CONTROL_MODE && (
-        <div className={`ai-dock${aiCollapsed ? ' collapsed' : ''}`}>
-          {aiCollapsed && (
-            <button
-              className="ai-rail"
-              data-tip={t('aiOpenAssistant')}
-              aria-label={t('aiOpenAssistant')}
-              onClick={() => setAiCollapsed(false)}
-            >
-              <GensparkMark size={22} />
-            </button>
-          )}
-          <AiPanel
-            api={aiApi}
-            preset={aiPreset}
-            onCollapse={() => setAiCollapsed(true)}
-            onRunDone={() => void autoSaveAfterAiRun()}
-          />
-        </div>
+          <div className={`ai-dock${aiCollapsed ? ' collapsed' : ''}`}>
+            {aiCollapsed && (
+              <button
+                className="ai-rail"
+                data-tip={t('aiOpenAssistant')}
+                aria-label={t('aiOpenAssistant')}
+                onClick={() => setAiCollapsed(false)}
+              >
+                <GensparkMark size={22} />
+              </button>
+            )}
+            <AiPanel
+              api={aiApi}
+              preset={aiPreset}
+              onCollapse={() => setAiCollapsed(true)}
+              onRunDone={() => void autoSaveAfterAiRun()}
+            />
+          </div>
         )}
         <div className="app-content">
           <div className="pdf-body">
