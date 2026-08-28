@@ -1,5 +1,7 @@
 # GenOffice
 
+> **Fork 说明**：本仓是 `Nothing1024/dsh-genoffice-engine` —— GenOffice 的**上游魔改**（官方在 remote `upstream` = `genspark-ai/genoffice`，本文其余部分为官方 README 原文）。魔改目标：更好的云端调用与 agent 化（web 端脱离 Electron、relay `web/server.mjs` :8787、控制面 API + agent 工具执行器）。**插件半边**在并列目录 `../plugin`（`Nothing1024/dsh-genoffice`），结合本引擎与 `dsh-better-sidebar` 做成 DSH 插件。细节见 [DSH.md](DSH.md)。
+
 **The world's first full-featured open-source AI Office suite.**
 
 [![License: Apache-2.0](https://img.shields.io/github/license/genspark-ai/genoffice)](LICENSE)

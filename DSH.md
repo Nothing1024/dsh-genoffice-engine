@@ -2,6 +2,8 @@
 
 这是 DSH 侧用的魔改 GenOffice 引擎，**不是**官方仓。
 
+魔改目标：**更好的云端调用与 agent 化**——web 端脱离 Electron 跑通、relay（`web/server.mjs`，:8787）暴露文件/预览/inject 等 HTTP 面、控制面 API（`/api/control/*` + SSE 执行器）让 `../plugin` 的 DSH 插件以工具/技能驱动 docx / markdown / xlsx / pptx / pdf 五族编辑器。
+
 | | |
 |---|---|
 | 本仓 | `Nothing1024/dsh-genoffice-engine`（私仓） |
