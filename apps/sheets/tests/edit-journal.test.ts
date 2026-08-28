@@ -429,7 +429,35 @@ describe('recordSetRangeValues', () => {
     const journal = createEditJournal()
     recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { f: '=SUM(1,2,3)' } } })
     recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { v: 6 } } })
-    expect(journal.cells.get('sheet-1')?.get('0:0')?.formula).toBe('=SUM(1,2,3)')
+    const entry = journal.cells.get('sheet-1')?.get('0:0')
+    expect(entry?.formula).toBe('=SUM(1,2,3)')
+    // The result rides cachedValue, never `value` — the save must write <f>
+    // with a cached <v>, not a literal.
+    expect(entry?.value).toBeNull()
+    expect(entry?.cachedValue).toBe(6)
+  })
+
+  it('drops the previous result when the formula is replaced', () => {
+    const journal = createEditJournal()
+    recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { f: '=SUM(1,2,3)' } } })
+    recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { v: 6 } } })
+    recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { f: '=SUM(1,2)', v: null } } })
+    expect(journal.cells.get('sheet-1')?.get('0:0')?.cachedValue).toBeUndefined()
+    recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { v: 3 } } })
+    expect(journal.cells.get('sheet-1')?.get('0:0')?.cachedValue).toBe(3)
+  })
+
+  it('drops the cached result once the cell becomes a literal', () => {
+    const journal = createEditJournal()
+    recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { f: '=SUM(1,2,3)' } } })
+    recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { v: 6 } } })
+    recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { v: 7, f: null, si: null } } })
+    expect(journal.cells.get('sheet-1')?.get('0:0')).toEqual({
+      row: 0,
+      column: 0,
+      hasValue: true,
+      value: 7,
+    })
   })
 
   it('clears a journaled formula on an explicit editor overwrite (f: null)', () => {

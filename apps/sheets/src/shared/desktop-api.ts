@@ -1387,6 +1387,18 @@ export const workbookNoteStateSchema = z
   })
   .strict()
 
+/// One formula cell's cached result, written into <v> next to the cell's <f>
+/// so the saved file's inputs and outputs agree for readers without a formula
+/// engine.
+export const workbookFormulaCachedValueSchema = z
+  .object({
+    sheetId: z.string().min(1),
+    row: z.number().int().min(0),
+    column: z.number().int().min(0),
+    value: z.union([z.string().max(10_000), z.number(), z.boolean(), z.null()]),
+  })
+  .strict()
+
 /// A table (ListObject) created in the editor this session; the save writes
 /// a new xl/tables part and registers it on the worksheet. The header row is
 /// always the area's first row (headerRowCount=1).
@@ -1620,18 +1632,7 @@ export const workbookSaveRequestSchema = z
     noteStates: z.array(workbookNoteStateSchema).max(1_000),
     /// Recalculated formula-cell values written back into <v> so the saved file's
     /// inputs and outputs agree for readers without a formula engine.
-    formulaValues: z
-      .array(
-        z
-          .object({
-            sheetId: z.string().min(1),
-            row: z.number().int().min(0),
-            column: z.number().int().min(0),
-            value: z.union([z.string().max(10_000), z.number(), z.boolean(), z.null()]),
-          })
-          .strict(),
-      )
-      .max(MAX_SAVE_EDITS),
+    formulaValues: z.array(workbookFormulaCachedValueSchema).max(MAX_SAVE_EDITS),
     /// pivotCacheDefinition paths to flag refreshOnLoad (recomputed pivots).
     pivotCacheRefreshPaths: z.array(z.string().regex(/^xl\/[A-Za-z0-9._/-]+\.xml$/)).max(100),
     /// Pivot output-area expansion after layout growth: on save, the
@@ -2023,6 +2024,7 @@ export type WorkbookCfState = z.infer<typeof workbookCfStateSchema>
 export type WorkbookDvState = z.infer<typeof workbookDvStateSchema>
 export type WorkbookPageSetupState = z.infer<typeof workbookPageSetupStateSchema>
 export type WorkbookNoteState = z.infer<typeof workbookNoteStateSchema>
+export type WorkbookFormulaCachedValue = z.infer<typeof workbookFormulaCachedValueSchema>
 export type WorkbookSheetOp = z.infer<typeof workbookSheetOpSchema>
 export type WorkbookFilterState = z.infer<typeof workbookFilterStateSchema>
 export type WorkbookSaveRequest = z.infer<typeof workbookSaveRequestSchema>

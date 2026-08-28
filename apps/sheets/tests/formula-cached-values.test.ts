@@ -14,11 +14,14 @@ const SHEET = 'Data'
 /** The fixture's D2 is `=SUM(A1:A2)` with a cached value. */
 async function saveWithFormulaValues(
   cells: { row: number; column: number; value: string | number | boolean | null }[],
+  edits: Parameters<typeof applyCellEditsToXlsx>[1] = [
+    // one unrelated value edit so the save has something to do
+    { sheetName: SHEET, row: 0, column: 0, writeValue: true, cell: { value: 1 } },
+  ],
 ) {
   const mutation = await applyCellEditsToXlsx(
     await buildStructureFixture(),
-    // one unrelated value edit so the save has something to do
-    [{ sheetName: SHEET, row: 0, column: 0, writeValue: true, cell: { value: 1 } }],
+    edits,
     [],
     [],
     undefined,
@@ -59,6 +62,24 @@ describe('formula cached values', () => {
     const cell = /<c[^>]*r="D2"[^>]*>[\s\S]*?<\/c>/.exec(xml)?.[0] ?? ''
     expect(cell).toContain('<f>')
     expect(cell).not.toContain('<v>')
+  })
+
+  it('a formula written this session lands with its cached value', async () => {
+    // G5 does not exist in the fixture: the edit creates <c><f>…</f></c>, and the
+    // cached value has to reach the same cell in the same save — otherwise every
+    // reader that does not recalculate sees an empty cell.
+    const xml = await saveWithFormulaValues([{ row: 4, column: 6, value: 30 }], [
+      {
+        sheetName: SHEET,
+        row: 4,
+        column: 6,
+        writeValue: true,
+        cell: { value: null, formula: '=SUM(A1:A2)' },
+      },
+    ] as Parameters<typeof applyCellEditsToXlsx>[1])
+    const cell = /<c[^>]*r="G5"[^>]*>[\s\S]*?<\/c>/.exec(xml)?.[0] ?? ''
+    expect(cell).toContain('<f>SUM(A1:A2)</f>')
+    expect(cell).toContain('<v>30</v>')
   })
 
   it('non-formula cells and missing cells are left alone', async () => {

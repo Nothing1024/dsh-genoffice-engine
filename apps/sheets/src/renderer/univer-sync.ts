@@ -49,6 +49,7 @@ import type {
   WorkbookDvState,
   WorkbookFile,
   WorkbookFilterState,
+  WorkbookFormulaCachedValue,
   WorkbookNoteState,
   WorkbookRangeResult,
   WorkbookRichRun,
@@ -3167,6 +3168,48 @@ export function collectNoteStates(
     noteStates.push({ sheetId, notes })
   }
   return noteStates
+}
+
+/// Cached results for the formulas written this session. Their journaled edit
+/// carries only <f>, so without these the saved cell has no <v> at all and every
+/// reader that does not recalculate (openpyxl data_only, pandas, preview
+/// services) sees it as empty. The engine's live result is the truth; the
+/// journal's own record covers cells the streamed viewport has since evicted.
+export function collectFormulaCachedValues(
+  runtime: UniverRuntime | null,
+  state: LazyWorkbookState,
+): WorkbookFormulaCachedValue[] {
+  const workbook = runtime?.univerAPI.getActiveWorkbook()
+  const values: WorkbookFormulaCachedValue[] = []
+  for (const [sheetId, entries] of state.editJournal.cells) {
+    if (isSheetRemoved(state.editJournal, sheetId)) continue
+    let matrix: ReturnType<ReturnType<UniverWorksheet['getSheet']>['getCellMatrix']> | undefined
+    let matrixResolved = false
+    for (const entry of entries.values()) {
+      if (entry.formula === undefined) continue
+      if (!matrixResolved) {
+        matrixResolved = true
+        matrix = workbook?.getSheetBySheetId(sheetId)?.getSheet().getCellMatrix()
+      }
+      const cell = matrix?.getValue(entry.row, entry.column)
+      const live = cell ? liveFormulaResult(cell) : undefined
+      const value = live ?? entry.cachedValue
+      if (value === undefined) continue
+      values.push({ sheetId, row: entry.row, column: entry.column, value })
+    }
+  }
+  return values
+}
+
+/// Univer keeps a boolean result as 0/1 with t=BOOLEAN; saving that as a bare
+/// number would read back as 0/1 instead of FALSE/TRUE, so restore the type.
+function liveFormulaResult(cell: ICellData): string | number | boolean | undefined {
+  const raw = cell.v
+  if (cell.t === CellValueType.BOOLEAN && (typeof raw === 'number' || typeof raw === 'boolean')) {
+    return Boolean(raw)
+  }
+  if (typeof raw === 'string' || typeof raw === 'boolean') return raw
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined
 }
 
 /// Shared landing path for column filter criteria: the AI op

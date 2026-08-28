@@ -34,6 +34,7 @@ import {
   collectDefinedNamesState,
   collectDvStates,
   collectFilterStates,
+  collectFormulaCachedValues,
   collectNoteStates,
 } from './univer-sync'
 import type { LazyWorkbookState, UniverRuntime } from './univer-state'
@@ -138,21 +139,28 @@ export async function buildSavePayload(
             : { fonts: state.editJournal.theme.fonts }),
         }
   // Recalculated formula results: the engine's values are on screen but
-  // deliberately kept out of the journal (they must not become literals). Send them
-  // separately so the save refreshes each formula cell's cached <v>, keeping its <f>.
-  // A journaled formula is excluded: the overlay may still hold the previous
-  // formula's result when the user saves immediately after entering a replacement.
-  const formulaValues = [...(state.recalc?.overlay ?? [])].flatMap(([sheetId, cells]) =>
-    isSheetRemoved(state.editJournal, sheetId)
-      ? []
-      : [...cells].flatMap(([key, cell]) => {
-          if (cell.v === undefined) return []
-          if (state.editJournal.cells.get(sheetId)?.get(key)?.formula !== undefined) return []
-          const [row, column] = key.split(':').map(Number)
-          if (row === undefined || column === undefined) return []
-          return [{ sheetId, row, column, value: cell.v }]
-        }),
-  )
+  // deliberately kept out of the journal's `value` (they must not become literals).
+  // Send them separately so the save refreshes each formula cell's cached <v>,
+  // keeping its <f>. Two sources, in this order: the IronCalc overlay for the
+  // file's pre-existing formulas, then the journal's own cached results for the
+  // formulas written this session (which the overlay never covers, and which
+  // otherwise reach disk as an <f> with no <v>). A journaled formula is excluded
+  // from the overlay pass: the overlay may still hold the previous formula's
+  // result when the user saves immediately after entering a replacement.
+  const formulaValues = [
+    ...[...(state.recalc?.overlay ?? [])].flatMap(([sheetId, cells]) =>
+      isSheetRemoved(state.editJournal, sheetId)
+        ? []
+        : [...cells].flatMap(([key, cell]) => {
+            if (cell.v === undefined) return []
+            if (state.editJournal.cells.get(sheetId)?.get(key)?.formula !== undefined) return []
+            const [row, column] = key.split(':').map(Number)
+            if (row === undefined || column === undefined) return []
+            return [{ sheetId, row, column, value: cell.v }]
+          }),
+    ),
+    ...collectFormulaCachedValues(ctx.univerRef.current, state),
+  ]
   // The gateway fails closed when these additions ride with structural or
   // sheet changes (their coordinates entangle). Instead of bouncing the
   // user, hold them back and save in two sequential phases: structure

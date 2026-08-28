@@ -28,6 +28,10 @@ export interface JournalEntry {
   readonly hasValue: boolean
   readonly value: string | number | boolean | null
   readonly formula?: string
+  /// The formula engine's last result for `formula`. Never saved as a literal —
+  /// it rides `formulaValues` so the written <f> also gets a cached <v>, which is
+  /// all a reader without a formula engine (openpyxl data_only, pandas) ever sees.
+  readonly cachedValue?: string | number | boolean | null
   readonly style?: WorkbookStyleEdit
   /// Per-run styling of a rich-text cell; value holds the concatenated text.
   readonly rich?: readonly WorkbookRichRun[]
@@ -1570,6 +1574,7 @@ function mergeCellIntoEntry(
   let hasValue = previous?.hasValue ?? false
   let value: JournalEntry['value'] = previous?.value ?? null
   let formula = previous?.formula
+  let cachedValue = previous?.cachedValue
   const formulaText =
     typeof data.f === 'string' && data.f.length > 0
       ? data.f.startsWith('=')
@@ -1583,11 +1588,15 @@ function mergeCellIntoEntry(
     value = null
     formula = formulaText
     rich = undefined
+    // A replacement formula invalidates the previous one's result; the engine
+    // sends the new one as a follow-up `{v}` mutation.
+    cachedValue = isCellValue(data.v) ? data.v : undefined
   } else if (richText !== undefined) {
     hasValue = true
     value = richText.text
     formula = undefined
     rich = richText.runs
+    cachedValue = undefined
   } else if ('v' in data) {
     // The formula engine writes calculation results as bare `{v}` mutations;
     // only an explicit `f: null` (editor overwrite) clears a journaled
@@ -1595,21 +1604,21 @@ function mergeCellIntoEntry(
     const isCalculationResult = previous?.formula !== undefined && !('f' in data)
     const raw = data.v
     if (isCalculationResult) {
-      // keep the journaled formula; the file stores <f> and Excel recalcs
+      // Keep the journaled formula so the file stores <f>, and hold the result
+      // aside as the cached <v> the save writes next to it.
+      cachedValue = isCellValue(raw) ? raw : undefined
     } else if (raw === null || raw === undefined) {
       hasValue = true
       value = null
       formula = undefined
       rich = undefined
-    } else if (
-      typeof raw === 'string' ||
-      typeof raw === 'boolean' ||
-      (typeof raw === 'number' && Number.isFinite(raw))
-    ) {
+      cachedValue = undefined
+    } else if (isCellValue(raw)) {
       hasValue = true
       value = raw
       formula = undefined
       rich = undefined
+      cachedValue = undefined
     }
   }
 
@@ -1620,10 +1629,19 @@ function mergeCellIntoEntry(
     hasValue,
     value,
     ...(formula === undefined ? {} : { formula }),
+    ...(formula !== undefined && cachedValue !== undefined ? { cachedValue } : {}),
     ...(style === undefined ? {} : { style }),
     ...(rich === undefined ? {} : { rich }),
     ...(styleReset ? { styleReset: true } : {}),
   }
+}
+
+function isCellValue(raw: unknown): raw is string | number | boolean {
+  return (
+    typeof raw === 'string' ||
+    typeof raw === 'boolean' ||
+    (typeof raw === 'number' && Number.isFinite(raw))
+  )
 }
 
 function extractRichText(p: unknown): { text: string; runs?: WorkbookRichRun[] } | undefined {
