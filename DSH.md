@@ -10,6 +10,20 @@
 | 官方上游 | `genspark-ai/genoffice`（本仓 remote 名 `upstream`） |
 | 产品插件 | `Nothing1024/dsh-genoffice`（并列目录 `../plugin`） |
 
-本机约定：与产品仓并列，目录名 `engine/`。当前工作分支：`fork/eat-official-engine`。
+仓库约定：与产品仓并列 clone，目录名 `engine/`。当前工作分支：`fork/eat-official-engine`。
 
-拉官方更新：`git fetch upstream`，再合进工作分支。不要把本仓改动推进官方。
+状态：**实验性（experimental）· 维护中**。配套插件适配 DSH `@deepseek-ai/dsh@0.1.0-rc.7` + `dsh-better-sidebar@0.13.0`。
+
+## 跑起来（web 版）
+
+```sh
+npm install
+npm run web        # 构建 shell/docs/markdown 的 web-dist 并启动 relay（127.0.0.1:8787）
+# 其余 app 按需：npm run web:build -w @genoffice/sheets|slides|pdf
+```
+
+浏览器打开 `http://127.0.0.1:8787/`。文件打开协议（`?open=path:…` / `inject:` / `https://…`）、控制面端点与工具名全表见插件仓 `contracts/`（relay-api.md / control-api.md）。relay 默认仅绑 loopback；对外暴露需显式 `GENOFFICE_WEB_OPEN_PATHS=1` 并自行评估安全边界。
+
+## 与官方同步
+
+拉官方更新：`git fetch upstream`，再合进工作分支。不要把本仓改动推进官方。License 随上游（Apache-2.0）。

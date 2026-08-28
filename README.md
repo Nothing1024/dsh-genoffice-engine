@@ -1,6 +1,14 @@
-# GenOffice
+# GenOffice (web + agent fork)
 
-> **Fork 说明**：本仓是 `Nothing1024/dsh-genoffice-engine` —— GenOffice 的**上游魔改**（官方在 remote `upstream` = `genspark-ai/genoffice`，本文其余部分为官方 README 原文）。魔改目标：更好的云端调用与 agent 化（web 端脱离 Electron、relay `web/server.mjs` :8787、控制面 API + agent 工具执行器）。**插件半边**在并列目录 `../plugin`（`Nothing1024/dsh-genoffice`），结合本引擎与 `dsh-better-sidebar` 做成 DSH 插件。细节见 [DSH.md](DSH.md)。
+> **Fork notice / Fork 说明** — This is an **experimental, actively-maintained fork** of [GenOffice](https://github.com/genspark-ai/genoffice) focused on **cloud invocation and agent-ification**: the editors run in a plain browser (no Electron), a zero-dependency relay (`web/server.mjs`, `:8787`, loopback-only by default) exposes file/preview/inject HTTP APIs, and a control plane (`/api/control/*` + SSE executors) lets agents drive the docx / markdown / xlsx / pptx / pdf editors with tools.
+>
+> 本仓是 GenOffice 的**上游魔改**（实验性质、维护中），目标是更好的云端调用与 agent 化：web 端脱离 Electron 直接跑、relay 暴露文件/预览 HTTP 面、控制面让 agent 以工具驱动五族编辑器并原子写回磁盘。
+>
+> Pairs with the DSH plugin [`Nothing1024/dsh-genoffice`](https://github.com/Nothing1024/dsh-genoffice) (targets DSH `@deepseek-ai/dsh@0.1.0-rc.7` + `dsh-better-sidebar@0.13.0`). Quick start & fork details: [DSH.md](DSH.md). Everything below this block is the upstream README.
+>
+> ![GenOffice in the browser](docs/images/web-home.png)
+>
+> ![Agent-driven markdown edit](docs/images/markdown-agent-edit.png)
 
 **The world's first full-featured open-source AI Office suite.**
 
