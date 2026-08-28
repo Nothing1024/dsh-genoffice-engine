@@ -32,7 +32,13 @@ export class WebBuffer extends Uint8Array {
       return new WebBuffer(value)
     }
     if (ArrayBuffer.isView(value)) {
-      return new WebBuffer(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength)
+      // Node copies here. A view would alias the source, and callers rely on the
+      // copy: identityCffCharset mutates its result (which would corrupt the
+      // cached font bytes), and embeddedFontData wraps wasm heap memory that is
+      // freed right after.
+      return WebBuffer.fromBytes(
+        new Uint8Array(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength),
+      )
     }
     if (Array.isArray(value)) {
       return WebBuffer.fromBytes(Uint8Array.from(value as number[]))
@@ -78,14 +84,36 @@ export class WebBuffer extends Uint8Array {
     return { type: 'Buffer', data: [...this] }
   }
 
+  private view(): DataView {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength)
+  }
+
   readUInt32BE(offset: number): number {
-    const dv = new DataView(this.buffer, this.byteOffset, this.byteLength)
-    return dv.getUint32(offset)
+    return this.view().getUint32(offset)
   }
 
   readUInt16BE(offset: number): number {
-    const dv = new DataView(this.buffer, this.byteOffset, this.byteLength)
-    return dv.getUint16(offset)
+    return this.view().getUint16(offset)
+  }
+
+  readInt32BE(offset: number): number {
+    return this.view().getInt32(offset)
+  }
+
+  readInt16BE(offset: number): number {
+    return this.view().getInt16(offset)
+  }
+
+  /** Big-endian unsigned integer of 1–6 bytes (CFF INDEX offsets use 1–4) */
+  readUIntBE(offset: number, byteLength: number): number {
+    let value = 0
+    for (let i = 0; i < byteLength; i++) value = value * 0x100 + this[offset + i]!
+    return value
+  }
+
+  writeUInt16BE(value: number, offset: number): number {
+    this.view().setUint16(offset, value)
+    return offset + 2
   }
 }
 
@@ -109,7 +137,11 @@ function encodeString(value: string, encoding: string): Uint8Array {
     for (let i = 0; i < value.length; i++) dv.setUint16(i * 2, value.charCodeAt(i), true)
     return bytes
   }
-  // utf8 / utf-8 / latin1 / binary (byte-preserving fallback for binary)
+  if (encoding === 'latin1' || encoding === 'binary') {
+    const bytes = new Uint8Array(value.length)
+    for (let i = 0; i < value.length; i++) bytes[i] = value.charCodeAt(i) & 0xff
+    return bytes
+  }
   return new TextEncoder().encode(value)
 }
 
@@ -133,6 +165,16 @@ function decodeString(bytes: Uint8Array, encoding: string): string {
     }
     return out
   }
+  if (encoding === 'latin1' || encoding === 'binary') {
+    // One char per byte: sfnt table tags are compared this way, and UTF-8
+    // decoding would fold any byte >= 0x80 into U+FFFD.
+    let out = ''
+    const CHUNK = 0x8000
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      out += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+    }
+    return out
+  }
   return new TextDecoder('utf-8').decode(bytes)
 }
 
@@ -149,7 +191,9 @@ export { WebBuffer as Buffer }
 
 function sha256Bytes(message: Uint8Array): Uint8Array {
   // SHA-256 (FIPS 180-4), 64-byte blocks, big-endian words
-  const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+  const H = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]
   const K256 = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,

@@ -17,6 +17,7 @@ import type {
   MetadataInput,
   SavePdfRequest,
   TextEditFailure,
+  TextInsertFailure,
 } from '../shared/ipc'
 
 const num = (v: number) => Math.round(v * 100) / 100
@@ -337,6 +338,7 @@ function applyMetadata(pdfDoc: PDFDocument, meta: MetadataInput): void {
  */
 export interface SavePdfSkips {
   skippedTextEdits: TextEditFailure[]
+  skippedTextInserts: TextInsertFailure[]
   skippedImageEdits: ImageEditFailure[]
 }
 
@@ -357,7 +359,7 @@ function finalPageIndex(request: SavePdfRequest, p: number): number | null {
  * Anything that fails here would have been silent data loss; the caller aborts the
  * save before the bytes reach disk, keeping the original file and the pending edits.
  */
-async function verifyContentEdits(
+export async function verifyContentEdits(
   bytes: Uint8Array,
   request: SavePdfRequest,
   skips: SavePdfSkips,
@@ -372,6 +374,18 @@ async function verifyContentEdits(
     const remapped = appliedText.flatMap((e) => {
       const pageIndex = finalPageIndex(request, e.pageIndex)
       return pageIndex === null ? [] : [{ pageIndex, newText: e.newText }]
+    })
+    failures.push(...(await verifyTextEdits(bytes, remapped)))
+  }
+  const appliedInserts = (request.textInserts ?? []).filter(
+    (_insert, editIndex) =>
+      !skips.skippedTextInserts.some((skipped) => skipped.editIndex === editIndex),
+  )
+  if (appliedInserts.length > 0) {
+    const { verifyTextEdits } = await import('./web-text-edit')
+    const remapped = appliedInserts.flatMap((insert) => {
+      const pageIndex = finalPageIndex(request, insert.pageIndex)
+      return pageIndex === null ? [] : [{ pageIndex, newText: insert.text }]
     })
     failures.push(...(await verifyTextEdits(bytes, remapped)))
   }
@@ -399,6 +413,8 @@ export interface AppliedSaveRequest {
   bytes: Uint8Array
   /** Text edits that could not be matched to the document; the rest of the request is in `bytes` */
   skippedTextEdits: TextEditFailure[]
+  /** Same, for newly inserted text runs */
+  skippedTextInserts: TextInsertFailure[]
   /** Same, for content-stream image operations */
   skippedImageEdits: ImageEditFailure[]
 }
@@ -409,6 +425,7 @@ export async function applySaveRequest(
   request: SavePdfRequest,
 ): Promise<AppliedSaveRequest> {
   let skippedTextEdits: TextEditFailure[] = []
+  let skippedTextInserts: TextInsertFailure[] = []
   let skippedImageEdits: ImageEditFailure[] = []
   if (request.textEdits && request.textEdits.length > 0) {
     // Content-stream rewrite must land before pdf-lib touches the bytes: everything
@@ -417,6 +434,15 @@ export async function applySaveRequest(
     const applied = await applyTextEdits(bytes, request.textEdits)
     bytes = applied.bytes
     skippedTextEdits = applied.skipped
+  }
+  if (request.textInserts && request.textInserts.length > 0) {
+    const { applyTextInserts } = await import('./web-text-edit')
+    const applied = await applyTextInserts(bytes, request.textInserts)
+    bytes = applied.bytes
+    skippedTextInserts = applied.skipped
+    for (const s of skippedTextInserts) {
+      console.warn(`[pdf] text insert skipped on page ${s.pageIndex + 1}: ${s.reason}`)
+    }
   }
   if (request.imageEdits && request.imageEdits.length > 0) {
     const { applyImageEdits } = await import('./web-image-edit')
@@ -479,6 +505,7 @@ export async function applySaveRequest(
     return {
       bytes: await pdfDoc.save({ useObjectStreams: false }),
       skippedTextEdits,
+      skippedTextInserts,
       skippedImageEdits,
     }
   } catch (err) {
@@ -489,6 +516,7 @@ export async function applySaveRequest(
     return {
       bytes: await pdfDoc.save({ useObjectStreams: false, updateFieldAppearances: false }),
       skippedTextEdits,
+      skippedTextInserts,
       skippedImageEdits,
     }
   }

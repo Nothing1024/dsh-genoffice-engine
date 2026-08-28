@@ -2,13 +2,27 @@ import { PDFDict, PDFDocument, PDFName, PDFRawStream, decodePDFRawStream } from 
 import { fontCoversText } from './web-font-cmap'
 import { findSystemFont, isTruetype } from './web-font-locate'
 import { identityCffCharset, subsetTtf } from './web-font-subset'
-import { fetchAssetBytes, EDIT_FONT_URLS, FALLBACK_FONT_URL, PDFIUM_WASM_URL } from './web-wasm-assets'
+import {
+  fetchAssetBytes,
+  EDIT_FONT_URLS,
+  FALLBACK_FONT_URL,
+  PDFIUM_WASM_URL,
+} from './web-wasm-assets'
 
-/** fetched bytes are Uint8Array; the engine's font APIs keep desktop Buffer signatures */
+/** fetched bytes are Uint8Array; the engine's font APIs keep desktop Buffer signatures.
+    Buffer.from is required, not a cast: the sfnt readers call readUInt16BE /
+    toString('latin1', start, end), which a bare Uint8Array does not implement —
+    fontCoversText would swallow the TypeError and reject every edit. */
 function asFontBuffer(b: Uint8Array): Buffer {
-  return b as unknown as Buffer
+  return Buffer.from(b)
 }
-import type { TextEditFailure, TextEditInput, TextEditValidation } from '../shared/ipc'
+import type {
+  TextEditFailure,
+  TextEditInput,
+  TextEditValidation,
+  TextInsertFailure,
+  TextInsertInput,
+} from '../shared/ipc'
 import { chainLayers } from '../shared/x-layers'
 
 export const FPDF_PAGEOBJ_TEXT = 1
@@ -132,6 +146,28 @@ async function loadFallbackFont(): Promise<Uint8Array> {
   return fallbackFontBytes
 }
 
+/** Insert-time gate: can any font this build can embed actually draw `text`?
+    The browser bundles LiberationSans only, so CJK and emoji answer false — the
+    dialog reports that up front instead of letting save silently skip the run. */
+export async function canDrawText(
+  text: string,
+  font?: string,
+  bold = false,
+  italic = false,
+): Promise<boolean> {
+  const drawn = text.replace(/[\r\n]/g, '')
+  if (!drawn) return true
+  const style: EditFontStyle =
+    bold && italic ? 'bolditalic' : bold ? 'bold' : italic ? 'italic' : 'regular'
+  const candidates: Uint8Array[] = []
+  if (font) {
+    const chosen = await loadEditFont(font, style).catch(() => null)
+    if (chosen) candidates.push(chosen)
+  }
+  candidates.push(await loadFallbackFont().catch(() => new Uint8Array()))
+  return candidates.some((bytes) => bytes.length > 0 && fontCoversText(asFontBuffer(bytes), drawn))
+}
+
 export type EditFontStyle = 'regular' | 'bold' | 'italic' | 'bolditalic'
 
 /** Font files for the user-selectable rebuild fonts by style, first readable wins
@@ -207,7 +243,10 @@ const EDIT_FONT_PATHS: Record<string, Record<EditFontStyle, string[]>> = {
 
 const editFontCache = new Map<string, Uint8Array | null>()
 
-async function loadEditFont(id: string, style: EditFontStyle = 'regular'): Promise<Uint8Array | null> {
+async function loadEditFont(
+  id: string,
+  style: EditFontStyle = 'regular',
+): Promise<Uint8Array | null> {
   const key = `${id}#${style}`
   let cached = editFontCache.get(key)
   if (cached === undefined) {
@@ -776,7 +815,8 @@ async function rebuildFontBytes(
     // Style variant first, base face as the degrade (never fail the edit over style)
     for (const s of style === 'regular' ? (['regular'] as const) : ([style, 'regular'] as const)) {
       const chosen = await loadEditFont(edit.newFont, s)
-      if (chosen && fontCoversText(asFontBuffer(chosen), drawn)) return subsetTtf(asFontBuffer(chosen), drawn)
+      if (chosen && fontCoversText(asFontBuffer(chosen), drawn))
+        return subsetTtf(asFontBuffer(chosen), drawn)
     }
   } else if (font) {
     if (style !== 'regular') {
@@ -1136,6 +1176,148 @@ export function applyTextEdits(
   edits: TextEditInput[],
 ): Promise<TextEditsResult> {
   return chainPdfium(() => applyTextEditsInner(bytes, edits))
+}
+
+export interface TextInsertsResult {
+  bytes: Uint8Array
+  skipped: TextInsertFailure[]
+}
+
+/** Text-space axes that keep inserted glyphs upright after the page's final /Rotate. */
+export function textInsertAxes(rotate = 0): readonly [number, number, number, number] {
+  switch (((rotate % 360) + 360) % 360) {
+    case 90:
+      return [0, 1, -1, 0]
+    case 180:
+      return [-1, 0, 0, -1]
+    case 270:
+      return [0, -1, 1, 0]
+    default:
+      return [1, 0, 0, 1]
+  }
+}
+
+/** Insert new searchable text objects without matching/removing existing page content.
+    Mirrors main/text-edit.ts applyTextInserts — the web save pipeline must land the same
+    bytes as the desktop one, or a control-plane insert_text would report success and lose
+    the text (nothing else in this file writes inserted runs). */
+export function applyTextInserts(
+  bytes: Uint8Array,
+  inserts: TextInsertInput[],
+): Promise<TextInsertsResult> {
+  return chainPdfium(async () => {
+    const m = await loadPdfium()
+    const skipped: TextInsertFailure[] = []
+    return withDocument(m, bytes, async (doc) => {
+      const pageCount = m._FPDF_GetPageCount(doc)
+      let appliedTotal = 0
+      let embeddedCff = false
+      const byPage = new Map<number, { input: TextInsertInput; editIndex: number }[]>()
+      inserts.forEach((input, editIndex) => {
+        if (input.pageIndex < 0 || input.pageIndex >= pageCount) {
+          skipped.push({ editIndex, pageIndex: input.pageIndex, reason: 'page does not exist' })
+          return
+        }
+        byPage.set(input.pageIndex, [...(byPage.get(input.pageIndex) ?? []), { input, editIndex }])
+      })
+      for (const [pageIndex, pageInserts] of byPage) {
+        const page = m._FPDF_LoadPage(doc, pageIndex)
+        if (!page) throw new Error(`could not load page ${pageIndex + 1}`)
+        let applied = 0
+        try {
+          for (const { input, editIndex } of pageInserts) {
+            if (!input.text.trim()) {
+              skipped.push({ editIndex, pageIndex, reason: 'empty inserted text' })
+              continue
+            }
+            const pseudoEdit: TextEditInput = {
+              pageIndex,
+              rect: [input.origin[0], input.origin[1], input.origin[0], input.origin[1]],
+              oldText: '',
+              newText: input.text,
+              fontSize: input.fontSize,
+              newFontSize: input.fontSize,
+              newColor: input.color,
+              newFont: input.font,
+              newBold: input.bold,
+              newItalic: input.italic,
+            }
+            const created: number[] = []
+            let font = 0
+            try {
+              const fontBytes = await rebuildFontBytes(m, 0, pseudoEdit, input.text)
+              const fontPtr = m._malloc(fontBytes.length)
+              m.HEAPU8.set(fontBytes, fontPtr)
+              font = m._FPDFText_LoadFont(
+                doc,
+                fontPtr,
+                fontBytes.length,
+                isTruetype(fontBytes) ? FPDF_FONT_TRUETYPE : FPDF_FONT_TYPE1,
+                1,
+              )
+              m._free(fontPtr)
+              if (!font) throw new Error('FPDFText_LoadFont failed')
+              const matrixPtr = m._malloc(24)
+              try {
+                const leading = input.lineLeading ?? input.fontSize * LINE_GAP
+                const [a, b, c, d] = textInsertAxes(input.rotate)
+                for (const [lineIndex, line] of input.text.split('\n').entries()) {
+                  if (!line) continue
+                  const obj = m._FPDFPageObj_CreateTextObj(doc, font, input.fontSize)
+                  const textPtr = utf16Ptr(m, line)
+                  const ok = m._FPDFText_SetText(obj, textPtr)
+                  m._free(textPtr)
+                  if (!ok) {
+                    m._FPDFPageObj_Destroy(obj)
+                    throw new Error('FPDFText_SetText failed on inserted object')
+                  }
+                  const offset = input.lineXOffsets?.[lineIndex] ?? 0
+                  const drop = lineIndex * leading
+                  m.HEAPF32.set(
+                    [
+                      a,
+                      b,
+                      c,
+                      d,
+                      input.origin[0] + a * offset - c * drop,
+                      input.origin[1] + b * offset - d * drop,
+                    ],
+                    matrixPtr >> 2,
+                  )
+                  m._FPDFPageObj_SetMatrix(obj, matrixPtr)
+                  m._FPDFPageObj_SetFillColor(
+                    obj,
+                    input.color[0],
+                    input.color[1],
+                    input.color[2],
+                    255,
+                  )
+                  created.push(obj)
+                }
+              } finally {
+                m._free(matrixPtr)
+              }
+              for (const obj of created) m._FPDFPage_InsertObject(page, obj)
+              embeddedCff = !isTruetype(fontBytes) || embeddedCff
+              applied++
+            } catch (err) {
+              for (const obj of created) m._FPDFPageObj_Destroy(obj)
+              skipped.push({ editIndex, pageIndex, reason: errMsg(err) })
+            }
+          }
+          if (applied > 0 && !m._FPDFPage_GenerateContent(page)) {
+            throw new Error(`could not regenerate page ${pageIndex + 1}`)
+          }
+          appliedTotal += applied
+        } finally {
+          m._FPDF_ClosePage(page)
+        }
+      }
+      if (appliedTotal === 0) return { bytes, skipped }
+      const saved = saveDoc(m, doc)
+      return { bytes: embeddedCff ? await relabelOpenTypeFontFiles(saved) : saved, skipped }
+    })
+  })
 }
 
 /** Dry-run matching for pending edits (no mutation). Lets the renderer reject a bad edit

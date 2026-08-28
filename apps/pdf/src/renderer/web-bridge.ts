@@ -27,9 +27,9 @@ import type {
   TextEditValidation,
   UiTheme,
 } from '../shared/ipc'
-import { applySaveRequest } from './web-pdf-save'
+import { applySaveRequest, verifyContentEdits } from './web-pdf-save'
 import { validateTextEdits as validateTextEditsImpl } from './web-text-edit'
-import { listEditFonts as listEditFontsImpl } from './web-text-edit'
+import { listEditFonts as listEditFontsImpl, canDrawText as canDrawTextImpl } from './web-text-edit'
 
 declare global {
   interface Window {
@@ -171,12 +171,21 @@ const pdfApi: PdfApi = {
   save: async (request: SavePdfRequest): Promise<SavePdfResult> => {
     if (!opened) return { ok: false, error: 'no file open' }
     try {
-      const applied = await applySaveRequest(opened.bytes, request)
-      opened = { ...opened, bytes: applied.bytes }
+      const { bytes, ...skips } = await applySaveRequest(opened.bytes, request)
+      // Read-back check before the bytes become the session document, mirroring the
+      // desktop savePdfToPath order: a verify failure keeps the previous bytes and the
+      // pending edits rather than reporting a save that dropped content.
+      await verifyContentEdits(bytes, request, skips)
+      opened = { ...opened, bytes }
       return {
         ok: true,
-        ...(applied.skippedTextEdits.length > 0 ? { skippedTextEdits: applied.skippedTextEdits } : {}),
-        ...(applied.skippedImageEdits.length > 0 ? { skippedImageEdits: applied.skippedImageEdits } : {}),
+        ...(skips.skippedTextEdits.length > 0 ? { skippedTextEdits: skips.skippedTextEdits } : {}),
+        ...(skips.skippedTextInserts.length > 0
+          ? { skippedTextInserts: skips.skippedTextInserts }
+          : {}),
+        ...(skips.skippedImageEdits.length > 0
+          ? { skippedImageEdits: skips.skippedImageEdits }
+          : {}),
       }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
@@ -184,7 +193,12 @@ const pdfApi: PdfApi = {
   },
 
   validateTextEdits: async (request) => {
-    if (!opened) return request.edits.map((e) => ({ pageIndex: e.pageIndex, oldText: e.oldText, reason: 'no file open' }))
+    if (!opened)
+      return request.edits.map((e) => ({
+        pageIndex: e.pageIndex,
+        oldText: e.oldText,
+        reason: 'no file open',
+      }))
     // dry-run MATCH validation (mirror of the desktop main process) — not the
     // apply-then-verify read-back, which would report the replacement missing
     // from unedited bytes
@@ -220,10 +234,17 @@ const pdfApi: PdfApi = {
   exportImages: async () => ({ ok: true, canceled: true }),
 
   imageSearch: async (query, maxResults) => {
-    const res = await relay<{ images: Array<{ title: string; imageUrl: string; sourceUrl: string; width?: number; height?: number }>; method: string; error?: string }>(
-      '/search/image',
-      { query, maxResults: maxResults ?? 6 },
-    )
+    const res = await relay<{
+      images: Array<{
+        title: string
+        imageUrl: string
+        sourceUrl: string
+        width?: number
+        height?: number
+      }>
+      method: string
+      error?: string
+    }>('/search/image', { query, maxResults: maxResults ?? 6 })
     if (res) {
       return {
         images: res.images.map((img) => ({ ...img, source: 'bing' })),
@@ -252,7 +273,7 @@ const pdfApi: PdfApi = {
 
   autoRename: async () => ({ renamed: false }),
   isUntitled: async () => false,
-  canDrawText: async () => true,
+  canDrawText: (text, font, bold, italic) => canDrawTextImpl(text, font, bold, italic),
   listStaticFormFills: async () => [],
   insertBlankPage: async () => ({
     ok: false as const,
