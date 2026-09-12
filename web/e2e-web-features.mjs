@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown', 'html-edit', 'html-docx']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown', 'html-edit', 'html-docx', 'capability']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
@@ -3656,6 +3656,86 @@ async function runHtmlDocx(outDir) {
   }
 }
 
+
+async function runCapability(outDir) {
+  const inventory = parseCsv(readFileSync(INVENTORY, 'utf8'))
+  const capSrc = readFileSync(join(PLUGIN, 'packages/tab-genoffice/src/host/capability.ts'), 'utf8')
+  const tableSrc = readFileSync(join(PLUGIN, 'packages/tab-genoffice/src/host/tool-schema.ts'), 'utf8')
+  const coexistSrc = readFileSync(join(PLUGIN, 'packages/tab-genoffice/src/tabs/coexist.ts'), 'utf8')
+  const previewSrc = readFileSync(join(PLUGIN, 'packages/tab-genoffice/src/tabs/relay.ts'), 'utf8')
+  const toolsSrc = readFileSync(join(PLUGIN, 'packages/tab-genoffice/src/host/tools.ts'), 'utf8')
+  const pluginRow = inventory.filter((row) => row.entry === 'capability-table')
+  const htmlRows = inventory.filter((row) => row.app === 'html')
+  const unowned = inventory.filter((row) => Number(row.implementation_task) < 2 || Number(row.implementation_task) > 19)
+  const claimedAvailable = inventory.filter((row) => row.status === 'available')
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const logs = []
+  try {
+    const health = await fetch(`${relay.base}/api/health`).then((r) => r.json())
+    const htmlPage = await fetch(`${relay.base}/html/?control=1`)
+    const htmlCt = htmlPage.headers.get('content-type') ?? ''
+    const offPort = await freePort(port + 1)
+    const offRelay = await startRelay(offPort, { GENOFFICE_HTML_DOCX_DISABLED: '1' })
+    let offHealth
+    try {
+      offHealth = await fetch(`${offRelay.base}/api/health`).then((r) => r.json())
+    } finally {
+      stopRelay(offRelay)
+    }
+    const successAssertions = [
+      assertion('inventory-owned', unowned.length === 0, 0, unowned.map((r) => `${r.app}:${r.entry}:${r.implementation_task}`)),
+      assertion('html-inventory-available', htmlRows.length >= 3 && htmlRows.every((r) => r.status === 'available'), 'available', htmlRows.map((r) => `${r.entry}:${r.status}`)),
+      assertion('plugin-row-available', pluginRow.length === 1 && pluginRow[0].status === 'available', 'available', pluginRow.map((r) => r.status)),
+      assertion('capability-has-html', /'html:apply_ops'/.test(capSrc) && /'html:export_docx'/.test(capSrc) && /CapabilityApp = .*'html'/.test(capSrc), true, { hasApply: capSrc.includes("html:apply_ops") }),
+      assertion('table-has-html', tableSrc.includes("name: 'html_export_docx'") && tableSrc.includes("name: 'html_apply_ops'") && tableSrc.includes("app: 'html'"), true, null),
+      assertion('claimed-keeps-preview', /CLAIMED_EXTS = \['docx', 'xlsx', 'pptx'\]/.test(coexistSrc) && coexistSrc.includes("'html'") && /CONTROL_EXTS = \['docx', 'xlsx', 'pptx', 'md', 'pdf', 'html'\]/.test(coexistSrc), true, null),
+      assertion('previewable-html', /html:\s*'html'/.test(previewSrc) && /htm:\s*'html'/.test(previewSrc), true, null),
+      assertion('html-open-and-services', toolsSrc.includes("'html_open'") && toolsSrc.includes("name: 'genoffice_services'") && toolsSrc.includes('executeHtmlExportDocx'), true, null),
+      assertion('html-route', htmlPage.status === 200 && htmlCt.includes('text/html'), '200 text/html', { status: htmlPage.status, htmlCt }),
+      assertion('service-ready-positive', health.htmlDocx?.available === true && Array.isArray(health.roots) && health.roots.includes('html'), true, health.htmlDocx),
+    ]
+    const failure1 = [
+      assertion('service-unconfigured', offHealth.htmlDocx?.available === false && offHealth.htmlDocx?.reason === 'html-docx-disabled', false, offHealth.htmlDocx),
+      assertion('no-desktop-redirect', JSON.stringify(offHealth.htmlDocx).includes('桌面') === false, false, offHealth.htmlDocx),
+    ]
+    const failure2 = [
+      assertion('undeclared-stub-not-available', claimedAvailable.every((r) => Number(r.implementation_task) >= 2 && Number(r.implementation_task) <= 19), true, claimedAvailable.length),
+      assertion('html-not-claimed-click', /CLAIMED_EXTS = \['docx', 'xlsx', 'pptx'\]/.test(coexistSrc), true, null),
+    ]
+    const success = await writeEvidence(outDir, 'UF-001', 'success', {
+      cases: [{ id: 'capability-coverage', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+      console: logs.join('\n'),
+      network: { events: [health], count: 1 },
+    })
+    const fail1 = await writeEvidence(outDir, 'UF-001', 'failure-1', {
+      cases: [{ id: 'capability-service-unconfigured', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+      console: logs.join('\n'),
+      network: { events: [offHealth], count: 1 },
+    })
+    const fail2 = await writeEvidence(outDir, 'UF-001', 'failure-2', {
+      cases: [{ id: 'capability-no-orphan-claim', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+      console: logs.join('\n'),
+      network: { events: [], count: 0 },
+    })
+    const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-001',
+      branch: 'capability',
+      status: ok ? 'passed' : 'failed',
+      cases: [success.cases[0], fail1.cases[0], fail2.cases[0]],
+    }
+    await mkdir(join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0'), { recursive: true })
+    await writeFile(join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/task-19.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (ok === false) throw new Error('capability case failed')
+  } finally {
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -3731,6 +3811,10 @@ async function main() {
   if (args.caseName === 'html-docx' || args.all) {
     await runHtmlDocx(evidenceRoot)
     ran.push('html-docx')
+  }
+  if (args.caseName === 'capability' || args.all) {
+    await runCapability(evidenceRoot)
+    ran.push('capability')
   }
   if (args.caseName === 'pdf-slides') {
     const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)
