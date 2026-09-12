@@ -28,6 +28,11 @@ describe('web generate_deck local landing', () => {
         slide: { widthPx: 1280, heightPx: 720, scale: 1, nodes: [] },
         sourceId: 'e1',
       })),
+      applyTxn: vi.fn(async () => ({
+        applied: true,
+        slides: [{ widthPx: 1280, heightPx: 720, scale: 1, nodes: [] }],
+        records: [{ op: 'addElement', created: ['e_new'] }],
+      })),
     }
   })
 
@@ -120,17 +125,23 @@ describe('web generate_deck local landing', () => {
     )
     const add = await next.executeTool!({
       id: 't2',
-      name: 'add_text_box',
+      name: 'apply_ops',
       input: {
-        slideIndex: 0,
-        paragraphs: [{ runs: [{ text: 'x' }] }],
-        x: 10,
-        y: 10,
-        w: 100,
-        h: 50,
+        ops: [
+          {
+            op: 'addElement',
+            target: { slide: 0 },
+            type: 'shape',
+            geometry: 'rect',
+            x: 95250,
+            y: 95250,
+            w: 952500,
+            h: 476250,
+          },
+        ],
       },
     })
     expect(add.isError).toBeUndefined()
-    expect(String(add.output)).not.toMatch(/blockScratchBuild|Use cloud generation/)
+    expect(String(add.output)).not.toMatch(/blockScratchBuild|Use cloud generation|from-scratch/)
   })
 })

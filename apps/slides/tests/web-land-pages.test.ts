@@ -112,6 +112,11 @@ describe('web land_pages', () => {
         slide: { widthPx: 1280, heightPx: 720, scale: 1, nodes: [] },
         sourceId: 'e1',
       })),
+      applyTxn: vi.fn(async () => ({
+        applied: true,
+        slides: [{ widthPx: 1280, heightPx: 720, scale: 1, nodes: [] }],
+        records: [{ op: 'addElement', created: ['e_new'] }],
+      })),
     }
   })
 
@@ -132,13 +137,19 @@ describe('web land_pages', () => {
     expect(deckTexts().join('\n')).toMatch(/Thanks/)
 
     const add = await createSlidesSkill(access, path).executeTool!(
-      tool('add_text_box', {
-        slideIndex: 0,
-        paragraphs: [{ runs: [{ text: 'x' }] }],
-        x: 10,
-        y: 10,
-        w: 100,
-        h: 50,
+      tool('apply_ops', {
+        ops: [
+          {
+            op: 'addElement',
+            target: { slide: 0 },
+            type: 'shape',
+            geometry: 'rect',
+            x: 95250,
+            y: 95250,
+            w: 952500,
+            h: 476250,
+          },
+        ],
       }),
     )
     expect(add.isError).toBeUndefined()

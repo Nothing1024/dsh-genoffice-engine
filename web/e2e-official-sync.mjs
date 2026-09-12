@@ -550,12 +550,18 @@ async function runLandPages(ctx) {
   const before = await contextApp(ctx.base, 'slides', file)
   const legal = await callTool(ctx.base, 'slides', file, 'land_pages', {
     insert_mode: 'append',
-    pages_spec: {
-      pages: [{
-        title: 'OfficialLandKeep',
-        blocks: [{ type: 'text', text: 'OfficialLandKeep' }],
+    pages_spec: [{
+      background: '#16395C',
+      elements: [{
+        type: 'text',
+        x: 80,
+        y: 80,
+        w: 1120,
+        h: 90,
+        valign: 'top',
+        paragraphs: [{ align: 'left', runs: [{ text: 'OfficialLandKeep', sizePt: 32, bold: true, color: '#FFFFFF' }] }],
       }],
-    },
+    }],
   })
   const afterLegal = await contextApp(ctx.base, 'slides', file)
   const illegal = await callTool(ctx.base, 'slides', file, 'land_pages', {
@@ -822,6 +828,37 @@ async function main() {
       if (!result.ok) failed = true
     }
     if (args.all) await archiveMatrix(ctx, results, outDir)
+    else if (args.caseName === 'land-pages') {
+      const land = results.find((item) => item.name === 'land-pages')
+      if (land) {
+        await writeEvidence(outDir, 'UF-003', 'success', {
+          run_id: ctx.runId,
+          status: land.ok ? 'passed' : 'failed',
+          cases: [{ id: 'UF-003-success', status: land.ok ? 'passed' : 'failed', assertions: land.assertions }],
+          console: land.console,
+          network: land.network,
+          screenshot: land.screenshot,
+        })
+        const illegal = (land.assertions || []).find((row) => row.name === 'illegal-rejected')
+        const stale = (land.assertions || []).find((row) => row.name === 'stale-revision-rejected')
+        await writeEvidence(outDir, 'UF-003', 'failure-1', {
+          run_id: ctx.runId,
+          status: illegal?.status === 'passed' ? 'passed' : 'failed',
+          cases: [{ id: 'UF-003-failure-1', status: illegal?.status === 'passed' ? 'passed' : 'failed', assertions: illegal ? [illegal] : [] }],
+          console: land.console,
+          network: land.network,
+          screenshot: land.screenshot,
+        })
+        await writeEvidence(outDir, 'UF-003', 'failure-2', {
+          run_id: ctx.runId,
+          status: stale?.status === 'passed' ? 'passed' : 'failed',
+          cases: [{ id: 'UF-003-failure-2', status: stale?.status === 'passed' ? 'passed' : 'failed', assertions: stale ? [stale] : [] }],
+          console: land.console,
+          network: land.network,
+          screenshot: land.screenshot,
+        })
+      }
+    }
     else if (args.caseName === 'docs-context') {
       const docs = results.find((item) => item.name === 'docs-context')
       if (docs) {

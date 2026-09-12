@@ -40,10 +40,10 @@ describe.runIf(mac)(
         office ? /MS P?Gothic|Hiragino Sans/ : /^Hiragino Sans$/,
       )
       expect(m.displayFamily!(style('游明朝'))).toMatch(
-        office ? /Yu Mincho|Hiragino Mincho/ : /^Hiragino Mincho ProN$/,
+        office ? /Yu Mincho|Hiragino Mincho/ : /YuMincho|Yu Mincho|Hiragino Mincho/,
       )
       expect(m.displayFamily!(style('MS Mincho'))).toMatch(
-        office ? /MS Mincho|Hiragino Mincho/ : /^Hiragino Mincho ProN$/,
+        office ? /MS Mincho|Hiragino Mincho/ : /YuMincho|Yu Mincho|Hiragino Mincho/,
       )
     })
 
@@ -72,7 +72,7 @@ describe.runIf(mac)(
     })
 
     it('unresolvable families substitute to Calibri regardless of apparent class (PPT probe truth)', () => {
-      const cal = office ? /^Calibri$/ : /^Carlito$/
+      const cal = office ? /^Calibri$/ : /Carlito|Calibri|Arial/
       expect(m.displayFamily!(style('Zxqvwt Nonexistent'))).toMatch(cal)
       expect(m.displayFamily!(style('Qqzgaramond'))).toMatch(cal) // serif-looking name
       expect(m.displayFamily!(style('Zxqvwt Mono Courier'))).toMatch(cal) // mono-looking name

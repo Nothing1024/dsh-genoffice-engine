@@ -1201,11 +1201,64 @@ type LandInsertMode = 'replace' | 'append' | 'replace_at' | 'insert_at'
 
 function hostAuthoredPageSpecs(input: Record<string, unknown>): unknown[] | null {
   if (Array.isArray(input.pages_spec)) return input.pages_spec
+  const nested = input.pages_spec
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+    const inner = (nested as { pages?: unknown }).pages
+    if (Array.isArray(inner) && inner.length > 0) return inner
+  }
+  if (input.page_spec && typeof input.page_spec === 'object' && !Array.isArray(input.page_spec)) {
+    return [input.page_spec]
+  }
   const pages = input.pages
   if (!Array.isArray(pages) || pages.length === 0) return null
   const first = pages[0]
   if (!first || typeof first !== 'object' || Array.isArray(first)) return null
-  return 'elements' in first && Array.isArray(first.elements) ? pages : null
+  return 'elements' in first && Array.isArray((first as { elements?: unknown }).elements) ? pages : null
+}
+
+function coerceLegacyPageSpec(page: unknown): unknown {
+  if (!page || typeof page !== 'object' || Array.isArray(page)) return page
+  const rec = page as Record<string, unknown>
+  if (Array.isArray(rec.elements)) return rec
+  const title = typeof rec.title === 'string' ? rec.title.trim() : ''
+  const blocks = Array.isArray(rec.blocks) ? rec.blocks : []
+  const elements: Record<string, unknown>[] = []
+  if (title) {
+    elements.push({
+      type: 'text',
+      x: 80,
+      y: 80,
+      w: 1120,
+      h: 90,
+      valign: 'top',
+      paragraphs: [{ align: 'left', runs: [{ text: title, sizePt: 32, bold: true, color: '#FFFFFF' }] }],
+    })
+  }
+  let y = title ? 190 : 80
+  for (const block of blocks) {
+    const item = block && typeof block === 'object' && !Array.isArray(block) ? (block as Record<string, unknown>) : {}
+    const text = String(item.text ?? item.title ?? '').trim()
+    if (!text) continue
+    elements.push({
+      type: 'text',
+      x: 80,
+      y,
+      w: 1120,
+      h: 64,
+      valign: 'top',
+      paragraphs: [{ align: 'left', runs: [{ text, sizePt: 20, color: '#222222' }] }],
+    })
+    y += 72
+  }
+  if (elements.length === 0) return rec
+  return { background: rec.background ?? '#16395C', elements }
+}
+
+function resolveLandPageList(input: Record<string, unknown>): unknown[] | null {
+  const hosted = hostAuthoredPageSpecs(input)
+  if (hosted) return hosted
+  if (Array.isArray(input.pages) && input.pages.length > 0) return input.pages
+  return null
 }
 
 function parseLandInsertMode(
@@ -1228,7 +1281,7 @@ async function executeLandPages(
   input: Record<string, unknown>,
   state: SkillState | undefined,
 ) {
-  const pages = input.pages
+  const pages = (resolveLandPageList(input) ?? []).map(coerceLegacyPageSpec)
   if (!Array.isArray(pages) || pages.length === 0) {
     return fail('land_pages', 'land_pages requires a non-empty pages array')
   }
@@ -1913,7 +1966,7 @@ async function executeTool(
           t('aiFailGenDeck'),
           'No page generation pipeline is available in this environment',
         )
-      if (!access.landGeneratedPages)
+      if (!access.landGeneratedPages && !access.generateFromHtml)
         return fail(
           t('aiFailGenDeck'),
           'The current environment does not support the page landing pipeline',
@@ -2315,7 +2368,9 @@ async function executeTool(
           const marker = markerByIndex[nextToLand] as string
           if (marker.length > 0) {
             const m: 'replace' | 'append' = firstDone ? 'append' : insertMode
-            const r = await access.landGeneratedPages!([marker], m, deckName)
+            const r = access.landGeneratedPages
+              ? await access.landGeneratedPages([marker], m, deckName)
+              : await access.generateFromHtml!([marker], m, deckName)
             if (r.ok) {
               if (r.fallbackReason) {
                 degraded.push(nextToLand)
@@ -2402,9 +2457,10 @@ async function executeTool(
             continue
           }
           const isFirstLand = !firstDone
+          const land = access.landGeneratedPages ?? access.generateFromHtml!
           const r = isFirstLand
-            ? await access.landGeneratedPages!([marker], insertMode, deckName)
-            : await access.landGeneratedPages!(
+            ? await land([marker], insertMode, deckName)
+            : await land(
                 [marker],
                 'insert_at',
                 deckName,
