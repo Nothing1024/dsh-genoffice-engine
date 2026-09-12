@@ -28,6 +28,11 @@ import { emuToPx, ptToPx, type Viewport } from './coords'
 const DEFAULT_FONT = 'Arial'
 const DEFAULT_SIZE_PT = 18
 
+/** <a:bodyPr> inset defaults (EMU): 0.1" left/right, 0.05" top/bottom. Mirrors the
+ *  engine's DEFAULT_BODY_INSETS — importing it would drag the engine runtime into the
+ *  renderer bundle, so a test asserts the two stay equal instead. */
+export const DEFAULT_INSETS_EMU = { l: 91440, t: 45720, r: 91440, b: 45720 }
+
 interface Token {
   text: string
   style: RunStyle
@@ -44,6 +49,10 @@ interface Token {
   breakable: boolean
   /** Whether it is whitespace (trailing whitespace may be swallowed when wrapping) */
   isSpace: boolean
+  /** Tab character: width comes from the paragraph's tab stops, not the font */
+  isTab?: boolean
+  /** Layout-computed width (px) overriding the font measurement (tab advance) */
+  wOverride?: number
   /** Forced line break (<a:br/> soft-break sentinel "\n") */
   isBreak?: boolean
   /** Source model run index (index into Paragraph.runs) */
@@ -61,7 +70,7 @@ interface Token {
   /** Run outer shadow (px, offset resolved from dist/dir) */
   shadow?: { color: string; blurPx: number; offsetX: number; offsetY: number }
   /** WordArt gradient text fill (resolved stops + screen angle) */
-  gradient?: { stops: Array<{ pos: number; color: string }>; angleDeg: number }
+  gradient?: { stops: Array<{ pos: number; color: string }>; angleDeg: number; scaled?: boolean }
   /** Run glow (px radius) */
   glow?: { color: string; blurPx: number }
   /** Run reflection (faded mirror below the baseline) */
@@ -84,16 +93,39 @@ function scaleHexAlpha(hex: string, factor: number): string {
 
 function runStyle(run: TextRun, scale: number, fontScale: number): RunStyle {
   const sizePt = run.fontSize ?? DEFAULT_SIZE_PT
+  // PowerPoint renders autofit text at round(size × fontScale) whole points — glyphs
+  // and the 1.2em line pitch both quantize (probe-measured: 20pt at 46/44/42.5% all
+  // draw 9pt, 47.5/48% draw 10pt, 28pt×46%=12.88 draws 13pt, 20pt×52%=10.4 draws 10pt).
+  // Explicit fractional sizes without autofit (10.5pt) are untouched.
+  const effPt = fontScale !== 1 ? Math.max(1, Math.round(sizePt * fontScale)) : sizePt
+  // PowerPoint kerns only at effective size ≥ the rPr kern threshold (absent = 12 pt
+  // default, 0 = never; probe-measured). The autofit fontScale counts toward the size.
+  const kernMinPt = run.kern ?? 12
   return {
     fontFamily: run.fontFamily || DEFAULT_FONT,
-    fontSizePx: ptToPx(sizePt, scale) * fontScale,
+    ...(run.fontScriptHint != null ? { substScript: run.fontScriptHint } : {}),
+    ...(run.text && !hasWideChar(run.text) ? { latinOnly: true } : {}),
+    fontSizePx: ptToPx(effPt, scale),
     bold: !!run.bold,
     italic: !!run.italic,
+    kerning: kernMinPt > 0 && effPt >= kernMinPt,
   }
+}
+
+/**
+ * PowerPoint never kerns text drawn with a substituted font: an overlapped pair of
+ * identical runs (kern default vs kern=0) diverges when the font is installed but
+ * coincides pixel-exactly when it's missing (probe-measured). A substituted token
+ * measures and draws unkerned, keeping the two sides consistent either way.
+ */
+function substituteKerning(tok: Token, metrics: FontMetricsProvider): Token {
+  if (tok.style.kerning === false || !metrics.substituted?.(tok.style)) return tok
+  return { ...tok, style: { ...tok.style, kerning: false } }
 }
 
 /** Token width = font advance width + letter spacing × char count (matches canvas letterSpacing: appended after each char) */
 function tokenWidth(tok: Token, metrics: FontMetricsProvider): number {
+  if (tok.wOverride != null) return tok.wOverride
   const w = metrics.measure(tok.text, tok.style)
   return tok.ls ? w + tok.ls * [...tok.text].length : w
 }
@@ -265,10 +297,31 @@ function symbolRunText(text: string): string {
 }
 
 /** Splits a paragraph's runs into a breakable token stream (whitespace / single CJK chars / Latin words). */
+function hasWideChar(text: string): boolean {
+  for (const ch of text) if (isWideChar(ch.codePointAt(0) ?? 0)) return true
+  return false
+}
+
+/** Basic/Latin-1/Latin Extended letters, digits, general punctuation and currency signs. */
+const LATIN_WORD_RE = /^[\u0020-\u024f\u1e00-\u1eff\u2000-\u206f\u20a0-\u20cf\u2100-\u214f]+$/
+const HALFWIDTH_KANA_RE = /[\uff61-\uff9f]/
+
 function tokenizeParagraph(p: Paragraph, scale: number, fontScale: number): Token[] {
   const tokens: Token[] = []
   p.runs.forEach((run, srcRun) => {
     const style = runStyle(run, scale, fontScale)
+    // Latin characters of a CJK-bucket run draw with the run's a:latin face (PowerPoint):
+    // the script hint stays with the CJK glyphs, Latin substitutes as western
+    // Also when both slots name the same missing CJK face: PowerPoint still sets the Latin
+    // characters in the Latin default (probe: "Noto Sans KR" Hangul lines' digits are Calibri).
+    // Latin-only runs stay whole: their hint is the declared @charset, which does steer them.
+    // Halfwidth kana are ea-bucket text for the parser without being EAW-wide
+    let latinStyle: RunStyle | undefined
+    const eaText = hasWideChar(run.text) || HALFWIDTH_KANA_RE.test(run.text)
+    if (run.latinFamily || (run.fontScriptHint != null && eaText)) {
+      latinStyle = { ...style, fontFamily: run.latinFamily ?? style.fontFamily, latinOnly: true }
+      delete latinStyle.substScript
+    }
     const color = run.color ?? '#000000'
     const underline = !!run.underline
     const ls = run.letterSpacing ? ptToPx(run.letterSpacing, scale) * fontScale : 0
@@ -300,6 +353,7 @@ function tokenizeParagraph(p: Paragraph, scale: number, fontScale: number): Toke
               stops: run.gradient.stops.map((s) => ({ pos: s.pos, color: s.color })),
               // OOXML gradient angle is 1/60000° clockwise from the +x axis
               angleDeg: (run.gradient.angle ?? 5400000) / 60000,
+              ...(run.gradient.scaled ? { scaled: true } : {}),
             },
           }
         : {}),
@@ -334,13 +388,15 @@ function tokenizeParagraph(p: Paragraph, scale: number, fontScale: number): Toke
     let buf = ''
     const flushWord = () => {
       if (!buf) return
+      // only genuinely Latin words switch face; Arabic/Hebrew/Thai/halfwidth kana stay on the bucket face
+      const wordBase = latinStyle && LATIN_WORD_RE.test(buf) ? { ...base, style: latinStyle } : base
       if (WORD_SEG && SEA_RE.test(buf)) {
         // Southeast Asian scripts without spaces: ICU dictionary segmentation; word gaps are break opportunities
         for (const s of WORD_SEG.segment(buf)) {
-          tokens.push({ ...base, text: s.segment, breakable: true, isSpace: false })
+          tokens.push({ ...wordBase, text: s.segment, breakable: true, isSpace: false })
         }
       } else {
-        tokens.push({ ...base, text: buf, breakable: false, isSpace: false })
+        tokens.push({ ...wordBase, text: buf, breakable: false, isSpace: false })
       }
       buf = ''
     }
@@ -354,9 +410,13 @@ function tokenizeParagraph(p: Paragraph, scale: number, fontScale: number): Toke
       if (ch === '\n' || ch === '\v') {
         flushWord()
         tokens.push({ ...base, text: '\n', breakable: true, isSpace: false, isBreak: true })
-      } else if (ch === ' ' || ch === '\t') {
+      } else if (ch === ' ' || ch === '　') {
+        // U+3000 ideographic space wraps like whitespace (PowerPoint swallows it at line ends)
         flushWord()
         tokens.push({ ...base, text: ch, breakable: true, isSpace: true })
+      } else if (ch === '\t') {
+        flushWord()
+        tokens.push({ ...base, text: ch, breakable: true, isSpace: true, isTab: true })
       } else if (ch === ' ') {
         // NBSP: glues neighbors into one token but draws/measures at plain-space
         // width (fonts like Carlito have no U+00A0 glyph → the missing-glyph
@@ -365,6 +425,11 @@ function tokenizeParagraph(p: Paragraph, scale: number, fontScale: number): Toke
       } else if (isWideChar(cp)) {
         flushWord()
         tokens.push({ ...base, text: ch, breakable: true, isSpace: false })
+      } else if (BREAK_AFTER_DASH.has(cp) && buf) {
+        // Hyphen/dash after word characters is a break-after opportunity (PowerPoint
+        // wraps "Cloud–Edge" as "Cloud–" + "Edge", never mid-word)
+        buf += ch
+        flushWord()
       } else {
         buf += ch
       }
@@ -374,14 +439,92 @@ function tokenizeParagraph(p: Paragraph, scale: number, fontScale: number): Toke
   return tokens
 }
 
+function toRoman(n: number): string {
+  const table: Array<[number, string]> = [
+    [1000, 'm'],
+    [900, 'cm'],
+    [500, 'd'],
+    [400, 'cd'],
+    [100, 'c'],
+    [90, 'xc'],
+    [50, 'l'],
+    [40, 'xl'],
+    [10, 'x'],
+    [9, 'ix'],
+    [5, 'v'],
+    [4, 'iv'],
+    [1, 'i'],
+  ]
+  let out = ''
+  for (const [v, s] of table)
+    while (n >= v) {
+      out += s
+      n -= v
+    }
+  return out
+}
+
+function toAlpha(n: number): string {
+  let out = ''
+  while (n > 0) {
+    n--
+    out = String.fromCharCode(97 + (n % 26)) + out
+    n = Math.floor(n / 26)
+  }
+  return out
+}
+
+const CJK_DIGITS = '〇一二三四五六七八九'
+function toCjkNum(n: number): string {
+  if (n <= 10) return n === 10 ? '十' : CJK_DIGITS[n]!
+  if (n < 20) return '十' + CJK_DIGITS[n % 10]!
+  if (n < 100) return CJK_DIGITS[Math.floor(n / 10)]! + '十' + (n % 10 ? CJK_DIGITS[n % 10]! : '')
+  return String(n)
+}
+
+/**
+ * <a:buAutoNum type> → numbered-bullet glyph (ST_TextAutonumberScheme). Circled numbers
+ * only exist up to ⑳/⓴; PowerPoint falls back to plain arabic beyond that.
+ */
+function formatAutoNum(n: number, numType: string | undefined): string {
+  const t = numType ?? 'arabicPeriod'
+  if (t.startsWith('circleNum')) {
+    if (t === 'circleNumWdBlackPlain')
+      return n <= 10
+        ? String.fromCodePoint(0x2775 + n) // ❶–❿
+        : n <= 20
+          ? String.fromCodePoint(0x24eb + (n - 11)) // ⓫–⓴
+          : String(n)
+    // circleNumWdWhitePlain included: Wingdings white circled digits are single-ring, i.e. ①–⑳
+    return n <= 20 ? String.fromCodePoint(0x245f + n) : String(n) // ①–⑳
+  }
+  let body: string
+  if (t.startsWith('alphaLc')) body = toAlpha(n)
+  else if (t.startsWith('alphaUc')) body = toAlpha(n).toUpperCase()
+  else if (t.startsWith('romanLc')) body = toRoman(n)
+  else if (t.startsWith('romanUc')) body = toRoman(n).toUpperCase()
+  else if (t.startsWith('arabicDb'))
+    body = [...String(n)].map((d) => String.fromCodePoint(0xff10 + Number(d))).join('') // fullwidth １２３
+  else if (t.startsWith('ea1Chs') || t.startsWith('ea1Cht')) body = toCjkNum(n)
+  else body = String(n)
+  if (t.endsWith('ParenBoth')) return `(${body})`
+  if (t.endsWith('ParenR')) return `${body})`
+  if (t.endsWith('Period')) return `${body}.`
+  if (t.endsWith('Plain')) return body
+  return `${body}.`
+}
+
 /**
  * Legacy symbol-font bullets (<a:buFont> Wingdings/Webdings): the glyph must be drawn
  * with that font, and ASCII bullet codes normalized into the font's F0xx PUA range
- * (files carry either encoding; the shipped fonts map the PUA).
+ * (files carry either encoding; the shipped fonts map the PUA). Adobe Symbol bullets
+ * (U+F0B7 "•", U+F0A7 "▪") go through the Symbol→Unicode table like Symbol runs do.
  */
 const SYMBOL_BULLET_RE = /^(wingdings|webdings)/i
 function symbolBulletText(font: string | undefined, char: string): string | undefined {
-  if (!font || !SYMBOL_BULLET_RE.test(font)) return undefined
+  if (!font) return undefined
+  if (SYMBOL_FONT_RE.test(font)) return symbolRunText(char)
+  if (!SYMBOL_BULLET_RE.test(font)) return undefined
   const cp = char.codePointAt(0) ?? 0
   if (cp >= 0xf000 && cp <= 0xf0ff) return char
   return cp >= 0x20 && cp <= 0xff ? String.fromCodePoint(0xf000 + cp) : char
@@ -396,6 +539,9 @@ const KINSOKU_NO_START = new Set(
 const KINSOKU_NO_END = new Set('([{$（［｛＄〈《「『【〔〝｢£¥￡￥')
 const kinsokuNoStart = (t: Token) => KINSOKU_NO_START.has(t.text)
 const kinsokuNoEnd = (t: Token) => KINSOKU_NO_END.has(t.text)
+
+/** Dashes that allow a break after them (U+2011 non-breaking hyphen intentionally absent). */
+const BREAK_AFTER_DASH = new Set([0x2d, 0x2010, 0x2012, 0x2013, 0x2014])
 
 /** Southeast Asian scripts without spaces (Thai/Burmese/Khmer/Lao); word boundaries need ICU dictionary segmentation. */
 const SEA_RE = /[฀-໿က-႟ក-៿]/
@@ -416,11 +562,15 @@ let bidiApi: ReturnType<typeof bidiFactory> | null = null
  * logical order (UAX#9 requires wrap first, reorder after); visualOrder reorders
  * each line once formed.
  */
-function applyBidi(tokens: Token[]): Token[] {
+function applyBidi(tokens: Token[], baseRtl?: boolean): Token[] {
   const text = tokens.map((t) => t.text).join('')
-  if (!RTL_RE.test(text)) return tokens
+  // An explicit RTL base still needs analysis for pure-LTR text (neutrals move to the left edge)
+  if (!RTL_RE.test(text) && !baseRtl) return tokens
   bidiApi ??= bidiFactory()
-  const { levels } = bidiApi.getEmbeddingLevels(text)
+  const { levels } = bidiApi.getEmbeddingLevels(
+    text,
+    baseRtl == null ? undefined : baseRtl ? 'rtl' : 'ltr',
+  )
   const out: Token[] = []
   let off = 0
   for (const tok of tokens) {
@@ -467,8 +617,9 @@ function visualOrder(toks: Token[]): Token[] {
   return arr
 }
 
-/** Paragraph base direction: decided by the first strong-direction character (used for the default alignment; RTL paragraphs without explicit alignment align right). */
+/** Paragraph base direction: explicit a:pPr rtl wins, else the first strong-direction character (used for the default alignment; RTL paragraphs without explicit alignment align right). */
 function paraBaseRtl(p: Paragraph): boolean {
+  if (p.rtl != null) return p.rtl
   for (const r of p.runs) {
     for (const ch of r.text) {
       if (RTL_RE.test(ch)) return true
@@ -492,6 +643,8 @@ interface LaidLine {
   leadAbove?: number
   /** Trailing whitespace was swallowed when wrapping (tells the editor to re-add a space when joining lines) */
   trailingSpace?: boolean
+  /** The exact swallowed whitespace (may be U+3000 / tabs; the editor re-adds it verbatim) */
+  trailingText?: string
   /** The line ends at a soft-break sentinel; value = the sentinel run's model index */
   softBreakAfter?: number
 }
@@ -505,23 +658,30 @@ function layoutParagraph(
   scale: number,
   fontScale: number,
   lnSpcRed = 0,
-  /** First-line width reduction (px): a bullet glyph overflowing the hanging indent
-   *  pushes the first line's text start right, so it must wrap that much earlier. */
+  /** First-line x shift (px): the first-line indent, or the push of a bullet glyph
+   *  overflowing the hanging indent. Shrinks (negative: widens) the first line's wrap
+   *  budget and offsets its tab cursor by the same amount. */
   firstLineShrinkPx = 0,
+  /** Tab geometry: stops + default grid in px measured from the text-frame left inset,
+   *  originPx = the line's x offset (marL) in that same space. */
+  tabs?: { stopsPx: number[]; defaultPx: number; originPx: number },
 ): LaidLine[] {
-  const tokens = applyBidi(tokenizeParagraph(p, scale, fontScale)).map((tok, logicalOrder) => ({
-    ...tok,
-    logicalOrder,
-  }))
+  const tokens = applyBidi(tokenizeParagraph(p, scale, fontScale), p.rtl).map(
+    (tok, logicalOrder) => ({
+      ...substituteKerning(tok, metrics),
+      logicalOrder,
+    }),
+  )
   const lines: LaidLine[] = []
   let cur: Token[] = []
   let curW = 0
 
   const pushLine = (toks: Token[]) => {
-    // Strip trailing whitespace (recorded: the editor re-adds a space when joining wrapped lines back into a paragraph)
+    // Strip trailing whitespace (recorded verbatim: the editor re-adds it when joining wrapped lines back into a paragraph)
     let trailingSpace = false
+    let trailingText = ''
     while (toks.length && toks[toks.length - 1]!.isSpace) {
-      toks.pop()
+      trailingText = toks.pop()!.text + trailingText
       trailingSpace = true
     }
     if (!toks.length) {
@@ -533,7 +693,12 @@ function layoutParagraph(
         ? runStyle(src, scale, fontScale)
         : {
             fontFamily: DEFAULT_FONT,
-            fontSizePx: ptToPx(DEFAULT_SIZE_PT, scale) * fontScale,
+            fontSizePx: ptToPx(
+              fontScale !== 1
+                ? Math.max(1, Math.round(DEFAULT_SIZE_PT * fontScale))
+                : DEFAULT_SIZE_PT,
+              scale,
+            ),
             bold: false,
             italic: false,
           }
@@ -565,12 +730,15 @@ function layoutParagraph(
         ascent: m.ascent,
         descent: m.descent,
         singleH: PPT_SINGLE * st.fontSizePx,
-        ...(trailingSpace ? { trailingSpace } : {}),
+        ...(trailingSpace ? { trailingSpace, trailingText } : {}),
       })
       return
     }
     const line = buildLine(toks, metrics, p, scale, lnSpcRed)
-    if (trailingSpace) line.trailingSpace = true
+    if (trailingSpace) {
+      line.trailingSpace = true
+      line.trailingText = trailingText
+    }
     lines.push(line)
   }
 
@@ -586,6 +754,15 @@ function layoutParagraph(
       continue
     }
     endedWithBreak = false
+    if (tok.isTab && tabs) {
+      // Tab advances to the next stop past the cursor; past the last stop, to the default grid
+      const cursor = tabs.originPx + (lines.length === 0 ? firstLineShrinkPx : 0) + curW
+      const stop = tabs.stopsPx.find((s) => s > cursor + 0.5)
+      tok.wOverride = Math.max(
+        (stop ?? (Math.floor(cursor / tabs.defaultPx) + 1) * tabs.defaultPx) - cursor,
+        0,
+      )
+    }
     const w = tokenWidth(tok, metrics)
     // The first line loses firstLineShrinkPx to the overflowing bullet glyph; evaluated
     // lazily because the soft wrap right below can end line 0 for this same token
@@ -673,6 +850,7 @@ function buildLine(
       ...(tok.highlight ? { highlight: tok.highlight } : {}),
       widthPx: w,
       ...(tok.ls ? { letterSpacingPx: tok.ls } : {}),
+      ...(tok.style.kerning === false ? { kerningOff: true } : {}),
       ...(tok.outline ? { outline: tok.outline } : {}),
       ...(tok.gradient ? { gradient: tok.gradient } : {}),
       ...(tok.glow ? { glow: tok.glow } : {}),
@@ -739,6 +917,9 @@ export interface TextLayoutInput {
   /** Table cells: PowerPoint drops the first paragraph's space-before and the last
       paragraph's space-after (rows stay at their minimum height regardless of them). */
   trimEdgeSpacing?: boolean
+  /** Re-run the autofit ladder below a stored fontScale (edit flows only): plain rendering
+      honors the cache as-is like PowerPoint on open. */
+  refitAutofit?: boolean
 }
 
 /**
@@ -783,26 +964,32 @@ function flowIntoColumns(
 export function layoutText(input: TextLayoutInput): RenderTextLayout {
   const { body, boxWidthPx, boxHeightPx, metrics, vp } = input
   const insets = {
-    l: emuToPx(body.insets?.l ?? 91440, vp.scale),
-    t: emuToPx(body.insets?.t ?? 45720, vp.scale),
-    r: emuToPx(body.insets?.r ?? 91440, vp.scale),
-    b: emuToPx(body.insets?.b ?? 45720, vp.scale),
+    l: emuToPx(body.insets?.l ?? DEFAULT_INSETS_EMU.l, vp.scale),
+    t: emuToPx(body.insets?.t ?? DEFAULT_INSETS_EMU.t, vp.scale),
+    r: emuToPx(body.insets?.r ?? DEFAULT_INSETS_EMU.r, vp.scale),
+    b: emuToPx(body.insets?.b ?? DEFAULT_INSETS_EMU.b, vp.scale),
   }
   const availWidth = Math.max(boxWidthPx - insets.l - insets.r, 1)
   const availHeight = Math.max(boxHeightPx - insets.t - insets.b, 1)
   const wrap = body.wrap !== false
 
+  // vert/vert270 rotate the whole block (CJK glyphs included); eaVert/wordArtVert
+  // are upright column layouts (wordArtVert additionally keeps Latin upright)
+  if (body.vert === 'vert' || body.vert === 'vert270') return layoutTextRotated(input, body.vert)
   if (body.vert)
-    return layoutTextVertical(
-      body,
-      body.vert,
-      availWidth,
-      availHeight,
-      insets,
-      wrap,
-      metrics,
-      vp.scale,
-    )
+    return {
+      ...layoutTextVertical(
+        body,
+        body.vert,
+        availWidth,
+        availHeight,
+        insets,
+        wrap,
+        metrics,
+        vp.scale,
+      ),
+      autofit: body.autofit ?? 'none',
+    }
 
   // bodyPr numCol: paragraphs wrap at the column width and fill column after column
   const numCol = body.numCol && body.numCol > 1 ? Math.floor(body.numCol) : 1
@@ -838,7 +1025,16 @@ export function layoutText(input: TextLayoutInput): RenderTextLayout {
   }
   // With columns, the single-stream span may spread over numCol columns of availHeight
   const fitTarget = availHeight * numCol
-  if (body.autofit === 'shrink' && fitSpan(result) > fitTarget * 1.03) {
+  // A stored fontScale is authoritative: PowerPoint renders the cached ratio as-is on
+  // open/export and never re-fits (probe-measured — a bare <a:normAutofit/> even renders
+  // at 100% overflowing the box). Stepping below the cache when our metrics run a hair
+  // long shrank whole pages a visible notch (autofit ladder only serves cache-less boxes,
+  // i.e. live edits).
+  if (
+    body.autofit === 'shrink' &&
+    (input.refitAutofit || body.fontScale == null) &&
+    fitSpan(result) > fitTarget * 1.03
+  ) {
     for (const [fs, red] of SHRINK_STEPS) {
       if (fs >= storedScale - 1e-6) continue
       const effRed = Math.max(red, storedRed)
@@ -861,13 +1057,29 @@ export function layoutText(input: TextLayoutInput): RenderTextLayout {
   // offset that clips the top. Equal to contentHeight under single spacing.
   const extraH = availHeight - (result.inkBottom ?? result.contentHeight)
   const dy = anchor === 'middle' ? extraH / 2 : anchor === 'bottom' ? extraH : 0
-  const lines = dy
-    ? result.lines.map((ln) => ({
-        ...ln,
-        top: ln.top + dy,
-        runs: ln.runs.map((r) => ({ ...r, baselineY: r.baselineY + dy })),
-      }))
-    : result.lines
+  // bodyPr anchorCtr="1": the whole text block (widest-line bounding box) centers
+  // horizontally in the text area; paragraph alignment stays relative within the block.
+  let dxCtr = 0
+  if (body.anchorCtr && numCol === 1) {
+    let minX = Infinity
+    let maxX = -Infinity
+    for (const ln of result.lines) {
+      for (const r of ln.runs) {
+        if (!r.text) continue
+        if (r.x < minX) minX = r.x
+        if (r.x + r.widthPx > maxX) maxX = r.x + r.widthPx
+      }
+    }
+    if (maxX > minX) dxCtr = (availWidth - (maxX - minX)) / 2 - minX
+  }
+  const lines =
+    dy || dxCtr
+      ? result.lines.map((ln) => ({
+          ...ln,
+          top: ln.top + dy,
+          runs: ln.runs.map((r) => ({ ...r, x: r.x + dxCtr, baselineY: r.baselineY + dy })),
+        }))
+      : result.lines
 
   // WordArt text extrusion: depth projected by the body camera tilt (same screen basis
   // as the scene3d shape pipeline: depth leans (sin lon, -sin lat·cos lon) per unit)
@@ -893,7 +1105,9 @@ export function layoutText(input: TextLayoutInput): RenderTextLayout {
     contentHeight: result.contentHeight,
     ...(result.inkBottom ? { inkBottom: result.inkBottom } : {}),
     wrap,
+    autofit: body.autofit ?? 'none',
     ...(extrusion ? { extrusion } : {}),
+    ...(body.txWarp ? { txWarp: body.txWarp } : {}),
   }
 }
 
@@ -916,17 +1130,81 @@ const SHRINK_STEPS: Array<[number, number]> = [
   [0.25, 0.2],
 ]
 
+// ── Rotated text (bodyPr vert="vert"/"vert270") ─────────────────────
+
+/**
+ * vert / vert270 ("rotate all text 90°/270°"): true whole-block rotation. The text is
+ * laid out HORIZONTALLY in the 90°-swapped box (width↔height, insets swapped in
+ * rotation-consistent pairs), then every glyph maps into real box coordinates with a
+ * rotate90/rotate270 flag — the renderer rotates each glyph node, so CJK rotates with
+ * the block (unlike eaVert's upright columns). Autofit/wrap/anchor run inside the
+ * recursive horizontal pass and stay semantically correct; the anchor axis maps to the
+ * horizontal stacking direction (top = right edge for vert, left edge for vert270,
+ * matching PowerPoint). Line top/height stay in layout (pre-rotation) space — same
+ * convention as eaVert columns, whose consumers skip them when `vert` is set.
+ */
+function layoutTextRotated(input: TextLayoutInput, vert: 'vert' | 'vert270'): RenderTextLayout {
+  const { body, boxWidthPx, boxHeightPx, vp } = input
+  const ins = {
+    l: body.insets?.l ?? DEFAULT_INSETS_EMU.l,
+    t: body.insets?.t ?? DEFAULT_INSETS_EMU.t,
+    r: body.insets?.r ?? DEFAULT_INSETS_EMU.r,
+    b: body.insets?.b ?? DEFAULT_INSETS_EMU.b,
+  }
+  const h = layoutText({
+    ...input,
+    body: {
+      ...body,
+      vert: undefined,
+      // Swapped so the recursive avail dims equal the real box's cross dims:
+      // layout width = boxH - t - b, layout height = boxW - l - r
+      insets: { l: ins.t, r: ins.b, t: ins.l, b: ins.r },
+    },
+    boxWidthPx: boxHeightPx,
+    boxHeightPx: boxWidthPx,
+  })
+  const realInsets = {
+    l: emuToPx(ins.l, vp.scale),
+    t: emuToPx(ins.t, vp.scale),
+    r: emuToPx(ins.r, vp.scale),
+    b: emuToPx(ins.b, vp.scale),
+  }
+  // Real content-area dims (glyph coords stay relative to the content-area top-left)
+  const wc = Math.max(boxWidthPx - realInsets.l - realInsets.r, 1)
+  const hc = Math.max(boxHeightPx - realInsets.t - realInsets.b, 1)
+  // Plane map: vert (90° cw) sends layout (u,v) → (wc - v, u); vert270 (90° ccw) sends
+  // (u,v) → (v, hc - u). The renderer positions a glyph node at (x, baselineY - 0.8em)
+  // and rotates about that origin, so the emitted x/baselineY place the node origin at
+  // the mapped glyph-box top-left (0.8em = Konva's browser-text baseline approximation,
+  // the same constant glyphToDraw subtracts).
+  const lines = h.lines.map((ln) => ({
+    ...ln,
+    runs: ln.runs.map((r) => {
+      const topOff = 0.8 * r.fontSizePx
+      return vert === 'vert'
+        ? { ...r, x: wc - (r.baselineY - topOff), baselineY: r.x + topOff, rotate90: true }
+        : { ...r, x: r.baselineY - topOff, baselineY: hc - r.x + topOff, rotate270: true }
+    }),
+  }))
+  // contentHeight stays a REAL vertical extent (autofit-resize writes it into the shape
+  // height): after rotation that is the pre-rotation layout's horizontal extent. The
+  // layout-space inkBottom would likewise measure the wrong axis — drop it.
+  let contentHeight = 0
+  for (const ln of h.lines)
+    for (const r of ln.runs) contentHeight = Math.max(contentHeight, r.x + r.widthPx)
+  const { inkBottom: _layoutSpaceInk, ...rest } = h
+  return { ...rest, lines, insets: realInsets, vert, contentHeight }
+}
+
 // ── Vertical text (bodyPr vert) ─────────────────────────────────────
 
 /**
- * Vertical column layout: horizontal "lines" become "columns", columns run right
- * to left, and characters within a column stack top to bottom.
+ * Vertical column layout (eaVert / wordArtVert): horizontal "lines" become "columns"
+ * and characters within a column stack top to bottom. eaVert columns run right→left
+ * and Latin words rotate 90° as whole words; wordArtVert ("stacked") columns run
+ * left→right and every glyph stays upright, one letter on top of another. vert/vert270
+ * rotate the whole block instead — see layoutTextRotated.
  * Approximations (v1):
- * - vert/vert270/wordArtVert should rotate the whole box 90°/270°, but that is too
- *   invasive for rendering/hit-testing/editing overlays, so degrade to the same
- *   column layout as eaVert;
- * - PowerPoint rotates Latin characters 90° under eaVert; here they stay upright
- *   (one grapheme per cell);
  * - autofit doesn't self-iterate (only reuses the stored fontScale);
  *   justify/bidi/marL/super-subscript shifts are skipped.
  * Coordinate conventions match horizontal layout: GlyphRun.x/baselineY are relative
@@ -952,6 +1230,7 @@ function layoutTextVertical(
     paraStart: boolean
     align?: Paragraph['align']
     alignExplicit?: boolean
+    rtl?: boolean
     softBreakAfter?: number
     /** Space-before/after maps to horizontal gaps between columns (carried by a paragraph's first/last column) */
     gapBefore: number
@@ -968,7 +1247,11 @@ function layoutTextVertical(
 
     const finishCol = (soft?: number) => {
       let size = agg.size
-      if (!cur.length) size = ptToPx(DEFAULT_SIZE_PT, scale) * fontScale
+      if (!cur.length)
+        size = ptToPx(
+          fontScale !== 1 ? Math.max(1, Math.round(DEFAULT_SIZE_PT * fontScale)) : DEFAULT_SIZE_PT,
+          scale,
+        )
       paraCols.push({
         runs: cur,
         usedH: curH,
@@ -1050,6 +1333,8 @@ function layoutTextVertical(
         ...(tok.reflection ? { reflection: true } : {}),
         ...(tok.shadow ? { shadow: tok.shadow } : {}),
         widthPx: adv,
+        // Rotated Latin words draw as whole strings too: keep draw kerning in step with the measure
+        ...(tok.style.kerning === false ? { kerningOff: true } : {}),
         rotate90: true,
         srcRunIdx: tok.srcRun,
         ...(tok.link ? { link: tok.link } : {}),
@@ -1071,7 +1356,8 @@ function layoutTextVertical(
         p.bullet?.sizePct != null
           ? { ...base, fontSizePx: base.fontSizePx * (p.bullet.sizePct / 100) }
           : base
-      let glyph = bulletType === 'char' ? (p.bullet?.char ?? '•') : `${autoNum}.`
+      let glyph =
+        bulletType === 'char' ? (p.bullet?.char ?? '•') : formatAutoNum(autoNum, p.bullet?.numType)
       const sym = bulletType === 'char' ? symbolBulletText(p.bullet?.font, glyph) : undefined
       if (sym) {
         glyph = sym
@@ -1093,14 +1379,17 @@ function layoutTextVertical(
       )
     }
 
-    for (const tok of tokenizeParagraph(p, scale, fontScale)) {
+    for (const rawTok of tokenizeParagraph(p, scale, fontScale)) {
+      const tok = substituteKerning(rawTok, metrics)
       if (tok.isBreak) {
         finishCol(tok.srcRun)
         continue
       }
-      // Latin/digit words (no wide chars) rotate 90° whole per PowerPoint vertical-writing semantics; CJK stays upright per char
+      // Latin/digit words (no wide chars) rotate 90° whole per PowerPoint vertical-writing
+      // semantics; CJK stays upright per char. wordArtVert ("stacked") keeps EVERY glyph
+      // upright, one letter on top of another, so Latin also goes through the per-cell path.
       const hasWide = [...tok.text].some((ch) => isWideChar(ch.codePointAt(0) ?? 0))
-      if (!hasWide && tok.text.trim()) {
+      if (vert !== 'wordArtVert' && !hasWide && tok.text.trim()) {
         pushRotated(tok)
         continue
       }
@@ -1121,19 +1410,31 @@ function layoutTextVertical(
         c.alignExplicit = true
       }
     }
+    if (paraBaseRtl(p)) for (const c of paraCols) c.rtl = true
     cols.push(...paraCols)
   }
 
-  // anchor acts along the text flow (right→left): top starts at the right, middle centers, bottom hugs the left
+  // anchor acts along the text flow: East Asian columns run right→left (top starts at
+  // the right, bottom hugs the left); wordArtVert stacked columns run left→right per
+  // ECMA-376 (wordArtVertRtl is the separate right-to-left variant)
+  const ltr = vert === 'wordArtVert'
   const contentW = cols.reduce((a, c) => a + c.gapBefore + c.colW + c.gapAfter, 0)
   const anchor = body.anchor ?? 'top'
   const extraW = availWidth - contentW
-  let xRight = availWidth - (anchor === 'middle' ? extraW / 2 : anchor === 'bottom' ? extraW : 0)
+  const anchorOff = anchor === 'middle' ? extraW / 2 : anchor === 'bottom' ? extraW : 0
+  let xFlow = ltr ? anchorOff : availWidth - anchorOff
   let contentHeight = 0
   const lines: TextLine[] = cols.map((c) => {
-    xRight -= c.gapBefore
-    const colX = xRight - c.colW
-    xRight = colX - c.gapAfter
+    let colX: number
+    if (ltr) {
+      xFlow += c.gapBefore
+      colX = xFlow
+      xFlow = colX + c.colW + c.gapAfter
+    } else {
+      xFlow -= c.gapBefore
+      colX = xFlow - c.colW
+      xFlow = colX - c.gapAfter
+    }
     // Paragraph alignment acts vertically within a column: ctr centers, r hugs the bottom (justify treated as left)
     const dy =
       c.align === 'center'
@@ -1154,6 +1455,7 @@ function layoutTextVertical(
       paraStart: c.paraStart,
       ...(c.softBreakAfter != null ? { softBreakAfter: c.softBreakAfter } : {}),
       ...(c.alignExplicit && c.align ? { align: c.align } : {}),
+      ...(c.rtl ? { rtl: true } : {}),
     }
   })
 
@@ -1196,16 +1498,21 @@ function layoutAll(
     if (bulletType === 'number' && hasText)
       autoNum = autoNum === 0 ? (p.bullet?.startAt ?? 1) : autoNum + 1
     else if (bulletType !== 'number') autoNum = 0
-    let bulletText = bulletType === 'char' ? (p.bullet?.char ?? '•') : `${autoNum}.`
+    let bulletText =
+      bulletType === 'char' ? (p.bullet?.char ?? '•') : formatAutoNum(autoNum, p.bullet?.numType)
     const symText = bulletType === 'char' ? symbolBulletText(p.bullet?.font, bulletText) : undefined
     if (symText) bulletText = symText
 
     const textX = marLPx
-    const avail = Math.max(availWidth - textX, 1)
-    // Paragraphs with an RTL base direction (first strong char is RTL) default to right
-    // alignment when none is explicit; affects layout only, not written back to
-    // TextLine.align (an editor commit would store it as an explicit value)
-    const align = p.align ?? (paraBaseRtl(p) ? ('right' as const) : undefined)
+    const marRPx = emuToPx(p.marR ?? 0, scale)
+    const avail = Math.max(availWidth - textX - marRPx, 1)
+    // RTL base direction mirrors the paragraph box (PowerPoint semantics, probe-measured):
+    // marL/indent measure from the RIGHT edge, the bullet glyph hangs on the right, and the
+    // default alignment is right. Explicit algn values stay physical (l = left edge).
+    const mirror = paraBaseRtl(p)
+    // Affects layout only, not written back to TextLine.align (an editor commit would
+    // store it as an explicit value)
+    const align = p.align ?? (mirror ? ('right' as const) : undefined)
     // Bullet glyph style/advance (drawn on the first line only). PowerPoint reserves
     // the glyph's advance like a tab stop: body text can never start before the glyph
     // ends, even when the glyph is wider than the hanging indent (-indent).
@@ -1225,16 +1532,14 @@ function layoutAll(
     // Glyph wider than the hanging indent: the first line's text start shifts right by
     // this much, so the first line must also wrap that much earlier
     const bulletOverflowPx = hasBullet ? Math.max(bulletX + bulletW - textX, 0) : 0
-    const laid = layoutParagraph(
-      p,
-      avail,
-      wrap,
-      metrics,
-      scale,
-      fontScale,
-      lnSpcRed,
-      bulletOverflowPx,
-    )
+    // The first line's x shift: bullet-overflow push, or the first-line indent itself —
+    // it consumes (negative: adds) that much of the first line's wrap budget
+    const firstLineDx = hasBullet ? bulletOverflowPx : indentPx
+    const laid = layoutParagraph(p, avail, wrap, metrics, scale, fontScale, lnSpcRed, firstLineDx, {
+      stopsPx: (p.tabStops ?? []).map((t) => emuToPx(t.pos, scale)),
+      defaultPx: Math.max(emuToPx(p.defTabSz ?? 914400, scale), 1),
+      originPx: textX,
+    })
     // Space before/after: spcPts is absolute pt; spcPct is a percentage of the paragraph's single line height (100 = one line).
     // PowerPoint ignores space-before on a text frame's FIRST paragraph in every body
     // (0047 measured: defaultTextStyle spcBef 50% shifted no first line), not just table cells.
@@ -1252,8 +1557,11 @@ function layoutAll(
       const firstShift = !hasBullet && li === 0 ? indentPx : 0
       const bulletShift = li === 0 ? bulletOverflowPx : 0
       // justify: lines filled by wrapping (not paragraph-final, not hard breaks) spread
-      // the remaining width into character spacing; the spread goes through
-      // justifyExtraPx (a draw-only field) so letterSpacing round-trips stay clean
+      // the remaining width into word gaps (U+0020 only), like PowerPoint — letter
+      // spacing stays untouched. Lines with no space (CJK) spread between characters
+      // instead, via justifyExtraPx (a draw-only field) so letterSpacing round-trips
+      // stay clean. Bidi lines keep the character spread: fragment repositioning
+      // assumes LTR visual order.
       let lineRuns = ln.runs
       if (
         align === 'justify' &&
@@ -1262,27 +1570,80 @@ function layoutAll(
         ln.softBreakAfter == null &&
         ln.runs.length
       ) {
-        const totalChars = ln.runs.reduce((acc, r) => acc + [...r.text].length, 0)
         const extra = avail - firstShift - bulletShift - lineWidth
-        if (totalChars > 1 && extra > 0) {
-          const per = extra / (totalChars - 1)
-          let consumed = 0
-          lineRuns = ln.runs.map((r) => {
-            const chars = [...r.text].length
-            const jr = {
-              ...r,
-              x: r.x + consumed * per,
-              widthPx: r.widthPx + chars * per,
-              justifyExtraPx: per,
+        // line-trailing spaces get no share (nothing follows them)
+        const last = ln.runs.length - 1
+        const spaceCount = ln.runs.reduce(
+          (acc, r, i) =>
+            acc + ((i === last ? r.text.replace(/ +$/, '') : r.text).match(/ /g)?.length ?? 0),
+          0,
+        )
+        if (extra > 0 && spaceCount > 0 && !ln.runs.some((r) => r.rtl)) {
+          const per = extra / spaceCount
+          let remaining = spaceCount
+          let shift = 0
+          lineRuns = ln.runs.flatMap((r) => {
+            if (remaining <= 0 || !r.text.includes(' ')) return [{ ...r, x: r.x + shift }]
+            const style = {
+              fontFamily: r.fontFamily,
+              fontSizePx: r.fontSizePx,
+              bold: r.bold,
+              italic: r.italic,
             }
-            consumed += chars
-            return jr
+            const ls = r.letterSpacingPx ?? 0
+            const frags = r.text.match(/[^ ]+ *| +/g) ?? [r.text]
+            const widths = frags.map((f) => metrics.measure(f, style) + ls * [...f].length)
+            const wSum = widths.reduce((a, b) => a + b, 0)
+            // normalize so fragment widths keep summing to the measured run width
+            const norm = wSum > 0 ? r.widthPx / wSum : 1
+            let fx = r.x + shift
+            return frags.map((f, i) => {
+              const natural = widths[i]! * norm
+              const nSp = Math.min(/ +$/.exec(f)?.[0].length ?? 0, remaining)
+              remaining -= nSp
+              const frag = { ...r, text: f, x: fx, widthPx: natural + nSp * per }
+              fx += natural + nSp * per
+              shift += nSp * per
+              return frag
+            })
           })
+        } else {
+          const totalChars = ln.runs.reduce((acc, r) => acc + [...r.text].length, 0)
+          if (totalChars > 1 && extra > 0) {
+            const per = extra / (totalChars - 1)
+            let consumed = 0
+            lineRuns = ln.runs.map((r) => {
+              const chars = [...r.text].length
+              const jr = {
+                ...r,
+                x: r.x + consumed * per,
+                widthPx: r.widthPx + chars * per,
+                justifyExtraPx: per,
+              }
+              consumed += chars
+              return jr
+            })
+          }
         }
       }
       // Center/right alignment counts the overflow push so the text stays inside the box
       const off = alignOffset(align, avail, lineWidth + bulletShift)
-      const dx = textX + firstShift + bulletShift + off
+      let dx = textX + firstShift + bulletShift + off
+      // Mirrored box: the body's right boundary sits marL (+ first-line shifts) from the
+      // right edge; every line lives inside [0, rightEdge]. Spread justified lines fill
+      // that whole span (the spread width already equals it), unspread ones (paragraph-
+      // final, hard breaks) go flush right like PowerPoint.
+      const rightEdge = availWidth - textX - firstShift - bulletShift
+      const mirrorSpread = mirror && align === 'justify' && lineRuns !== ln.runs
+      if (mirror) {
+        // Mirrored: marL measures from the right edge, marR from the left
+        dx =
+          mirrorSpread || align === 'left'
+            ? marRPx
+            : align === 'center'
+              ? marRPx + (rightEdge - marRPx - lineWidth) / 2
+              : rightEdge - lineWidth
+      }
       const runs = lineRuns.map((r) => ({
         ...r,
         x: r.x + dx,
@@ -1290,9 +1651,16 @@ function layoutAll(
       }))
       if (hasBullet && li === 0) {
         const st = bulletSt!
+        // Mirrored: the glyph keeps its reserved advance but on the right of the body text
+        // (right edge at availWidth - bulletX when the line is flush right); numbered
+        // glyphs render with an RTL base so "1." displays as ".1" like PowerPoint
+        const bx = mirror
+          ? dx + (mirrorSpread ? rightEdge : lineWidth) + (textX + bulletShift - bulletX - bulletW)
+          : bulletX + off
         runs.unshift({
           text: bulletText,
-          x: bulletX + off,
+          x: bx,
+          ...(mirror ? { rtl: true } : {}),
           baselineY: baseline,
           fontFamily: metrics.displayFamily?.(st, bulletText) ?? st.fontFamily,
           fontSizePx: st.fontSizePx,
@@ -1312,8 +1680,10 @@ function layoutAll(
         ...(ln.leadAbove ? { leadAbove: ln.leadAbove } : {}),
         paraStart: li === 0,
         ...(ln.trailingSpace ? { trailingSpace: true } : {}),
+        ...(ln.trailingText ? { trailingText: ln.trailingText } : {}),
         ...(ln.softBreakAfter != null ? { softBreakAfter: ln.softBreakAfter } : {}),
         ...(p.align ? { align: p.align } : {}),
+        ...(paraBaseRtl(p) ? { rtl: true } : {}),
         ...(p.level ? { level: p.level } : {}),
         ...(marLPx ? { marLPx } : {}),
         ...(indentPx ? { indentPx } : {}),

@@ -20,6 +20,15 @@ export interface RunStyle {
   fontSizePx: number
   bold: boolean
   italic: boolean
+  /** Apply kern pairs when measuring (PowerPoint kerns only at fontSize ≥ rPr kern; default true) */
+  kerning?: boolean
+  /** CJK substitution script for a missing fontFamily (from run altLang/lang or the
+   *  bucket @charset, PowerPoint semantics); overrides name-based classification */
+  substScript?: 'ja' | 'ko' | 'sc' | 'tc'
+  /** The text has no CJK characters: a missing family substitutes as western even when
+   *  its name looks CJK (PowerPoint picks the substitute per character script — prod_026's
+   *  "ISO 45001" in a missing NanumSquare face sets in Calibri, not Malgun) */
+  latinOnly?: boolean
 }
 
 export interface FontMetrics {
@@ -48,6 +57,13 @@ export interface FontMetricsProvider {
    * script (complex-script runs measure/draw with the same shaping font).
    */
   displayFamily?(style: RunStyle, text?: string): string
+  /**
+   * True when the requested family is missing and a same-script/class font was
+   * substituted. PowerPoint never kerns substituted text, so layout drops kerning for
+   * these runs. Metric-compatible alias resolutions (Calibri→Carlito) are NOT
+   * substitutions — PowerPoint has those fonts and kerns them. Unimplemented = never.
+   */
+  substituted?(style: RunStyle): boolean
 }
 
 // ── Grapheme clusters ───────────────────────────────────────────────
@@ -113,6 +129,8 @@ function charAdvanceEm(code: number): number {
   // substitutes a CJK font where these draw full-width. Over-estimating only widens
   // a gap; under-estimating makes bullet glyphs overlap the text they precede.
   if ((code >= 0x25a0 && code <= 0x25ff) || code === 0x203b) return 1.0
+  // Enclosed alphanumerics (① … ⑸ … ⓩ): same ambiguous-width fallback story as above
+  if (code >= 0x2460 && code <= 0x24ff) return 1.0
   // narrow characters
   if ("iIlj.,:;'!|".includes(String.fromCharCode(code))) return 0.28
   if (' ftr'.includes(String.fromCharCode(code))) return 0.32
@@ -171,7 +189,8 @@ export interface OpentypeFontLike {
   descender: number
   /** hhea lineGap (external leading, font units); part of the single-spacing line height */
   lineGap?: number
-  getAdvanceWidth(text: string, fontSize: number): number
+  /** options matches opentype.js Font.getAdvanceWidth (kerning defaults to true) */
+  getAdvanceWidth(text: string, fontSize: number, options?: { kerning?: boolean }): number
   /** Optional: char → glyph index (0 = missing glyph). Used for the missing-glyph heuristic fallback. */
   charToGlyphIndex?(char: string): number
 }
@@ -217,7 +236,7 @@ export class OpentypeMetrics implements FontMetricsProvider {
           if (font.charToGlyphIndex(ch) === 0) return this.fallback.measure(text, style)
         }
       }
-      return font.getAdvanceWidth(text, style.fontSizePx)
+      return font.getAdvanceWidth(text, style.fontSizePx, { kerning: style.kerning !== false })
     } catch {
       return this.fallback.measure(text, style)
     }

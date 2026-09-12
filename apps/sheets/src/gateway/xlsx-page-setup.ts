@@ -28,6 +28,8 @@ export interface SheetPageSetupState {
   readonly printGridlines?: boolean | undefined
   readonly printHeadings?: boolean | undefined
   readonly showGridlines?: boolean | undefined
+  /// Normal-view zoom percent (10-400); 100 drops the attributes.
+  readonly zoomScale?: number | undefined
   readonly showFormulas?: boolean | undefined
   readonly showHeadings?: boolean | undefined
   readonly printArea?: string | null | undefined
@@ -242,36 +244,57 @@ export function buildHeaderFooterXml(
   )
 }
 
-/// Replaces the first `<headerFooter>` (or inserts one after pageSetup).
-/// An undefined half keeps its existing odd text verbatim, null (or
-/// all-empty parts) clears it; both empty removes the element
-/// entirely. Even/first-page variants and the element's
-/// attributes are dropped: the session edits the odd header/footer, which
-/// applies to every page once differentOddEven/differentFirst are gone.
+/// One `<tag>…</tag>` (or self-closing) child of headerFooter.
+function headerFooterSectionPattern(tag: string): RegExp {
+  return new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}>|<${tag}\\b[^>]*/>`)
+}
+
+/// Rewrites the odd header/footer inside the first `<headerFooter>` (or
+/// inserts the element after pageSetup). An undefined half keeps its
+/// existing odd text verbatim, null (or all-empty parts) clears it. The
+/// element's attributes (differentOddEven, differentFirst, scaleWithDoc,
+/// alignWithMargins) and its even/first-page sections stay byte-identical —
+/// Excel's own dialog edits the odd sections the same way, and the export
+/// honors the variants. The element is removed only when nothing is left.
 function setHeaderFooter(
   xml: string,
   header: HeaderFooterParts | null | undefined,
   footer: HeaderFooterParts | null | undefined,
 ): string {
-  const existing = /<headerFooter\b[^>]*?(?:\/>|>[\s\S]*?<\/headerFooter>)/.exec(xml)
-  const keep = (tag: 'oddHeader' | 'oddFooter'): string => {
-    if (!existing) return ''
-    const section = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`).exec(existing[0])
-    return section?.[1] ?? ''
+  const existing = /<headerFooter\b([^>]*?)(?:\/>|>([\s\S]*?)<\/headerFooter>)/.exec(xml)
+  const attributes = existing?.[1] ?? ''
+  let body = existing?.[2] ?? ''
+  const setSection = (tag: 'oddHeader' | 'oddFooter', text: string | undefined): void => {
+    if (text === undefined) return
+    const pattern = headerFooterSectionPattern(tag)
+    const element = text === '' ? '' : `<${tag}>${text}</${tag}>`
+    if (pattern.test(body)) {
+      // function replacer: the element carries user text, and "$'000" / "$&"
+      // in a header would otherwise expand as String.replace patterns
+      body = body.replace(pattern, () => element)
+      return
+    }
+    if (element === '') return
+    // CT_HeaderFooter order: oddHeader, oddFooter, even*, first*.
+    const oddHeader =
+      tag === 'oddFooter' ? headerFooterSectionPattern('oddHeader').exec(body) : null
+    const at = oddHeader ? oddHeader.index + oddHeader[0].length : 0
+    body = body.slice(0, at) + element + body.slice(at)
   }
-  const oddHeader =
-    header === undefined
-      ? keep('oddHeader')
-      : header === null
+  const encode = (parts: HeaderFooterParts | null | undefined): string | undefined =>
+    parts === undefined
+      ? undefined
+      : parts === null
         ? ''
-        : escapeXml(encodeHeaderFooterSections(header))
-  const oddFooter =
-    footer === undefined
-      ? keep('oddFooter')
-      : footer === null
+        : escapeXml(encodeHeaderFooterSections(parts))
+  setSection('oddHeader', encode(header))
+  setSection('oddFooter', encode(footer))
+  const element =
+    body.trim() === ''
+      ? attributes.trim() === ''
         ? ''
-        : escapeXml(encodeHeaderFooterSections(footer))
-  const element = assembleHeaderFooterXml(oddHeader, oddFooter)
+        : `<headerFooter${attributes}/>`
+      : `<headerFooter${attributes}>${body}</headerFooter>`
   if (existing) {
     return xml.slice(0, existing.index) + element + xml.slice(existing.index + existing[0].length)
   }
@@ -318,6 +341,14 @@ export function applyPageSetupState(worksheetXml: string, state: SheetPageSetupS
   if (state.showFormulas !== undefined) {
     // showFormulas defaults to false; drop the attribute to restore it.
     xml = setSheetViewAttr(xml, 'showFormulas', state.showFormulas ? '1' : null)
+  }
+  if (state.zoomScale !== undefined) {
+    // 100 is the default — drop the attributes. zoomScaleNormal keeps the
+    // normal-view zoom authoritative for files saved in page-layout /
+    // page-break view (the open path prefers it there).
+    const zoom = state.zoomScale === 100 ? null : String(state.zoomScale)
+    xml = setSheetViewAttr(xml, 'zoomScale', zoom)
+    xml = setSheetViewAttr(xml, 'zoomScaleNormal', zoom)
   }
   if (state.showHeadings !== undefined) {
     // showRowColHeaders defaults to true; write "0" to hide.
@@ -426,7 +457,7 @@ export function applyPrintAreas(
     }
   }
   // An emptied definedNames section is dropped entirely rather than written empty.
-  return xml.replace(/<definedNames>\s*<\/definedNames>/, '')
+  return xml.replace(/<definedNames>\s*<\/definedNames>|<definedNames\s*\/>/, '')
 }
 
 function setSheetScopedName(
@@ -440,22 +471,35 @@ function setSheetScopedName(
     `<definedName[^>]*name="${escapedName}"[^>]*localSheetId="${sheetIndex}"[^>]*>[\\s\\S]*?</definedName>` +
       `|<definedName[^>]*localSheetId="${sheetIndex}"[^>]*name="${escapedName}"[^>]*>[\\s\\S]*?</definedName>`,
   )
-  let xml = workbookXml.replace(namePattern, '')
+  const xml = workbookXml.replace(namePattern, '')
   if (reference === null) return xml
   const element =
     `<definedName name="${name}" localSheetId="${sheetIndex}">` +
     `${escapeXml(reference)}</definedName>`
+  // Google Sheets exports an empty self-closing `<definedNames/>`.
+  const empty = /<definedNames\b[^>]*\/>/.exec(xml)
+  if (empty) {
+    return (
+      xml.slice(0, empty.index) +
+      `<definedNames>${element}</definedNames>` +
+      xml.slice(empty.index + empty[0].length)
+    )
+  }
   const section = /<definedNames\b[^>]*>/.exec(xml)
   if (section) {
     const at = section.index + section[0].length
-    xml = xml.slice(0, at) + element + xml.slice(at)
-  } else {
-    const sheetsEnd = /<\/sheets>/.exec(xml)
-    if (!sheetsEnd) throw new PageSetupError('workbook.xml has no sheets section.')
-    const at = sheetsEnd.index + sheetsEnd[0].length
-    xml = `${xml.slice(0, at)}<definedNames>${element}</definedNames>${xml.slice(at)}`
+    return xml.slice(0, at) + element + xml.slice(at)
   }
-  return xml
+  // Schema order: definedNames follows sheets (and functionGroups/externalReferences).
+  const anchor =
+    /<externalReferences\b[^>]*>[\s\S]*?<\/externalReferences>|<externalReferences\b[^>]*\/>/.exec(
+      xml,
+    ) ??
+    /<functionGroups\b[^>]*>[\s\S]*?<\/functionGroups>|<functionGroups\b[^>]*\/>/.exec(xml) ??
+    /<\/sheets>|<sheets\b[^>]*\/>/.exec(xml)
+  if (!anchor) throw new PageSetupError('workbook.xml has no sheets section.')
+  const at = anchor.index + anchor[0].length
+  return `${xml.slice(0, at)}<definedNames>${element}</definedNames>${xml.slice(at)}`
 }
 
 /// "1:3" → "$1:$3" (title rows repeated at the top of each page).

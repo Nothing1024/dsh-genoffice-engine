@@ -104,6 +104,67 @@ describe('character styles (w:rStyle)', () => {
   })
 })
 
+describe('hyperlink runs keep their own rStyle', () => {
+  const LINK_RELS =
+    '<Relationship Id="rId20" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/>'
+  // localized Word builds give the Hyperlink style an opaque id ("ae", "a3")
+  const LOCAL_HYPERLINK =
+    '<w:style w:type="character" w:styleId="ae"><w:name w:val="Hyperlink"/>' +
+    '<w:rPr><w:u w:val="single"/></w:rPr></w:style>'
+
+  it('a localized style id on a link run survives a text edit', async () => {
+    const doc = await parseDocx(
+      await buildDocx({
+        bodyXml:
+          '<w:p><w:hyperlink r:id="rId20"><w:r><w:rPr><w:rStyle w:val="ae"/><w:sz w:val="16"/></w:rPr>' +
+          '<w:t>https://example.com/</w:t></w:r></w:hyperlink></w:p>',
+        extraRels: LINK_RELS,
+        extraStylesXml: LOCAL_HYPERLINK,
+      }),
+    )
+    const run = doc.blocks[0].runs![0]
+    expect(run.styleId).toBe('ae')
+    expect(run.link?.rId).toBe('rId20')
+    const xml = generateParagraphXml(
+      { type: 'paragraph', runs: [{ ...run, text: 'https://example.com/x' }] },
+      GEN_CTX,
+    )
+    expect(xml).toContain('<w:rStyle w:val="ae"/>')
+    expect(xml).not.toContain('Hyperlink')
+  })
+
+  it('an unstyled run inside an existing hyperlink stays unstyled', async () => {
+    const doc = await parseDocx(
+      await buildDocx({
+        bodyXml:
+          '<w:p><w:hyperlink r:id="rId20"><w:r><w:rPr><w:i/></w:rPr>' +
+          '<w:t>mail@example.com</w:t></w:r></w:hyperlink></w:p>',
+        extraRels: LINK_RELS,
+      }),
+    )
+    const run = doc.blocks[0].runs![0]
+    const xml = generateParagraphXml(
+      { type: 'paragraph', runs: [{ ...run, text: 'mail@example.com [1]' }] },
+      GEN_CTX,
+    )
+    expect(xml).toContain('<w:hyperlink r:id="rId20">')
+    expect(xml).toContain('<w:rPr><w:i/></w:rPr>')
+    expect(xml).not.toContain('<w:rStyle')
+  })
+
+  it('a newly linked run gets the implied Hyperlink style', async () => {
+    const doc = await parseDocx(
+      await buildDocx({ bodyXml: '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>plain</w:t></w:r></w:p>' }),
+    )
+    const run = doc.blocks[0].runs![0]
+    const xml = generateParagraphXml(
+      { type: 'paragraph', runs: [{ ...run, link: { href: 'https://new.example/' } }] },
+      GEN_CTX,
+    )
+    expect(xml).toContain('<w:rStyle w:val="Hyperlink"/>')
+  })
+})
+
 describe('linkedStyle (w:link) and docDefaults backfill', () => {
   it('when a character-style shell has no rPr, run-level display attributes come from the linked paragraph style', async () => {
     const styles =
@@ -234,9 +295,9 @@ describe('styleUpserts style write-back', () => {
 describe('toggle-off (w:val="0") overrides inherited formatting', () => {
   const TOGGLE_STYLES =
     '<w:style w:type="paragraph" w:styleId="BoldBase"><w:name w:val="Bold Base"/>' +
-    '<w:rPr><w:b/><w:i/><w:strike/><w:u w:val="single"/></w:rPr></w:style>' +
+    '<w:rPr><w:b/><w:i/><w:strike/><w:u w:val="single"/><w:smallCaps/></w:rPr></w:style>' +
     '<w:style w:type="paragraph" w:styleId="PlainChild"><w:name w:val="Plain Child"/><w:basedOn w:val="BoldBase"/>' +
-    '<w:rPr><w:b w:val="0"/><w:i w:val="false"/><w:strike w:val="0"/><w:u w:val="none"/></w:rPr></w:style>' +
+    '<w:rPr><w:b w:val="0"/><w:i w:val="false"/><w:strike w:val="0"/><w:u w:val="none"/><w:smallCaps w:val="0"/></w:rPr></w:style>' +
     '<w:style w:type="paragraph" w:styleId="GrandChild"><w:name w:val="Grand Child"/><w:basedOn w:val="PlainChild"/></w:style>'
 
   it('records explicit off in the style display and through basedOn chains', async () => {
@@ -251,23 +312,26 @@ describe('toggle-off (w:val="0") overrides inherited formatting', () => {
       italic: true,
       strike: true,
       underline: true,
+      caps: 'small',
     })
     const child = doc.styles.get('PlainChild')!.display!
     expect(child.bold).toBe(false)
     expect(child.italic).toBe(false)
     expect(child.strike).toBe(false)
     expect(child.underline).toBe(false)
+    expect(child.caps).toBe('none')
     // the grandchild inherits the explicit off, not the grandparent's on
     const grand = doc.styles.get('GrandChild')!.display!
     expect(grand.bold).toBe(false)
     expect(grand.underline).toBe(false)
+    expect(grand.caps).toBe('none')
   })
 
   it('records explicit off on runs as false, absent as undefined', async () => {
     const doc = await parseDocx(
       await buildDocx({
         bodyXml:
-          '<w:p><w:r><w:rPr><w:b w:val="0"/><w:u w:val="none"/></w:rPr><w:t>off</w:t></w:r>' +
+          '<w:p><w:r><w:rPr><w:b w:val="0"/><w:u w:val="none"/><w:caps w:val="0"/></w:rPr><w:t>off</w:t></w:r>' +
           '<w:r><w:rPr><w:b/></w:rPr><w:t>on</w:t></w:r>' +
           '<w:r><w:t>unset</w:t></w:r></w:p>',
       }),
@@ -275,8 +339,10 @@ describe('toggle-off (w:val="0") overrides inherited formatting', () => {
     const runs = doc.blocks[0].runs!
     expect(runs[0].bold).toBe(false)
     expect(runs[0].underline).toBe(false)
+    expect(runs[0].caps).toBe('none')
     expect(runs[1].bold).toBe(true)
     expect(runs[2].bold).toBeUndefined()
     expect(runs[2].underline).toBeUndefined()
+    expect(runs[2].caps).toBeUndefined()
   })
 })

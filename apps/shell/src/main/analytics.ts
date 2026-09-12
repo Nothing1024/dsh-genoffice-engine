@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readAppSettings, writeAppSetting } from './app-settings'
+import { readAppSettings, writeAppSetting, writeAppSettings } from './app-settings'
 
 /**
  * Anonymous usage analytics via the GA4 Measurement Protocol.
@@ -12,6 +12,7 @@ import { readAppSettings, writeAppSetting } from './app-settings'
  *
  * Privacy rules (also documented in README):
  * - events carry a random install id (client_id), never account identity
+ * - country is the OS locale's ISO code; no city, region, or IP is added
  * - no document content, file names, or paths are ever sent
  * - official builds report by default; the user can turn reporting off in Settings → General
  *   (ANALYTICS_ENABLED_KEY in userData/app-settings.json)
@@ -22,6 +23,15 @@ import { readAppSettings, writeAppSetting } from './app-settings'
 export const ANALYTICS_ENABLED_KEY = 'analyticsEnabled'
 /** app-settings.json key: random UUID identifying this install anonymously */
 export const ANALYTICS_CLIENT_ID_KEY = 'analyticsClientId'
+/** true while a newly identified install still needs its cohort-start event */
+export const ANALYTICS_FIRST_LAUNCH_PENDING_KEY = 'analyticsFirstLaunchPending'
+/** Custom event used as the inclusion criterion for install-retention cohorts. */
+export const INSTALL_FIRST_LAUNCH_EVENT = 'install_first_launch'
+
+export interface AnalyticsClientState {
+  clientId: string
+  firstLaunchPending: boolean
+}
 
 export interface AnalyticsKeys {
   measurementId: string
@@ -67,16 +77,36 @@ export function analyticsEnabledFrom(settings: Record<string, unknown>): boolean
  * Read the persistent anonymous install id, creating and saving one on first
  * use. Storage failures fall back to a per-session id rather than blocking.
  */
-export function ensureAnalyticsClientId(settingsPath: string): string {
-  const existing = readAppSettings(settingsPath)[ANALYTICS_CLIENT_ID_KEY]
-  if (typeof existing === 'string' && existing.trim()) return existing
+export function ensureAnalyticsClientState(settingsPath: string): AnalyticsClientState {
+  const settings = readAppSettings(settingsPath)
+  const existing = settings[ANALYTICS_CLIENT_ID_KEY]
+  if (typeof existing === 'string' && existing.trim()) {
+    return {
+      clientId: existing,
+      // Missing means this id predates retention tracking; do not misclassify
+      // every existing install as newly acquired when the feature ships.
+      firstLaunchPending: settings[ANALYTICS_FIRST_LAUNCH_PENDING_KEY] === true,
+    }
+  }
+
   const created = randomUUID()
   try {
-    writeAppSetting(settingsPath, ANALYTICS_CLIENT_ID_KEY, created)
+    writeAppSettings(settingsPath, {
+      [ANALYTICS_CLIENT_ID_KEY]: created,
+      [ANALYTICS_FIRST_LAUNCH_PENDING_KEY]: true,
+    })
   } catch {
     // unwritable settings file: report under a session-scoped id instead
   }
-  return created
+  return { clientId: created, firstLaunchPending: true }
+}
+
+export function ensureAnalyticsClientId(settingsPath: string): string {
+  return ensureAnalyticsClientState(settingsPath).clientId
+}
+
+export function markAnalyticsFirstLaunchSent(settingsPath: string): void {
+  writeAppSetting(settingsPath, ANALYTICS_FIRST_LAUNCH_PENDING_KEY, false)
 }
 
 /** GA4 event name rules: letters/digits/underscore, must start with a letter */
@@ -102,17 +132,42 @@ export interface AnalyticsOptions {
   getClientId: () => string
   /** re-checked per event so the Settings toggle applies immediately */
   isEnabled: () => boolean
+  /** true only for a newly created anonymous install id */
+  shouldTrackFirstLaunch?: () => boolean
+  /** persists successful delivery so failed sends can retry on a later launch */
+  onFirstLaunchSent?: () => void
   /** attached to every event; evaluated per event so live-changeable values
    * (UI language) stay fresh */
   baseParams?: () => Record<string, string | number>
+  /** OS-locale ISO 3166-1 alpha-2 code used for country-only GA geography */
+  getCountryCode?: () => string | null | undefined
   /** injectable for tests; defaults to global fetch */
   fetchFn?: typeof fetch
 }
 
 const SEND_TIMEOUT_MS = 5000
+const COUNTRY_CODE_RE = /^[A-Za-z]{2}$/
+
+function readCountryCode(getCountryCode: () => string | null | undefined): string | null {
+  try {
+    const value = getCountryCode()
+    return typeof value === 'string' && COUNTRY_CODE_RE.test(value) ? value.toUpperCase() : null
+  } catch {
+    return null
+  }
+}
 
 export function createAnalytics(options: AnalyticsOptions): Analytics {
-  const { keys, getClientId, isEnabled, baseParams = () => ({}), fetchFn = fetch } = options
+  const {
+    keys,
+    getClientId,
+    isEnabled,
+    shouldTrackFirstLaunch = () => false,
+    onFirstLaunchSent = () => {},
+    baseParams = () => ({}),
+    getCountryCode = () => null,
+    fetchFn = fetch,
+  } = options
   if (!keys) return { active: false, track: () => {} }
 
   const endpoint =
@@ -122,6 +177,8 @@ export function createAnalytics(options: AnalyticsOptions): Analytics {
   // one session per process run; GA4 uses it to group events and count
   // engaged sessions (together with engagement_time_msec)
   const sessionId = Date.now().toString()
+  let firstLaunchPending: boolean | null = null
+  let firstLaunchInFlight = false
 
   return {
     active: true,
@@ -129,26 +186,61 @@ export function createAnalytics(options: AnalyticsOptions): Analytics {
       if (!isValidEventName(name)) return
       try {
         if (!isEnabled()) return
+        const countryCode = readCountryCode(getCountryCode)
+        const commonParams = {
+          session_id: sessionId,
+          engagement_time_msec: 100,
+          ...clampParams(baseParams()),
+        }
+        const includeFirstLaunch =
+          !firstLaunchInFlight && (firstLaunchPending ??= shouldTrackFirstLaunch())
         const body = JSON.stringify({
           client_id: getClientId(),
+          ...(countryCode ? { user_location: { country_id: countryCode } } : {}),
           events: [
+            ...(includeFirstLaunch
+              ? [
+                  {
+                    name: INSTALL_FIRST_LAUNCH_EVENT,
+                    params: commonParams,
+                  },
+                ]
+              : []),
             {
               name,
               params: {
-                session_id: sessionId,
-                engagement_time_msec: 100,
-                ...clampParams(baseParams()),
+                ...commonParams,
                 ...clampParams(params),
               },
             },
           ],
         })
-        void fetchFn(endpoint, {
+        const request = fetchFn(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body,
           signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-        }).catch(() => {})
+        })
+        if (includeFirstLaunch) {
+          firstLaunchInFlight = true
+          void request.then(
+            (response) => {
+              firstLaunchInFlight = false
+              if (!response.ok) return
+              firstLaunchPending = false
+              try {
+                onFirstLaunchSent()
+              } catch {
+                // A later process retries if persisting the receipt fails.
+              }
+            },
+            () => {
+              firstLaunchInFlight = false
+            },
+          )
+        } else {
+          void request.catch(() => {})
+        }
       } catch {
         // analytics must never surface an error into the app
       }

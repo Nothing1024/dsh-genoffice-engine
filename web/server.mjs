@@ -73,8 +73,23 @@ const PING_MS = 25_000
 const CONTEXT_TTL_MS = 30_000
 const TOOL_TTL_MS = 60_000
 const EXPORT_TTL_MS = 60_000
+const READY_STATES = new Set(['connected', 'loading', 'ready', 'error'])
 /** requestId → { resolve, timer, docId } — one-shot pending results (BR-010) */
 const pending = new Map()
+
+function requireReady(docId) {
+  const ex = executors.get(docId)
+  if (!ex) return { ok: false, error: 'executor not registered' }
+  if (ex.readiness !== 'ready') {
+    return {
+      ok: false,
+      error: 'not-ready',
+      readiness: ex.readiness ?? 'loading',
+      ...(ex.error ? { loadError: ex.error } : {}),
+    }
+  }
+  return { ok: true, conn: ex }
+}
 
 // open-file subscribers: tab clients listening for LLM-triggered open events
 const openStreams = new Set()
@@ -623,14 +638,27 @@ async function handleApi(req, res, pathname, body, url) {
     if (!isValidDocId(docId)) {
       return json(res, 400, { ok: false, error: 'invalid docId' })
     }
+    const incomingOwner = String(url.searchParams.get('owner') ?? '')
     if (executors.has(docId)) {
-      // re-registration (e.g. adapter reconnect): close the stale connection first
-      try {
-        executors.get(docId).res.end()
-      } catch {
-        /* already closed */
+      const current = executors.get(docId)
+      if (incomingOwner && current.owner && incomingOwner === current.owner) {
+        try {
+          current.res.end()
+        } catch {
+          /* already closed */
+        }
+        if (executors.get(docId) === current) executors.delete(docId)
+      } else {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        })
+        res.write(`event: occupied\ndata: ${JSON.stringify({ docId })}\n\n`)
+        res.end()
+        return
       }
-      executors.delete(docId)
     }
     if (executors.size >= MAX_STREAMS) {
       return json(res, 503, { ok: false, error: 'too many streams' })
@@ -641,8 +669,8 @@ async function handleApi(req, res, pathname, body, url) {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     })
-    res.write(`event: hello\ndata: ${JSON.stringify({ docId })}\n\n`)
-    const entry = { res, lastSeen: Date.now() }
+    const entry = { res, lastSeen: Date.now(), readiness: 'loading', revision: null, error: null, owner: incomingOwner || null }
+    res.write(`event: hello\ndata: ${JSON.stringify({ docId, owner: entry.owner })}\n\n`)
     executors.set(docId, entry)
     const pingTimer = setInterval(() => {
       if (executors.get(docId) !== entry) {
@@ -681,6 +709,23 @@ async function handleApi(req, res, pathname, body, url) {
     if (!executors.has(docId)) {
       return json(res, 200, { ok: false, error: 'executor not registered' })
     }
+    {
+      const ex = executors.get(docId)
+      if (parsed.owner && ex.owner && parsed.owner !== ex.owner) {
+        return json(res, 200, { ok: false, error: 'stale-owner' })
+      }
+    }
+    if (kind === 'status') {
+      const readiness = payload && typeof payload === 'object' ? payload.readiness : null
+      if (!READY_STATES.has(readiness)) {
+        return json(res, 200, { ok: false, error: 'invalid readiness' })
+      }
+      const ex = executors.get(docId)
+      ex.readiness = readiness
+      if (payload.revision != null) ex.revision = String(payload.revision)
+      ex.error = readiness === 'error' && payload.error != null ? String(payload.error) : null
+      return json(res, 200, { ok: true, readiness: ex.readiness, revision: ex.revision })
+    }
     if (kind === 'tool-result' || kind === 'context' || kind === 'export') {
       if (typeof requestId !== 'string' || requestId === '') {
         return json(res, 200, { ok: false, error: 'missing requestId' })
@@ -691,7 +736,6 @@ async function handleApi(req, res, pathname, body, url) {
         pending.delete(requestId)
         p.resolve({ ok: true, kind, payload })
       } else {
-        // late result after TTL — discard and record (never re-deliver)
         console.log(`[control] late ${kind} for ${requestId} discarded (timed out)`)
       }
       return json(res, 200, { ok: true })
@@ -711,7 +755,18 @@ async function handleApi(req, res, pathname, body, url) {
     const target = String(parsed.path ?? '')
     if (!isAbsolute(target)) return json(res, 400, { ok: false, error: 'invalid path' })
     const docId = docIdFor(target)
-    return json(res, 200, { ok: true, docId, path: target, registered: executors.has(docId) })
+    const ex = executors.get(docId)
+    return json(res, 200, {
+      ok: true,
+      docId,
+      path: target,
+      registered: Boolean(ex),
+      readiness: ex?.readiness ?? null,
+      revision: ex?.revision ?? null,
+      error: ex?.error ?? null,
+      occupied: Boolean(ex),
+      owner: ex?.owner ?? null,
+    })
   }
 
   // context / tool / export: forward downstream, await the notify result
@@ -726,10 +781,9 @@ async function handleApi(req, res, pathname, body, url) {
     }
 
     if (op === 'context') {
-      const conn = executors.get(docId)
-      if (!conn) {
-        return json(res, 200, { ok: false, error: 'executor not registered' })
-      }
+      const ready = requireReady(docId)
+      if (!ready.ok) return json(res, 200, ready)
+      const conn = ready.conn
       const requestId = randomUUID()
       const resultPromise = waitForResult(requestId, docId, CONTEXT_TTL_MS, conn)
       if (!pushTo(docId, 'context', { requestId })) {
@@ -738,7 +792,11 @@ async function handleApi(req, res, pathname, body, url) {
       }
       const result = await resultPromise
       if (!result.ok) return json(res, 200, result)
-      return json(res, 200, { ok: true, context: result.payload?.context ?? '' })
+      return json(res, 200, {
+        ok: true,
+        context: result.payload?.context ?? '',
+        revision: result.payload?.revision ?? conn.revision,
+      })
     }
 
     if (op === 'tool') {
@@ -752,9 +810,14 @@ async function handleApi(req, res, pathname, body, url) {
         // any executor lookup — the check is purely local)
         return json(res, 200, { ok: false, error: 'invalid input' })
       }
-      const conn = executors.get(docId)
-      if (!conn) {
-        return json(res, 200, { ok: false, error: 'executor not registered' })
+      const ready = requireReady(docId)
+      if (!ready.ok) return json(res, 200, ready)
+      const conn = ready.conn
+      const expected = call.input.expectedRevision
+      if (typeof expected === 'string' && expected !== '') {
+        if (conn.revision == null || String(expected) !== String(conn.revision)) {
+          return json(res, 200, { ok: false, error: 'conflict', revision: conn.revision })
+        }
       }
       const requestId = randomUUID()
       const resultPromise = waitForResult(requestId, docId, TOOL_TTL_MS, conn)
@@ -764,7 +827,11 @@ async function handleApi(req, res, pathname, body, url) {
       }
       const result = await resultPromise
       if (!result.ok) return json(res, 200, result) // timeout / connection lost (BR-010)
-      return json(res, 200, { ok: true, execution: result.payload })
+      if (result.payload?.revision != null) conn.revision = String(result.payload.revision)
+      if (result.payload?.isError && result.payload?.error === 'conflict') {
+        return json(res, 200, { ok: false, error: 'conflict', revision: result.payload.revision ?? conn.revision, execution: result.payload })
+      }
+      return json(res, 200, { ok: true, execution: result.payload, revision: result.payload?.revision ?? conn.revision })
     }
 
     if (op === 'export') {
@@ -781,10 +848,9 @@ async function handleApi(req, res, pathname, body, url) {
         const pre = await preflightDest(destHint, saveAs !== null)
         if (!pre.ok) return json(res, 200, pre)
       }
-      const conn = executors.get(docId)
-      if (!conn) {
-        return json(res, 200, { ok: false, error: 'executor not registered' })
-      }
+      const ready = requireReady(docId)
+      if (!ready.ok) return json(res, 200, ready)
+      const conn = ready.conn
       const requestId = randomUUID()
       const resultPromise = waitForResult(requestId, docId, EXPORT_TTL_MS, conn)
       if (!pushTo(docId, 'export', { requestId })) {
@@ -821,7 +887,10 @@ async function handleApi(req, res, pathname, body, url) {
       const expected = exclusive
         ? undefined
         : (mtimeMs !== undefined && mtimeMs !== null ? mtimeMs : parsed.expectedMtimeMs)
-      const written = await writeFileAtomic(dest, buf, expected, { exclusive })
+      const written = await writeFileAtomic(dest, buf, expected, {
+        exclusive,
+        expectedRevision: payload.expectedRevision ?? parsed.expectedRevision,
+      })
       if (!written.ok) return json(res, 200, written)
       let destMtimeMs = null
       try {
@@ -829,8 +898,15 @@ async function handleApi(req, res, pathname, body, url) {
       } catch (e) {
         console.error('[export] stat after write failed', dest, e)
       }
+      const destRevision = createHash('sha256').update(buf).digest('hex')
       if (!saveAs) {
-        pushTo(docId, 'saved', { mtimeMs: destMtimeMs })
+        pushTo(docId, 'saved', {
+          mtimeMs: destMtimeMs,
+          exportRevision: payload.exportRevision ?? null,
+          revision: payload.exportRevision ?? conn.revision,
+          owner: payload.owner ?? conn.owner ?? null,
+          fileRevision: destRevision,
+        })
       }
       return json(res, 200, { ok: true, path: dest, name, mtimeMs: destMtimeMs })
     }
@@ -865,6 +941,7 @@ async function handleApi(req, res, pathname, body, url) {
         mime: 'application/octet-stream',
         name: abs.split('/').pop() ?? 'file',
         mtimeMs,
+        fileRevision: createHash('sha256').update(data).digest('hex'),
       })
     } catch (e) {
       return json(res, 200, { ok: false, error: e.message })
@@ -899,7 +976,13 @@ async function handleApi(req, res, pathname, body, url) {
     if (buf.length > MAX_FILE_BYTES) {
       return json(res, 413, { ok: false, error: 'file too large' })
     }
-    const written = await writeFileAtomic(target, buf, parsed.expectedMtimeMs)
+    const destExists = existsSync(target)
+    if (destExists && parsed.expectedRevision == null && parsed.expectedMtimeMs == null) {
+      return json(res, 200, { ok: false, error: 'conflict' })
+    }
+    const written = await writeFileAtomic(target, buf, parsed.expectedMtimeMs, {
+      expectedRevision: parsed.expectedRevision,
+    })
     if (!written.ok) return json(res, 200, written)
     let mtimeMs = null
     try {

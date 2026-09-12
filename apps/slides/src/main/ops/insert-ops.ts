@@ -17,11 +17,16 @@ import {
   type NewChartKind,
   type NewChartOptions,
   type NewElementOptions,
+  type NewTableOptions,
   type Paragraph,
 } from '@genoffice/pptx-engine'
 import {
+  coerceBytes,
+  dataUrlExt,
   GuidedError,
   register,
+  requireFinite,
+  requireHexColor,
   resolveElement,
   resolveSlide,
   type Op,
@@ -43,11 +48,19 @@ function reqRect(op: Op): { x: number; y: number; cx: number; cy: number } {
 }
 
 function reqBytes(op: Op, field = 'bytes'): Uint8Array {
-  const v = op[field]
-  if (!(v instanceof Uint8Array) || v.length === 0) {
-    throw new GuidedError(`op "${op.op}" needs "${field}": non-empty image/media bytes.`)
+  // JSON surfaces send base64/data URLs; decode once and write back so the
+  // repeated validate/apply passes reuse the decoded bytes
+  const coerced = coerceBytes(op[field], op.op, field)
+  op[field] = coerced
+  return coerced
+}
+
+/** Derive a missing ext from a data URL's mime before the bytes get decoded. */
+function fillExtFromDataUrl(op: Op, field = 'bytes'): void {
+  if (typeof op.ext !== 'string' || !op.ext) {
+    const hint = dataUrlExt(op[field])
+    if (hint) op.ext = hint
   }
-  return v
 }
 
 // ── addElement (textbox / preset shape / line) ──────────────────────────
@@ -58,6 +71,23 @@ register({
     reqRect(op)
     if (typeof op.kind !== 'string' || !op.kind) {
       throw new GuidedError('op "addElement" needs "kind": "textbox" or a preset geometry name.')
+    }
+    if (op.adjustments !== undefined) {
+      if (
+        typeof op.adjustments !== 'object' ||
+        op.adjustments === null ||
+        Object.values(op.adjustments).some((v) => typeof v !== 'number' || !Number.isFinite(v))
+      ) {
+        throw new GuidedError(
+          'op "addElement": "adjustments" must map avLst guide names to finite numbers, e.g. {adj: 25000} for roundRect corner radius.',
+        )
+      }
+    }
+    const autoFit = (op.bodyPr as { autoFit?: unknown } | undefined)?.autoFit
+    if (autoFit !== undefined && autoFit !== 'shrink' && autoFit !== 'resize') {
+      throw new GuidedError(
+        'op "addElement": "bodyPr.autoFit" must be "shrink" (fit text on overflow) or "resize" (grow the shape).',
+      )
     }
   },
   apply(op, ctx): OpRecord {
@@ -71,6 +101,9 @@ register({
       ...(typeof op.fill === 'string' ? { fillColor: op.fill } : {}),
       ...(op.stroke ? { stroke: op.stroke as NewElementOptions['stroke'] } : {}),
       ...(op.bodyPr ? { bodyPr: op.bodyPr as NewElementOptions['bodyPr'] } : {}),
+      ...(op.adjustments
+        ? { adjustments: op.adjustments as NewElementOptions['adjustments'] }
+        : {}),
     })
     return { op, created: [el.id] }
   },
@@ -82,6 +115,7 @@ register({
   validate(op, ctx) {
     resolveSlide(ctx, op)
     reqRect(op)
+    fillExtFromDataUrl(op)
     reqBytes(op)
     if (typeof op.ext !== 'string' || !op.ext) {
       throw new GuidedError('op "addPicture" needs "ext": the image extension (png/jpg/…).')
@@ -110,6 +144,7 @@ register({
   name: 'replacePicture',
   validate(op, ctx) {
     resolveElement(ctx, op)
+    fillExtFromDataUrl(op)
     reqBytes(op)
     if (typeof op.ext !== 'string' || !op.ext) {
       throw new GuidedError('op "replacePicture" needs "ext": the image extension.')
@@ -143,6 +178,26 @@ register({
     if (typeof op.rows !== 'number' || typeof op.cols !== 'number' || op.rows < 1 || op.cols < 1) {
       throw new GuidedError('op "addTable" needs "rows" and "cols" (>= 1).')
     }
+    const reqEmuList = (key: 'colWidthsEmu' | 'rowHeightsEmu', count: number, dim: string) => {
+      const v = op[key]
+      if (v === undefined) return
+      if (
+        !Array.isArray(v) ||
+        v.length !== count ||
+        v.some((n) => typeof n !== 'number' || !Number.isFinite(n) || n <= 0)
+      ) {
+        throw new GuidedError(
+          `op "addTable": "${key}" must list exactly ${count} positive EMU values (one per ${dim}).`,
+        )
+      }
+    }
+    reqEmuList('colWidthsEmu', Math.floor(op.cols), 'column')
+    reqEmuList('rowHeightsEmu', Math.floor(op.rows), 'row')
+    if (op.cellProps !== undefined && !Array.isArray(op.cellProps)) {
+      throw new GuidedError(
+        'op "addTable": "cellProps" must be a row-major array of per-cell {gridSpan?,rowSpan?,hMerge?,vMerge?,anchor?}.',
+      )
+    }
   },
   apply(op, ctx): OpRecord {
     const { index } = resolveSlide(ctx, op)
@@ -150,6 +205,9 @@ register({
       rows: op.rows as number,
       cols: op.cols as number,
       offset: reqRect(op),
+      ...(op.colWidthsEmu ? { colWidthsEmu: op.colWidthsEmu as number[] } : {}),
+      ...(op.rowHeightsEmu ? { rowHeightsEmu: op.rowHeightsEmu as number[] } : {}),
+      ...(op.cellProps ? { cellProps: op.cellProps as NewTableOptions['cellProps'] } : {}),
     })
     if (!r) throw new GuidedError('op "addTable": the table could not be inserted.')
     return { op, created: [r.elementId] }
@@ -162,8 +220,28 @@ register({
     resolveSlide(ctx, op)
     reqRect(op)
     if (typeof op.kind !== 'string') throw new GuidedError('op "addChart" needs "kind".')
-    if (!Array.isArray(op.categories) || !Array.isArray(op.series)) {
-      throw new GuidedError('op "addChart" needs "categories" and "series" arrays.')
+    // The engine returns null on empty data, which reads as a generic
+    // "could not be inserted" — reject with the actual reason instead
+    if (!Array.isArray(op.categories) || op.categories.length === 0) {
+      throw new GuidedError('op "addChart" needs "categories": at least one category label.')
+    }
+    if (
+      !Array.isArray(op.series) ||
+      op.series.length === 0 ||
+      (op.series as Array<{ values?: unknown }>).some((s) => !Array.isArray(s?.values))
+    ) {
+      throw new GuidedError('op "addChart" needs "series": at least one {name, values[]}.')
+    }
+    if (op.colorScheme !== undefined) {
+      if (!Array.isArray(op.colorScheme) || op.colorScheme.length === 0) {
+        throw new GuidedError(
+          'op "addChart": "colorScheme" must be a non-empty array of "#RRGGBB" series colors (cycled over the series).',
+        )
+      }
+      for (const c of op.colorScheme) requireHexColor(c, 'addChart', 'colorScheme[]')
+    }
+    if (op.holeSizePct !== undefined) {
+      requireFinite(op.holeSizePct, 'addChart', 'holeSizePct')
     }
   },
   apply(op, ctx): OpRecord {
@@ -175,6 +253,8 @@ register({
       categories: op.categories as string[],
       series: op.series as NewChartOptions['series'],
       offset: reqRect(op),
+      ...(op.colorScheme ? { colorScheme: op.colorScheme as string[] } : {}),
+      ...(typeof op.holeSizePct === 'number' ? { holeSizePct: op.holeSizePct } : {}),
     })
     if (!r) throw new GuidedError('op "addChart": the chart could not be inserted.')
     return { op, created: [r.elementId] }
@@ -208,11 +288,23 @@ register({
   validate(op, ctx) {
     resolveSlide(ctx, op)
     reqRect(op)
+    fillExtFromDataUrl(op)
     reqBytes(op)
     if (op.kind !== 'video' && op.kind !== 'audio') {
       throw new GuidedError('op "addMedia" needs "kind": "video" or "audio".')
     }
     if (typeof op.ext !== 'string' || !op.ext) throw new GuidedError('op "addMedia" needs "ext".')
+    const poster = op.poster as { bytes?: unknown; ext?: unknown } | undefined
+    if (poster) {
+      if (typeof poster.ext !== 'string' || !poster.ext) {
+        const hint = dataUrlExt(poster.bytes)
+        if (hint) poster.ext = hint
+      }
+      poster.bytes = coerceBytes(poster.bytes, 'addMedia', 'poster.bytes')
+      if (typeof poster.ext !== 'string' || !poster.ext) {
+        throw new GuidedError('op "addMedia" needs "poster.ext" when a poster is given.')
+      }
+    }
   },
   apply(op, ctx): OpRecord {
     const { index } = resolveSlide(ctx, op)

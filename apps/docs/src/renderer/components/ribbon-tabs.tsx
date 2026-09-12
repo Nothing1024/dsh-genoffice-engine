@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import type { Editor, JSONContent } from '@tiptap/core'
+import { TextSelection } from '@tiptap/pm/state'
 import {
   SHAPE_GALLERY_GROUPS,
   useDismissablePopover,
@@ -16,7 +17,9 @@ import {
   type TextboxDisplay,
 } from '@genoffice/docx-engine'
 import type { DocsTabInfo } from '../../shared/ipc'
+import { runUiOps } from '../ai/ops'
 import { tableModelToPmNode } from '../editor/convert'
+import { insertPageBreak } from '../editor/page-break'
 import { isStraightLineKind } from '../editor/shape-svg'
 import type { InkTool } from '../editor/ink'
 import { t, useI18n, type StringKey } from '../i18n/locale'
@@ -43,6 +46,7 @@ import {
   IconPrintLayout,
   IconReadMode,
   IconRuler,
+  IconSpellcheck,
   IconSplit,
   IconSwitchWindows,
   IconRedo,
@@ -78,19 +82,99 @@ export type SetDropdown = (updater: (prev: string | null) => string | null) => v
 export const toggleDropdown = (setDropdown: SetDropdown, key: string) =>
   setDropdown((prev) => (prev === key ? null : key))
 
-/** apply paragraph-level attrs to every block type in the selection */
-export function setParaAttrs(editor: Editor, attrs: Record<string, unknown>): void {
-  let chain = editor
-    .chain()
-    .focus()
-    .updateAttributes('docParagraph', attrs)
-    .updateAttributes('docHeading', attrs)
-    .updateAttributes('docListItem', attrs)
-  // alignment also applies to selected images (w:jc on the image paragraph)
-  if ('align' in attrs) {
-    chain = chain.updateAttributes('docProtected', { imageAlign: attrs.align ?? null })
-  }
-  chain.run()
+/**
+ * Apply paragraph-level attrs to every paragraph in the selection (the
+ * setParagraphAttrs op: headings, list items and table-cell paragraphs alike;
+ * `align` also lands on selected images as their w:jc).
+ */
+export function setParaAttrs(
+  editor: Editor,
+  attrs: Record<string, unknown>,
+  /// Explicit target range: blur-committed inputs capture the selection at
+  /// focus time — by blur, a click may already have moved the live selection
+  /// to another paragraph (alpha ledger r131 / bugbot).
+  range?: { from: number; to: number },
+): void {
+  const size = editor.state.doc.content.size
+  const target = range
+    ? { range: { from: Math.min(range.from, size), to: Math.min(range.to, size) } }
+    : { scope: 'selection' as const }
+  runUiOps(editor, [{ op: 'setParagraphAttrs', target, attrs }], { focus: !range })
+}
+
+/** direct paragraph formatting dropped by Word's Ctrl+Q (the style's own values then show through) */
+const DIRECT_PARA_ATTRS: Record<string, unknown> = {
+  align: null,
+  lineSpacing: null,
+  lineRule: null,
+  lineRawTwips: null,
+  indentLeft: null,
+  indentRight: null,
+  indentFirstLine: null,
+  spaceBefore: null,
+  spaceAfter: null,
+  spaceBeforeAuto: null,
+  spaceAfterAuto: null,
+  contextualSpacing: null,
+  shadingFill: null,
+  borders: null,
+  borderLines: null,
+  tabStops: null,
+  dropCap: null,
+  pageBreakBefore: false,
+}
+
+/** Word's Ctrl+Q: reset the paragraph to its style, keeping the text and its character formatting */
+export function clearParagraphFormatting(editor: Editor): void {
+  setParaAttrs(editor, { ...DIRECT_PARA_ATTRS })
+}
+
+/** apply a gallery paragraph style; not for textbox sub-editors (no docHeading in their schema) */
+export function applyParagraphStyle(editor: Editor, key: 'p' | 'h1' | 'h2' | 'h3'): void {
+  let c = editor.chain().focus()
+  if (key === 'p') c = c.setNode('docParagraph')
+  else c = c.setNode('docHeading', { level: Number(key.slice(1)) })
+  // Word-like: applying a paragraph style sheds the runs' direct font/size/color.
+  // Those render as inline span styles and would otherwise mask the style's look
+  // entirely (the click would seem to do nothing on documents whose body runs
+  // carry explicit rPr, common in CJK templates).
+  c.command(({ tr }) => {
+    const { from, to } = tr.selection
+    let start = from
+    let end = to
+    tr.doc.nodesBetween(from, to, (node, pos) => {
+      if (node.isTextblock) {
+        start = Math.min(start, pos + 1)
+        end = Math.max(end, pos + node.nodeSize - 1)
+      }
+    })
+    const type = editor.schema.marks.docTextStyle
+    const jobs: Array<{ from: number; to: number; attrs: Record<string, unknown> | null }> = []
+    tr.doc.nodesBetween(start, end, (node, pos) => {
+      if (!node.isText) return
+      const m = node.marks.find((mm) => mm.type === type)
+      if (!m) return
+      if (
+        m.attrs.color == null &&
+        m.attrs.sizeHalfPoints == null &&
+        m.attrs.font == null &&
+        m.attrs.fontAscii == null
+      )
+        return
+      const attrs = { ...m.attrs, color: null, sizeHalfPoints: null, font: null, fontAscii: null }
+      const keep = Object.values(attrs).some((v) => v !== null)
+      jobs.push({
+        from: Math.max(pos, start),
+        to: Math.min(pos + node.nodeSize, end),
+        attrs: keep ? attrs : null,
+      })
+    })
+    for (const job of jobs) {
+      tr.removeMark(job.from, job.to, type)
+      if (job.attrs) tr.addMark(job.from, job.to, type.create(job.attrs))
+    }
+    return true
+  }).run()
 }
 
 /** attrs of the paragraph-like node at the cursor */
@@ -136,6 +220,8 @@ export function insertTableAt(editor: Editor, rows: number, cols: number): void 
   const table = {
     rows: Array.from({ length: rows }, () => Array.from({ length: cols }, () => ({ paras: [''] }))),
     colWidthsPct: Array.from({ length: cols }, () => 100 / cols),
+    widthPct: 100,
+    autoFit: 'window' as const,
     borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line },
   }
   // inside a cell a top-level docTable insert would split the outer table
@@ -147,12 +233,29 @@ export function insertTableAt(editor: Editor, rows: number, cols: number): void 
       editor
         .chain()
         .focus()
-        .insertContentAt($from.end(depth), { type: 'docNestedTable', attrs: { model: table } })
+        .insertContentAt($from.end(depth), [
+          { type: 'docNestedTable', attrs: { model: table } },
+          { type: 'docParagraph' },
+        ])
         .run()
       return
     }
   }
-  editor.chain().focus().insertContent(tableModelToPmNode(table)).run()
+  const node = tableModelToPmNode(table)
+  // Word: an empty paragraph stays below the new table (insertContent would
+  // swallow it); the caret lands in the first cell either way
+  const block = $from.depth > 0 ? $from.node(1) : null
+  const at = block?.isTextblock && block.content.size === 0 ? $from.before(1) : null
+  const chain = editor.chain().focus()
+  if (at == null) chain.insertContent(node).run()
+  else
+    chain
+      .insertContentAt(at, node)
+      .command(({ tr }) => {
+        tr.setSelection(TextSelection.near(tr.doc.resolve(at + 1)))
+        return true
+      })
+      .run()
 }
 
 /** Insert an inline image from a dataURL at the cursor (shared by paste/dialog; size scaled to content width) */
@@ -189,6 +292,21 @@ export async function insertImageFromDataUrl(
         },
       })
       .run()
+    // Pasting into an empty document leaves the image as the ONLY node with a
+    // node-selection on it: there is no text position to type at, and the
+    // next keystroke REPLACES the picture (alpha ledger r152). Ensure a
+    // paragraph follows the image and put a text caret there — also what
+    // Word does after inserting a picture.
+    {
+      const { doc, selection, schema } = editor.state
+      const after = Math.min(selection.to, doc.content.size)
+      const nextIsTextblock = doc.resolve(after).nodeAfter?.isTextblock === true
+      const chain = editor.chain()
+      if (!nextIsTextblock && schema.nodes.docParagraph) {
+        chain.insertContentAt(after, { type: 'docParagraph' })
+      }
+      chain.setTextSelection(after + 1).run()
+    }
     return true
   } catch {
     return false
@@ -290,13 +408,18 @@ export function insertShapeAt(
     borderHex: '2F5496',
     withTextbox: true,
   })
+  // mirrors what buildShapeParagraphXml just wrote: centered both ways, and the
+  // light text the shape style's a:fontRef resolves to. Without this the shape
+  // reads top-left and black until the file is saved and reopened.
   const textbox: TextboxDisplay = {
     fill: '4472C4',
     borderColor: '2F5496',
     widthPx: Math.round(widthEmu / 9525),
     heightPx: Math.round(heightEmu / 9525),
     prst,
-    paras: [{ runs: [{ text: '' }] }],
+    vAlign: 'center',
+    textColor: 'FFFFFF',
+    paras: [{ runs: [{ text: '' }], align: 'center' }],
   }
   const content = {
     type: 'docProtected',
@@ -416,11 +539,7 @@ export function insertWordArtAt(editor: Editor, preset: WordArtPreset): void {
 }
 
 export function insertPageBreakAt(editor: Editor): void {
-  editor
-    .chain()
-    .focus()
-    .insertContent({ type: 'docParagraph', attrs: { pageBreakBefore: true } })
-    .run()
+  insertPageBreak(editor)
 }
 
 /**
@@ -487,8 +606,12 @@ export interface InsertTabProps extends TabProps {
   onTitlePg: (v: boolean) => void
   evenOddHf: boolean
   onEvenOddHf: (v: boolean) => void
-  commentCount: number
-  onShowComments: () => void
+  /** a selection (or a caret in a word) to anchor a new comment on, as in the Review tab */
+  canComment: boolean
+  onNewComment: () => void
+  /** the Review-tab gate pair: commenting survives the comments-only restriction */
+  isProtected: boolean
+  commentsAllowed: boolean
 }
 
 /** target languages of Word's Translate dropdown that the AI backend can serve;
@@ -512,12 +635,17 @@ export type RevisionDisplayMode = 'all' | 'none' | 'original'
 interface ReviewTabProps extends TabProps {
   onAiPreset: (instruction: string) => void
   commentCount: number
+  /** unresolved root comments; 0 disables the AI resolve-comments action */
+  openCommentCount: number
   onShowComments: () => void
   /** create a comment on the current selection (disabled when selection is empty) */
   canComment: boolean
   onNewComment: () => void
   trackChanges: boolean
   onTrackChanges: (on: boolean) => void
+  /** native check-as-you-type spellcheck (red squiggle) */
+  spellcheck: boolean
+  onSpellcheck: (on: boolean) => void
   revisionDisplay: RevisionDisplayMode
   onRevisionDisplay: (mode: RevisionDisplayMode) => void
   revisionCount: number
@@ -537,16 +665,20 @@ interface ReviewTabProps extends TabProps {
 }
 
 export function ReviewTab({
+  editor,
   hasDoc,
   dropdown,
   setDropdown,
   onAiPreset,
   commentCount,
+  openCommentCount,
   onShowComments,
   canComment,
   onNewComment,
   trackChanges,
   onTrackChanges,
+  spellcheck,
+  onSpellcheck,
   revisionDisplay,
   onRevisionDisplay,
   revisionCount,
@@ -570,6 +702,8 @@ export function ReviewTab({
     localStorage.setItem(AI_REWRITE_ACK_KEY, '1')
     return true
   }
+  // With a range selection the rewrite scopes to the selection (no whole-document ack needed)
+  const hasRangeSelection = () => !editor.state.selection.empty
   return (
     <>
       {/* Word: Proofing (Editor) sits leftmost */}
@@ -580,7 +714,8 @@ export function ReviewTab({
             disabled={!hasDoc}
             data-tip={`${t('ribbonEditorTip')} — ${t('ribbonAiCreditNote')}`}
             onClick={() => {
-              if (confirmAiRewrite()) onAiPreset(t('ribbonEditorPrompt'))
+              if (hasRangeSelection()) onAiPreset(t('ribbonEditorSelectionPrompt'))
+              else if (confirmAiRewrite()) onAiPreset(t('ribbonEditorPrompt'))
             }}
           >
             <span className="rb-big-icon">
@@ -589,6 +724,17 @@ export function ReviewTab({
               </span>
             </span>
             <span>{t('ribbonEditorBtn')}</span>
+          </button>
+          <button
+            className={`rb-big ${spellcheck ? 'active' : ''}`}
+            disabled={!hasDoc}
+            data-tip={t('ribbonSpellcheckTip')}
+            onClick={() => onSpellcheck(!spellcheck)}
+          >
+            <span className="rb-big-icon">
+              <IconSpellcheck size={BIG} />
+            </span>
+            <span>{t('ribbonSpellcheckBtn')}</span>
           </button>
         </div>
         <div className="ribbon-group-label">{t('ribbonGroupProofing')}</div>
@@ -620,7 +766,9 @@ export function ReviewTab({
                     key={lang.labelKey}
                     onClick={() => {
                       setDropdown(() => null)
-                      if (confirmAiRewrite()) {
+                      if (hasRangeSelection()) {
+                        onAiPreset(t('ribbonTranslateSelectionPrompt', { lang: t(lang.labelKey) }))
+                      } else if (confirmAiRewrite()) {
                         onAiPreset(t('ribbonTranslatePrompt', { lang: t(lang.labelKey) }))
                       }
                     }}
@@ -660,6 +808,32 @@ export function ReviewTab({
               <IconComments size={BIG} />
             </span>
             <span>{t('ribbonShowComments')}</span>
+          </button>
+          <button
+            className="rb-big"
+            disabled={!hasDoc || openCommentCount === 0}
+            data-tip={`${t('ribbonAiCommentsTip', { count: openCommentCount })} — ${t('ribbonAiCreditNote')}`}
+            onClick={() => onAiPreset(t('ribbonAiCommentsPrompt'))}
+          >
+            <span className="rb-big-icon">
+              <span className="ai-feature-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-3 3V11.5a7.5 7.5 0 0 1 7.5-7.5h2A7.5 7.5 0 0 1 20 11.5z" />
+                  <path
+                    d="M17 14l.26.7c.34.91.5 1.37.84 1.7.33.33.79.5 1.7.84l.7.26-.7.26c-.91.34-1.37.5-1.7.84-.34.33-.5.79-.84 1.7L17 21l-.26-.7c-.34-.91-.5-1.37-.84-1.7-.33-.34-.79-.5-1.7-.84l-.7-.26.7-.26c.91-.34 1.37-.5 1.7-.84.34-.33.5-.79.84-1.7L17 14z"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+            </span>
+            <span>{t('ribbonAiComments')}</span>
           </button>
         </div>
         <div className="ribbon-group-label">{t('ribbonGroupComments')}</div>
@@ -806,6 +980,33 @@ export function ReviewTab({
             </span>
             <span>{t('ribbonNextChange')}</span>
           </button>
+          <button
+            className="rb-big"
+            disabled={!hasDoc || revisionCount === 0}
+            data-tip={`${t('ribbonAiRevisionsTip', { count: revisionCount })} — ${t('ribbonAiCreditNote')}`}
+            onClick={() => onAiPreset(t('ribbonAiRevisionsPrompt'))}
+          >
+            <span className="rb-big-icon">
+              <span className="ai-feature-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M4 5h16M4 9h12M4 13h9M4 17h7" />
+                  <path
+                    d="M17 14l.26.7c.34.91.5 1.37.84 1.7.33.33.79.5 1.7.84l.7.26-.7.26c-.91.34-1.37.5-1.7.84-.34.33-.5.79-.84 1.7L17 21l-.26-.7c-.34-.91-.5-1.37-.84-1.7-.33-.34-.79-.5-1.7-.84l-.7-.26.7-.26c.91-.34 1.37-.5 1.7-.84.34-.33.5-.79.84-1.7L17 14z"
+                    strokeLinejoin="round"
+                  />
+                  <path d="M19.5 4.5l-7 7-2 .5.5-2 7-7z" />
+                </svg>
+              </span>
+            </span>
+            <span>{t('ribbonAiRevisions')}</span>
+          </button>
         </div>
         <div className="ribbon-group-label">{t('ribbonGroupTracking')}</div>
       </div>
@@ -867,8 +1068,8 @@ interface ViewTabProps {
   /** BR-006: control mode hides every AI assistant surface (genoffice-dsh-control) */
   hideAi?: boolean
   onToggleAi: () => void
-  darkCanvas: boolean
-  onDarkCanvas: (v: boolean) => void
+  darkPage: boolean
+  onDarkPage: (v: boolean) => void
   showRuler: boolean
   onShowRuler: (v: boolean) => void
   showNav: boolean
@@ -893,8 +1094,8 @@ export function ViewTab({
   showAi,
   hideAi = false,
   onToggleAi,
-  darkCanvas,
-  onDarkCanvas,
+  darkPage,
+  onDarkPage,
   showRuler,
   onShowRuler,
   showNav,
@@ -1072,9 +1273,9 @@ export function ViewTab({
           </button>
           )}
           <button
-            className={`rb-big ${darkCanvas ? 'active' : ''}`}
+            className={`rb-big ${darkPage ? 'active' : ''}`}
             data-tip={t('ribbonDarkModeTip')}
-            onClick={() => onDarkCanvas(!darkCanvas)}
+            onClick={() => onDarkPage(!darkPage)}
           >
             <span className="rb-big-icon">
               <IconMoon size={BIG} />

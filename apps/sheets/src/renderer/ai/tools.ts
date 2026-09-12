@@ -42,6 +42,8 @@ export interface SheetRef {
    * after structural changes within the session */
   readonly rows?: number
   readonly columns?: number
+  /** Worksheet XML above the gateway save-patch cap: readable, never editable. */
+  readonly readOnlyOversized?: boolean
 }
 
 export interface ChartRef {
@@ -51,8 +53,26 @@ export interface ChartRef {
   readonly sheetId: string
 }
 
+/**
+ * The user's selection captured when they sent the message. The grid selection
+ * is live: users keep clicking around while the AI works, so reading it at
+ * tool-call time would silently retarget "this column" mid-run.
+ */
+export interface FrozenSelection {
+  /** A1 notation on the sheet it was taken from, clamped to the data extent so
+   *  a whole-column click is not reported as a million rows */
+  readonly a1: string
+  readonly sheetId: string
+  /** header names when the selection covers whole columns */
+  readonly columns?: readonly string[]
+}
+
 export interface ActiveSheetInfo {
   readonly mode: 'demo' | 'lazy' | 'none'
+  /** lazy mode only: the file is too large for a full load — cached values
+   * stream in per viewport, and the live formula engine never sees the whole
+   * data (formula writes over the file's sheets are gated) */
+  readonly streaming?: boolean | undefined
   readonly sheetId: string
   readonly sheetName: string
   /** demo mode only: current revision, needed for the CAS-checked plan() call */
@@ -63,8 +83,14 @@ export interface ActiveSheetInfo {
   readonly loadedRange?: string | undefined
   /** every sheet in the workbook, active one included */
   readonly sheets: readonly SheetRef[]
-  /** current selection in A1 notation, when one exists */
+  /** the selection to interpret "this column / these rows" against, in A1
+   * notation (sheet-qualified when it is not the active sheet) */
   readonly selection?: string | undefined
+  /** the selection above is the send-time snapshot rather than a live read */
+  readonly selectionFrozen?: boolean | undefined
+  /** header names of the columns the selection covers, when it covers whole
+   * ones — what the user means by "this column" */
+  readonly selectionColumns?: readonly string[] | undefined
   /** merged ranges on the active sheet (A1 notation) */
   readonly merges?: readonly string[] | undefined
   /** charts in the workbook (imported files only) */
@@ -145,6 +171,34 @@ export interface TraceDependentsOutcome {
   readonly error?: string
 }
 
+/** every file type create_document can produce */
+export type CreateDocumentFileType = 'xlsx' | 'csv' | 'docx' | 'pdf' | 'md' | 'html'
+
+/** create_document request handed to the App: xlsx/csv name a worksheet to
+ * export; docx/pdf/md/html carry AI-authored content (routed to the docs flow).
+ * Members keep singleton discriminants so the type narrows properly. */
+export type CreateDocumentToolRequest =
+  | { type: 'xlsx'; sheetId?: string | undefined; title?: string | undefined }
+  | { type: 'csv'; sheetId?: string | undefined; title?: string | undefined }
+  | { type: 'docx'; title: string; content: string }
+  | { type: 'pdf'; title: string; content: string }
+  | { type: 'md'; title: string; content: string }
+  | { type: 'html'; title: string; content: string }
+
+export type CreateDocumentToolOutcome =
+  | {
+      ok: true
+      /** final file name including extension (title may default to the sheet name) */
+      name: string
+      /** absolute path when the file was written directly (docx opens a tab that saves itself) */
+      path?: string
+      /** xlsx/csv: the exported worksheet's name */
+      sheetName?: string
+      /** xlsx/csv: the sheet holds formulas — the file keeps computed values only */
+      hadFormulas?: boolean
+    }
+  | { ok: false; error: string }
+
 export interface SheetsSkillDeps {
   getActiveSheetInfo(): ActiveSheetInfo
   /** Ensure a lazy workbook range is present in Univer before reading it. */
@@ -188,6 +242,10 @@ export interface SheetsSkillDeps {
     operations: readonly WorkbookOperation[],
     summary: string,
   ): { ok: true; plan: ChangePlan; applied?: Promise<ApplyOutcome> } | { ok: false; error: string }
+  /** AI create_document: write a new standalone file (xlsx/csv from a
+   * worksheet; docx/pdf/md from content) into the default save folder and
+   * open it in a new tab (ai/create-document.ts). */
+  createDocument?(request: CreateDocumentToolRequest): Promise<CreateDocumentToolOutcome>
 }
 
 const MAX_READ_ADDRESSES = 100
@@ -377,8 +435,9 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
     name: 'select_range',
     description:
       "Select a range in the grid and scroll the user's view to it, activating its sheet. " +
-      'Use when pointing the user at a location ("the issue is in C42") so the spot is visible on screen. ' +
-      'Pure view navigation — changes no data.',
+      'Pure view navigation — changes no data, but it does replace whatever the user had selected. ' +
+      'Use it only when they asked to be moved ("take me there", "select those rows"); to merely point at a ' +
+      'location, cite it as [C42](sheetnav://C42) in your reply and let them click.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -444,7 +503,7 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
       'data(set_hyperlink/set_filter/clear_filter/set_filter_criteria/add_conditional_format/' +
       'clear_conditional_formats/set_data_validation/set_note/add_defined_name/delete_defined_name). ' +
       'Limits: structural operations (row/column insert-delete, sheet add/delete/duplicate/move/hide) cannot share a batch with other classes; at most 2000 expanded cell changes — ' +
-      'except the range-level bulk ops fill_range / copy_range / convert_to_values / clear_range / find_replace / format_range, which handle up to 200,000 cells in one op ' +
+      'except the range-level bulk ops fill_range / copy_range / convert_to_values / clear_range / find_replace / sort_range / format_range, which handle up to 200,000 cells in one op ' +
       '(use fill_range to fill a formula or pattern down a whole column instead of huge set_range batches, ' +
       'copy_range to duplicate a large block once, convert_to_values to freeze formulas into their computed values); ' +
       'sheetId must be an id returned by get_workbook_context.',
@@ -459,6 +518,41 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
         summary: { type: 'string', description: 'One-sentence summary of this batch of changes' },
       },
       required: ['operations', 'summary'],
+    },
+  },
+  {
+    name: 'create_document',
+    description:
+      'Create a NEW standalone file in the default save folder and open it in a new tab; the current workbook is not modified. ' +
+      "Types 'xlsx' (default) and 'csv' export ONE worksheet of THIS workbook: pass sheetId (defaults to the active sheet); the file gets the sheet's current displayed values (formula results; formulas and formatting are not carried over) and content must be omitted. " +
+      'To split a workbook into separate files, call once per sheet. To export data that is not in a sheet yet, write it into a new sheet first (add_sheet + set_range), then export that sheet. ' +
+      "Types 'docx' and 'pdf' take simple HTML in content (<h1>-<h6>, <p>, <ul>/<ol>/<li>, <table>, <pre>, <blockquote>; inline <strong>/<em>/<u>/<s>); type 'md' takes Markdown source; type 'html' takes a complete standalone HTML page (opens in the HTML editor) — use these when the user wants a report/summary as its own document. " +
+      'title becomes the file name; xlsx/csv default it to the worksheet name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['xlsx', 'csv', 'docx', 'pdf', 'md', 'html'],
+          description: "target file type (default 'xlsx')",
+        },
+        sheetId: {
+          type: 'string',
+          description:
+            'xlsx/csv only: the worksheet to export (id from get_workbook_context); defaults to the active sheet',
+        },
+        title: {
+          type: 'string',
+          description:
+            'file name without extension (required for docx/pdf/md; xlsx/csv default to the sheet name)',
+        },
+        content: {
+          type: 'string',
+          description:
+            'docx/pdf: simple HTML; md: Markdown source. Forbidden for xlsx/csv — their data comes from the worksheet',
+        },
+      },
+      required: [],
     },
   },
 ]
@@ -514,6 +608,18 @@ function clampToExtent(bounds: RangeBounds, sheet: SheetRef | undefined): RangeB
 const RANGE_NOT_LOADED =
   'The requested cells could not be fully loaded; retry after workbook indexing completes.'
 
+/** mirror of the docs/pdf tool-echo guard: reject tool-protocol output pasted
+ * as document content (create_document docx/pdf) */
+function contentEchoError(content: string): string | null {
+  if (/<\/?tool_response>/i.test(content)) {
+    return 'content contains a literal <tool_response> tag — that is tool-protocol output, not document content; retry with the actual document HTML'
+  }
+  if (/"index"\s*:\s*\d+\s*,\s*"type"\s*:\s*"/.test(content)) {
+    return 'content contains a raw JSON dump, not an HTML fragment; retry with simple HTML (e.g. <p>…</p>)'
+  }
+  return null
+}
+
 /** Shared input validation for the two formula-audit tools. */
 function parseAuditAddress(
   input: Record<string, unknown>,
@@ -549,7 +655,18 @@ export function buildWorkbookContext(deps: SheetsSkillDeps): string {
     `Active sheet: ${info.sheetName} (id=${info.sheetId}${active ? dims(active) : ''})`,
     info.mode === 'demo'
       ? `Mode: demo workbook, current revision=${info.revision}`
-      : 'Mode: imported real xlsx file (some regions may still be streaming in)',
+      : info.streaming
+        ? 'Mode: imported file in LARGE-FILE STREAMING MODE — the file is too big for a full load, so the grid ' +
+          'materializes the viewed region on demand. Consequences: (1) formulas you write stay live — their ' +
+          'referenced file cells are loaded into the engine automatically — but only within a session budget of ' +
+          '~50,000 referenced cells; batches beyond it are rejected: compute with aggregate_range and write static ' +
+          'values instead; (2) to extract/split rows, use copy_range with filterColumn/filterValues (copies matching ' +
+          'rows as static values, reading the real file data) into a sheet created with add_sheet rows/columns sized ' +
+          'to the expected data (aggregate_range gives per-value counts) — never FILTER-formula spills; ' +
+          '(3) add_pivot, refresh_pivot, duplicate_sheet, and filter edits are unavailable on the ' +
+          "file's sheets; sort_range works, but ranges of 2000 cells or fewer must be read_range'd (loaded) first. " +
+          'Sheets added this session are fully live and exempt from all of this.'
+        : 'Mode: imported real xlsx file (some regions may still be streaming in)',
   ]
   if (active?.rows && active.columns) {
     lines.push(
@@ -562,8 +679,28 @@ export function buildWorkbookContext(deps: SheetsSkillDeps): string {
       `All sheets: ${info.sheets.map((sheet) => `${sheet.name} (id=${sheet.id}${dims(sheet)})`).join(', ')}`,
     )
   }
+  const oversized = info.sheets.filter((sheet) => sheet.readOnlyOversized)
+  if (oversized.length > 0) {
+    lines.push(
+      `READ-ONLY sheets: ${oversized.map((sheet) => sheet.name).join(', ')} — the worksheet XML is above ` +
+        'the save-patch limit, so edits there can never be saved and every mutating op on them is rejected. ' +
+        'Read them freely (read_range/aggregate_range/copy_range source) and write results to other sheets.',
+    )
+  }
   if (info.selection) {
-    lines.push(`Current selection: ${info.selection}`)
+    const named = info.selectionColumns ?? []
+    // The range alone leaves the model to re-derive which column the user meant
+    // from the header row; name it here so "this column" resolves by meaning.
+    const columns = named.length
+      ? ` (the whole ${named.map((name) => `"${name}"`).join(', ')} column${named.length > 1 ? 's' : ''})`
+      : ''
+    lines.push(
+      info.selectionFrozen
+        ? `User selection: ${info.selection}${columns} — captured when the user sent this message, so it is ` +
+            'what "this column / these rows / the selected part" refers to. It stays fixed for the ' +
+            'whole run even if the user clicks elsewhere while you work.'
+        : `Current selection: ${info.selection}${columns}`,
+    )
   }
   if (info.loadedRange) {
     lines.push(`Currently loaded viewport: ${info.loadedRange} (not the worksheet data extent)`)
@@ -1149,9 +1286,11 @@ export function executeWorkbookTool(
       const outcome = deps.proposeOperations(operations, summaryInput.trim())
       if (!outcome.ok) return fail(t('aiToolPropose'), outcome.error)
       const summary = summaryInput.trim()
-      const finish = (): ToolExecution | Promise<ToolExecution> => {
-        const warnings =
-          outcome.plan.warnings.length > 0 ? `\nNote: ${outcome.plan.warnings.join('; ')}` : ''
+      const finish = (
+        appliedNotices: readonly string[] = [],
+      ): ToolExecution | Promise<ToolExecution> => {
+        const notes = [...outcome.plan.warnings, ...appliedNotices]
+        const warnings = notes.length > 0 ? `\nNote: ${notes.join('; ')}` : ''
         const opCount =
           outcome.plan.cellChanges.length +
           outcome.plan.formatChanges.length +
@@ -1171,8 +1310,11 @@ export function executeWorkbookTool(
           if (op.op !== 'fill_range' && op.op !== 'copy_range') continue
           const bounds = op.op === 'fill_range' ? parseRange(op.target) : copyTargetBounds(op)
           const first = formatAddress(bounds.startRow, bounds.startColumn)
-          const last = formatAddress(bounds.endRow, bounds.endColumn)
           formulaCells.push({ sheetId: op.sheetId, address: first })
+          // A filtered copy's real extent is smaller than the worst-case
+          // bounds (and it writes no formulas) — read back only the anchor.
+          if (op.op === 'copy_range' && op.filterColumn !== undefined) continue
+          const last = formatAddress(bounds.endRow, bounds.endColumn)
           if (last !== first) formulaCells.push({ sheetId: op.sheetId, address: last })
         }
         if (formulaCells.length === 0) {
@@ -1218,16 +1360,82 @@ export function executeWorkbookTool(
       }
       if (!outcome.applied) return finish()
       return outcome.applied.then((applied) => {
-        if (applied.ok) return finish()
+        if (applied.ok) return finish(applied.notices)
         const reason = applied.reason ?? 'unknown reason'
         return fail(
           t('aiToolPropose'),
           applied.partiallyApplied
             ? `Apply failed MID-BATCH — operations before the failing one were already committed: ${reason}. ` +
-                'Read the affected ranges to see the current state before continuing; the whole partial batch is one undo step (⌘Z / [Undo]).'
+                'Read the affected ranges to see the current state before continuing; ' +
+                (applied.undoDropped
+                  ? 'the committed part is too large for the undo history — ⌘Z will NOT revert it.'
+                  : 'the whole partial batch is one undo step (⌘Z / [Undo]).')
             : `Apply failed — the workbook is UNCHANGED: ${reason}. ` +
                 'Do not tell the user the changes were made; adjust the operations and retry, or explain the failure.',
         )
+      })
+    }
+
+    case 'create_document': {
+      const summary = t('aiToolCreateDocument')
+      const create = deps.createDocument
+      if (!create) return fail(summary, 'create_document is not available in this context.')
+      const typeRaw = call.input.type === undefined ? 'xlsx' : String(call.input.type)
+      if (
+        typeRaw !== 'xlsx' &&
+        typeRaw !== 'csv' &&
+        typeRaw !== 'docx' &&
+        typeRaw !== 'pdf' &&
+        typeRaw !== 'md' &&
+        typeRaw !== 'html'
+      ) {
+        return fail(summary, 'type must be one of xlsx/csv/docx/pdf/md/html')
+      }
+      const title = typeof call.input.title === 'string' ? call.input.title.trim() : ''
+      if (typeRaw === 'xlsx' || typeRaw === 'csv') {
+        if (typeof call.input.content === 'string' && call.input.content.trim() !== '') {
+          return fail(
+            summary,
+            'content is forbidden for xlsx/csv — they export a worksheet. To create a file from new data, ' +
+              'write it into a sheet first (add_sheet + set_range via propose_operations), then export that sheet.',
+          )
+        }
+        const parsedSheet = parseReadSheetId(call.input, deps.getActiveSheetInfo(), summary)
+        if ('fail' in parsedSheet) return parsedSheet.fail
+        return create({
+          type: typeRaw,
+          sheetId: parsedSheet.sheetId,
+          ...(title ? { title } : {}),
+        }).then((outcome) => {
+          if (!outcome.ok) return fail(summary, outcome.error)
+          const note = outcome.hadFormulas
+            ? ' Note: the sheet contains formulas — the new file holds their current computed values only (no formulas or formatting).'
+            : ''
+          return {
+            output:
+              `Created ${outcome.name}${outcome.path ? ` at ${outcome.path}` : ''} from sheet ` +
+              `"${outcome.sheetName ?? ''}" and opened it in a new tab. The current workbook is unchanged.${note}`,
+            mutated: false,
+            summary: t('aiToolCreatedDocument', { name: outcome.name }),
+          }
+        })
+      }
+      if (!title) return fail(summary, 'title must not be empty')
+      const content = String(call.input.content ?? '')
+      if (!content.trim()) return fail(summary, 'content must not be empty')
+      if (typeRaw !== 'md') {
+        const echo = contentEchoError(content)
+        if (echo) return fail(summary, echo)
+      }
+      return create({ type: typeRaw, title, content }).then((outcome) => {
+        if (!outcome.ok) return fail(summary, outcome.error)
+        return {
+          output: outcome.path
+            ? `Created the new document at ${outcome.path} and opened it in a new tab.`
+            : `Created the new document "${outcome.name}" in a new tab; it saves itself into the default folder.`,
+          mutated: false,
+          summary: t('aiToolCreatedDocument', { name: outcome.name }),
+        }
       })
     }
 

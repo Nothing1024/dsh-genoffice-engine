@@ -248,7 +248,13 @@ describe('captions', () => {
     const doc = await parseDocx(await buildDocx({ bodyXml: generateCaptionXml('图', 1, '测试') }))
     const p = doc.blocks[0]
     expect(p.type).toBe('passthrough')
-    expect(p.fieldDisplay).toEqual({ kind: 'text', left: '图 1 测试' })
+    expect(p.fieldDisplay).toEqual({
+      kind: 'text',
+      left: '图 1 测试',
+      szHalfPoints: 18,
+      align: 'center',
+      runs: [{ text: '图 1 测试', color: '44546A', sizeHalfPoints: 18 }],
+    })
   })
 })
 
@@ -277,6 +283,56 @@ describe('rich-text footnote display runs', () => {
     ])
     expect(notes[1].richParas).toBeUndefined()
     expect(notes[1].text).toBe('纯文本')
+  })
+
+  it('recovers the direct Latin font of a run (w:ascii, else w:hAnsi); font alone makes the note rich', async () => {
+    const footnotesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:footnote w:id="1"><w:p>' +
+      '<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="18"/></w:rPr><w:footnoteRef/></w:r>' +
+      '<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="18"/></w:rPr><w:t xml:space="preserve"> Source ANSD</w:t></w:r>' +
+      '<w:r><w:rPr><w:rFonts w:hAnsi="Garamond" w:eastAsia="MS Mincho"/></w:rPr><w:t>, 2023</w:t></w:r>' +
+      '</w:p></w:footnote>' +
+      '<w:footnote w:id="2"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr><w:t>font only</w:t></w:r></w:p></w:footnote>' +
+      '</w:footnotes>'
+    const { parseNotesXml } = await import('../src/notes')
+    const notes = parseNotesXml(footnotesXml, 'footnote')
+    expect(notes[0].richParas?.[0]).toEqual([
+      { text: 'Source ANSD', sizeHalfPoints: 18, fontAscii: 'Times New Roman' },
+      { text: ', 2023', fontAscii: 'Garamond' },
+    ])
+    expect(notes[1].richParas?.[0]).toEqual([{ text: 'font only', fontAscii: 'Arial' }])
+  })
+
+  it('flags notes without a self-reference mark run (Word renders those entries numberless)', async () => {
+    const endnotesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>' +
+      '<w:endnote w:id="1"><w:p><w:pPr><w:pStyle w:val="ad"/></w:pPr></w:p></w:endnote>' +
+      '<w:endnote w:id="2"><w:p><w:r><w:t>text without ref mark</w:t></w:r></w:p></w:endnote>' +
+      '<w:endnote w:id="3"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t>normal</w:t></w:r></w:p></w:endnote>' +
+      '</w:endnotes>'
+    const { parseNotesXml } = await import('../src/notes')
+    const notes = parseNotesXml(endnotesXml, 'endnote')
+    expect(notes.map((n) => n.noRefMark)).toEqual([true, true, undefined])
+  })
+
+  it('recognises the spaced / paired ref-mark forms other producers write', async () => {
+    // Open XML SDK & .NET XmlWriter emit "<w:footnoteRef />"; some writers pair the tag.
+    const footnotesXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef /></w:r><w:r><w:t>spaced</w:t></w:r></w:p></w:footnote>' +
+      '<w:footnote w:id="2"><w:p><w:r><w:footnoteRef></w:footnoteRef></w:r><w:r><w:t>paired</w:t></w:r></w:p></w:footnote>' +
+      '<w:footnote w:id="3"><w:p><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:t>only a cross-ref</w:t></w:r></w:p></w:footnote>' +
+      '</w:footnotes>'
+    const { parseNotesXml } = await import('../src/notes')
+    const notes = parseNotesXml(footnotesXml, 'footnote')
+    expect(notes.map((n) => n.noRefMark)).toEqual([undefined, undefined, true])
+    // the ref-mark run is still dropped from the display text
+    expect(notes.map((n) => n.text)).toEqual(['spaced', 'paired', 'only a cross-ref'])
   })
 
   it('serializes richParas runs with size/font formatting for fresh notes (P17)', async () => {
@@ -308,7 +364,7 @@ describe('rich-text footnote display runs', () => {
     const notes = parseNotesXml(xml, 'footnote')
     expect(notes[0]!.text).toBe('small note tail')
     expect(notes[0]!.richParas?.[0]).toEqual([
-      { text: 'small note', bold: true, sizeHalfPoints: 16 },
+      { text: 'small note', bold: true, sizeHalfPoints: 16, fontAscii: 'Arial' },
       { text: ' tail', color: '1F4E79', sizeHalfPoints: 16 },
     ])
   })

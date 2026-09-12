@@ -29,6 +29,7 @@ const BUILTIN = new Set(builtinModules)
  */
 const SRC_GLOBS = [
   'apps/docs/src',
+  'apps/html/src',
   'apps/markdown/src',
   'apps/pdf/src',
   'apps/sheets/src',
@@ -322,9 +323,19 @@ const FONTS = [
     '© Adobe / Google. This bundle ships a subset of the original fonts (reduced glyph coverage for size);\nno other modifications were made.',
   ],
   [
-    'GenOffice Sans KR / GenOffice Serif KR (Noto Sans/Serif CJK KR derivative)',
+    'GenOffice Sans KR (Noto Sans CJK KR derivative)',
     'SIL OFL 1.1',
-    '© Adobe / Google, original Reserved Font Name "Noto". Subset with modified advance widths;\nrenamed per OFL 1.1.',
+    'Copyright 2014-2021 Adobe (http://www.adobe.com/), Google LLC, Reserved Font Name "Source".\nSubset with modified advance widths and horizontally transformed Noto CJK outlines to match measured\nKorean Office-family metrics; renamed per OFL 1.1. No Microsoft font outlines are included.',
+  ],
+  [
+    'GenOffice Serif KR (Noto Serif CJK KR derivative)',
+    'SIL OFL 1.1',
+    'Copyright 2017-2024 Adobe (http://www.adobe.com/), Reserved Font Name "Source".\nSubset with modified advance widths and horizontally transformed Noto CJK outlines to match measured\nKorean Office-family metrics; renamed per OFL 1.1. No Microsoft font outlines are included.',
+  ],
+  [
+    'GenOffice Che Latin KR (Noto Sans CJK KR derivative)',
+    'SIL OFL 1.1',
+    'Copyright 2014-2021 Adobe (http://www.adobe.com/), Google LLC, Reserved Font Name "Source".\nASCII subset with fixed 0.5em advances and horizontally transformed Noto CJK outlines; Microsoft\nDotumChe is used only as a metric reference. Renamed per OFL 1.1. No Microsoft outlines are included.',
   ],
   [
     'Noto Naskh Arabic / Noto Sans Arabic (subset)',
@@ -335,6 +346,11 @@ const FONTS = [
     'GenOffice Gothic KR (NanumGothic derivative)',
     'SIL OFL 1.1',
     `${GOTHIC_KR_COPYRIGHT}\nSubset with unmodified metrics; renamed per OFL 1.1.`,
+  ],
+  [
+    'GenOffice Poppins (Poppins derivative)',
+    'SIL OFL 1.1',
+    'Copyright 2020 The Poppins Project Authors (https://github.com/itfoundry/Poppins).\nLatin subset with unmodified metrics and advances; renamed.',
   ],
   [
     'GenOffice Tamil (Noto Sans Tamil derivative)',

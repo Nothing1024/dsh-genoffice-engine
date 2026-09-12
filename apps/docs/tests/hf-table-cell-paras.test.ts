@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import type { HeaderFooter, HfImage, SectionSettings } from '@genoffice/docx-engine'
+import type { HeaderFooter, HfImage, HfTextBox, SectionSettings } from '@genoffice/docx-engine'
 import {
+  HF_WASHOUT_FILTER,
   hfFloatPagePos,
   hfHasVisibleContent,
+  hfStripGeom,
+  hfTextBoxStyle,
   makeGapHfEl,
   makeHfFloatImgEl,
 } from '../src/renderer/editor/hf-dom'
@@ -156,7 +159,20 @@ describe('floating header image positioning', () => {
     expect(el.style.left).toBe('0px')
     expect(el.style.top).toBe('calc(100% - 96px)')
     expect(el.style.width).toBe('816px')
-    expect(el.style.filter).toContain('brightness')
+    expect(el.style.filter).toBe(HF_WASHOUT_FILTER)
+  })
+
+  it('washout filter fades toward white and keeps white pixels white (Word preset out = 0.3*in + 0.7)', () => {
+    const steps = [...HF_WASHOUT_FILTER.matchAll(/(invert|brightness)\(([\d.]+)\)/g)]
+    expect(steps).toHaveLength(3)
+    const apply = (v: number) =>
+      steps.reduce((c, [, fn, amt]) => {
+        const a = Number(amt)
+        return fn === 'invert' ? c * (1 - a) + (1 - c) * a : Math.min(1, c * a)
+      }, v)
+    expect(apply(1)).toBeCloseTo(1, 5)
+    expect(apply(0)).toBeCloseTo(0.7, 5)
+    expect(apply(0.5)).toBeCloseTo(0.85, 5)
   })
 
   it('lead-hosted element positions from the first page content origin', () => {
@@ -314,5 +330,124 @@ describe('wrapped anchored header images push the body below their bottom edge',
       },
     ]
     expect(estimateHfHeight(null, 600, images, geom)).toBe(0)
+  })
+})
+
+// content surfaced from a floating textbox (wp:anchor / absolute VML shape)
+// draws at its anchor, not in the strip flow: it must not push the body down
+describe('boxAnchored paragraphs (floating-textbox content)', () => {
+  const anchored: HeaderFooter = {
+    text: 'Manuel : Croque-feuilles',
+    paras: [
+      { runs: [{ text: 'Manuel : Croque-feuilles' }], boxAnchored: true },
+      { runs: [{ text: 'Niveau : CM1' }], boxAnchored: true },
+    ],
+  }
+
+  it('estimateHfHeight reserves nothing for them', () => {
+    expect(estimateHfHeight(anchored, 600)).toBe(0)
+    const mixed: HeaderFooter = {
+      text: 'x',
+      paras: [...anchored.paras!, { runs: [{ text: 'in-flow line' }] }],
+    }
+    const inFlowOnly: HeaderFooter = { text: 'x', paras: [{ runs: [{ text: 'in-flow line' }] }] }
+    expect(estimateHfHeight(mixed, 600)).toBeGreaterThan(0)
+    expect(estimateHfHeight(mixed, 600)).toBe(estimateHfHeight(inFlowOnly, 600))
+  })
+
+  it('makeGapHfEl marks them so the DOM probe can exclude them', () => {
+    const el = makeGapHfEl({ kind: 'header', value: anchored, pageNo: 1, pageTotal: 1 })
+    const paras = el.querySelectorAll('.page-hf-para')
+    expect(paras).toHaveLength(2)
+    for (const p of paras) expect(p.classList.contains('page-hf-box-anchored')).toBe(true)
+  })
+
+  // A4 page, 720/800 twips body margins, header at 522 twips, footer at 607 (prod-sas 087)
+  const geom = hfStripGeom({
+    pageWidth: 11920,
+    pageHeight: 16860,
+    marginTop: 720,
+    marginBottom: 800,
+    marginLeft: 850,
+    marginRight: 992,
+    headerDist: 522,
+    footerDist: 607,
+  } as SectionSettings)
+  const pageBox: HfTextBox = {
+    id: 1,
+    widthPx: 195,
+    heightPx: 16,
+    posXPx: 67,
+    posHRel: 'page',
+    posYPx: 33,
+    posVRel: 'page',
+    wrap: 'none',
+    insets: [0, 0, 0, 0],
+  }
+
+  it('hfTextBoxStyle places a page-anchored box relative to the strip edges', () => {
+    // header strip top = headerDist (34.8px): the box top at page y=33 is 1.8px above it
+    const hdr = hfTextBoxStyle(pageBox, 'header', geom)!
+    expect(parseFloat(hdr.left)).toBeCloseTo(67 - (850 / 1440) * 96, 1)
+    expect(parseFloat(hdr.top)).toBeCloseTo(33 - (522 / 1440) * 96, 1)
+    expect(hdr.width).toBe('195px')
+    expect(hdr.height).toBe('16px')
+    expect(hdr.padding).toBe('0px 0px 0px 0px')
+    // footer strip bottom edge = pageH - footerDist: a box ending at page y=1085 sits (1124-40.5)-1085 above it
+    const ftr = hfTextBoxStyle({ ...pageBox, posYPx: 1069 }, 'footer', geom)!
+    expect(parseFloat(ftr.bottom)).toBeCloseTo(1124 - (607 / 1440) * 96 - 1085, 1)
+    expect(ftr.top).toBeUndefined()
+    // a centered strip on unequal side margins: offsets measure from the strip's real left edge
+    const centered = hfTextBoxStyle(pageBox, 'header', { ...geom, stripLeft: 61.4 })!
+    expect(parseFloat(centered.left)).toBeCloseTo(67 - 61.4, 1)
+    // footer box without a height: pinned by its bottom edge, the anchor point
+    // (top / center / bottom of the box) is restored by a downward translate
+    const noH = { ...pageBox, heightPx: undefined, posYPx: 1069 }
+    expect(hfTextBoxStyle(noH, 'footer', geom)!.transform).toBe('translate(0%, 100%)')
+    expect(parseFloat(hfTextBoxStyle(noH, 'footer', geom)!.bottom)).toBeCloseTo(
+      1124 - (607 / 1440) * 96 - 1069,
+      1,
+    )
+    const centerNoH = { id: 4, posV: 'center' as const }
+    expect(hfTextBoxStyle(centerNoH, 'footer', geom)!.transform).toBe('translate(0%, 50%)')
+    expect(
+      hfTextBoxStyle({ id: 5, posV: 'bottom' as const }, 'footer', geom)!.transform,
+    ).toBeUndefined()
+    // behindDoc boxes paint under the body; in-front boxes keep the strip's layer
+    expect(hfTextBoxStyle({ ...pageBox, behind: true }, 'header', geom)!.zIndex).toBe('-1')
+    expect(hfTextBoxStyle(pageBox, 'header', geom)!.zIndex).toBeUndefined()
+    // no usable anchor position: the paragraphs stack in the strip flow
+    expect(hfTextBoxStyle({ id: 2, widthPx: 10 }, 'header', geom)).toBeNull()
+    // Word's default insets when bodyPr sets none; vertical anchor becomes flex alignment
+    const dflt = hfTextBoxStyle(
+      { id: 3, posYPx: 40, posVRel: 'page', vAlign: 'center' },
+      'header',
+      geom,
+    )!
+    expect(dflt.padding).toBe('4.8px 9.6px 4.8px 9.6px')
+    expect(dflt.justifyContent).toBe('center')
+  })
+
+  it('makeGapHfEl hosts the paragraphs of one box in a positioned element (given geometry), else stacks them', () => {
+    const value: HeaderFooter = {
+      text: 'a b c',
+      paras: [
+        { runs: [{ text: 'a' }], boxAnchored: true, box: pageBox },
+        { runs: [{ text: 'b' }], boxAnchored: true, box: pageBox },
+        { runs: [{ text: 'c' }], boxAnchored: true, box: { ...pageBox, id: 9, posXPx: 512 } },
+        { runs: [{ text: 'flow' }] },
+      ],
+    }
+    const el = makeGapHfEl({ kind: 'header', value, pageNo: 1, pageTotal: 1, geom })
+    expect(el.classList.contains('page-hf-has-boxes')).toBe(true)
+    const boxes = el.querySelectorAll<HTMLElement>(':scope > .page-hf-textbox')
+    expect(boxes).toHaveLength(2)
+    expect(boxes[0].querySelectorAll('.page-hf-para')).toHaveLength(2)
+    expect(boxes[1].querySelectorAll('.page-hf-para')).toHaveLength(1)
+    expect(boxes[1].style.left).not.toBe(boxes[0].style.left)
+    expect(el.querySelectorAll(':scope > .page-hf-para')).toHaveLength(1)
+    const stacked = makeGapHfEl({ kind: 'header', value, pageNo: 1, pageTotal: 1 })
+    expect(stacked.querySelectorAll('.page-hf-textbox')).toHaveLength(0)
+    expect(stacked.querySelectorAll(':scope > .page-hf-para')).toHaveLength(4)
   })
 })

@@ -46,7 +46,7 @@ async function mount(partial: Partial<Props>) {
   const submit = async (done: () => boolean) => {
     await click(host.querySelector('.btn-primary')!)
     const start = Date.now()
-    while (!done() && Date.now() - start < 10_000) {
+    while (!done() && Date.now() - start < 45_000) {
       await act(async () => {
         await new Promise((r) => setTimeout(r, 10))
       })

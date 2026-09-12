@@ -1,3 +1,4 @@
+import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
 import { parseDocx, saveDocx } from '../src/index'
 import { buildDocx } from './helpers/build-docx'
@@ -82,19 +83,88 @@ describe('SmartArt / OLE visible degrade', () => {
     expect(block.imageHeightPx).toBe(51)
   })
 
-  it('VML horizontal rule (v:rect o:hr) is a decorative line, not a chip', async () => {
+  it('a VML horizontal rule alone in its paragraph keeps the paragraph and its spacing', async () => {
+    const hrP =
+      '<w:p><w:pPr><w:spacing w:after="160"/></w:pPr><w:r><w:pict><v:rect xmlns:v="urn:schemas-microsoft-com:vml" ' +
+      'xmlns:o="urn:schemas-microsoft-com:office:office" id="_x0000_i1026" ' +
+      'style="width:432pt;height:1.5pt" o:hralign="center" o:hrstd="t" o:hr="t" ' +
+      'fillcolor="#aca899" stroked="f"/></w:pict></w:r></w:p>'
+    const bytes = await buildDocx({ bodyXml: hrP })
+    const parsed = await parseDocx(bytes)
+    const block = parsed.blocks[0]
+    expect(block.type).toBe('paragraph')
+    expect(block.decorative).toBeUndefined()
+    expect(block.format?.spaceAfter).toBe(160)
+    expect(block.runs).toHaveLength(1)
+    expect(block.runs![0]).toMatchObject({
+      text: '',
+      image: {
+        dataUrl: '',
+        rule: { colorHex: 'ACA899', thicknessPx: 2, widthPx: 576, align: 'center' },
+      },
+    })
+    expect(block.runs![0].image?.xml).toContain('o:hr="t"')
+    const saved = await saveDocx(parsed, [{ kind: 'original', docxIndex: block.docxIndex! }])
+    expect(saved).toBe(bytes)
+  })
+
+  it('a full-width VML horizontal rule (width:0) carries no width or alignment', async () => {
     const hrP =
       '<w:p><w:r><w:pict><v:rect xmlns:v="urn:schemas-microsoft-com:vml" ' +
       'xmlns:o="urn:schemas-microsoft-com:office:office" id="_x0000_i1026" ' +
       'style="width:0;height:1.5pt" o:hralign="center" o:hrstd="t" o:hr="t" ' +
       'fillcolor="#aca899" stroked="f"/></w:pict></w:r></w:p>'
     const parsed = await parseDocx(await buildDocx({ bodyXml: hrP }))
+    expect(parsed.blocks[0].type).toBe('paragraph')
+    expect(parsed.blocks[0].runs![0].image?.rule).toEqual({ colorHex: 'ACA899', thicknessPx: 2 })
+  })
+
+  it('VML horizontal rule sharing the paragraph with text keeps the runs editable', async () => {
+    const rPr =
+      '<w:rPr><w:b/><w:color w:val="E36C0A"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>'
+    const hrRun =
+      '<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr>' +
+      '<w:pict><v:rect xmlns:v="urn:schemas-microsoft-com:vml" ' +
+      'xmlns:o="urn:schemas-microsoft-com:office:office" id="_x0000_i1028" ' +
+      'style="width:0;height:1.5pt" o:hralign="center" o:hrstd="t" o:hr="t" ' +
+      'fillcolor="#a0a0a0" stroked="f"/></w:pict></w:r>'
+    const hrP =
+      '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>' +
+      `<w:r>${rPr}<w:t>Séance 1 :</w:t></w:r><w:r>${rPr}<w:t xml:space="preserve"> Préparer</w:t></w:r>` +
+      `${hrRun}</w:p>`
+    const bytes = await buildDocx({ bodyXml: hrP })
+    const parsed = await parseDocx(bytes)
     const block = parsed.blocks[0]
-    expect(block.type).toBe('passthrough')
-    expect(block.decorative).toBe(true)
-    expect(block.ruleColorHex).toBe('ACA899')
-    expect(block.ruleThicknessPx).toBe(2)
-    expect(block.ruleWidthPx).toBeUndefined()
+    expect(block.type).toBe('paragraph')
+    const runs = block.runs!
+    expect(runs.map((r) => r.text).join('')).toBe('Séance 1 : Préparer')
+    expect(runs[0]).toMatchObject({ bold: true, color: 'E36C0A', sizeHalfPoints: 24 })
+    expect(block.format?.align).toBe('center')
+    const rule = runs[runs.length - 1]
+    expect(rule.text).toBe('')
+    expect(rule.image?.rule).toEqual({ colorHex: 'A0A0A0', thicknessPx: 2 })
+    expect(rule.image?.dataUrl).toBe('')
+    expect(rule.image?.xml).toContain('o:hr="t"')
+    // untouched save keeps the bytes
+    const saved = await saveDocx(parsed, [{ kind: 'original', docxIndex: block.docxIndex! }])
+    expect(saved).toBe(bytes)
+    // a text edit re-emits the rule fragment verbatim
+    const edited = await saveDocx(parsed, [
+      {
+        kind: 'generated',
+        block: {
+          type: 'paragraph',
+          format: block.format,
+          runs: [{ ...runs[0], text: 'Séance 2 : Colorer' }, rule],
+        },
+      },
+    ])
+    const docXml = new TextDecoder().decode(
+      await (await JSZip.loadAsync(edited)).file('word/document.xml')!.async('uint8array'),
+    )
+    expect(docXml).toContain('Séance 2 : Colorer')
+    // the rule run comes back whole: its own rPr, then the fragment
+    expect(docXml).toContain(hrRun)
   })
 
   it('a missing diagram part degrades to the bare label, not an error', async () => {
@@ -233,5 +303,59 @@ describe('field-form OLE (EMBED/LINK field around w:object)', () => {
         .map((b) => ({ kind: 'original' as const, docxIndex: b.docxIndex! })),
     )
     expect(saved).toBe(bytes)
+  })
+})
+
+describe('OLE preview inside a table cell', () => {
+  const CELL_TABLE =
+    '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>' +
+    '<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
+    '<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' +
+    `<w:p>${OLE_OBJECT_RUN}</w:p>` +
+    '</w:tc></w:tr></w:tbl>'
+
+  it('the preview picture becomes a run image at the declared size', async () => {
+    const parsed = await parseDocx(await buildDocx({ bodyXml: CELL_TABLE, withImage: true }))
+    const cell = parsed.blocks[0].table!.rows[0][0]
+    const imageRun = cell.richParas?.[0]?.runs.find((r) => r.image)
+    expect(imageRun?.image?.dataUrl).toMatch(/^data:image\/png;base64,/)
+    // declared v:shape size (207.75pt x 15.75pt)
+    expect(imageRun?.image?.widthPx).toBe(277)
+    expect(imageRun?.image?.heightPx).toBe(21)
+  })
+})
+
+describe('OLE embed sharing a paragraph with an inline picture', () => {
+  const DRAWING_RUN =
+    '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/>' +
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    '<pic:pic><pic:blipFill><a:blip r:embed="rId10"/></pic:blipFill></pic:pic>' +
+    '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+
+  it('keeps both the OLE preview and the picture as run images', async () => {
+    const bodyXml = `<w:p>${OLE_OBJECT_RUN}${DRAWING_RUN}</w:p>`
+    const parsed = await parseDocx(await buildDocx({ bodyXml, withImage: true }))
+    const block = parsed.blocks[0]
+    expect(block.type).toBe('paragraph')
+    const images = (block.runs ?? []).filter((r) => r.image)
+    expect(images).toHaveLength(2)
+    expect(images[0].image?.widthPx).toBe(277)
+    expect(images[1].image?.widthPx).toBe(96)
+  })
+})
+
+describe('OLE run carrying an empty sibling w:pict', () => {
+  it('still resolves the object preview (first pict with a picture wins)', async () => {
+    const bodyXml =
+      '<w:p><w:r>' +
+      OLE_OBJECT_RUN.replace('<w:r>', '').replace('</w:r>', '') +
+      '<w:t>bit map object</w:t><w:pict></w:pict>' +
+      '</w:r></w:p>'
+    const parsed = await parseDocx(await buildDocx({ bodyXml, withImage: true }))
+    const block = parsed.blocks[0]
+    expect(block.type).toBe('paragraph')
+    const imageRun = (block.runs ?? []).find((r) => r.image)
+    expect(imageRun?.image?.dataUrl).toMatch(/^data:image\/png;base64,/)
+    expect((block.runs ?? []).map((r) => r.text).join('')).toBe('bit map object')
   })
 })

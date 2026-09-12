@@ -14,6 +14,7 @@ const workspaceAlias = {
     '../../packages/pptx-engine/src/table-grid.ts',
   ),
   '@genoffice/pptx-engine/identity': resolve(here, '../../packages/pptx-engine/src/identity.ts'),
+  '@genoffice/pptx-engine/custgeom': resolve(here, '../../packages/pptx-engine/src/custgeom.ts'),
   '@genoffice/pptx-engine/background-promote': resolve(
     here,
     '../../packages/pptx-engine/src/background-promote.ts',
@@ -49,7 +50,8 @@ export default defineConfig({
     ],
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    // electron-utils ships raw TS source — must be bundled, not left external
+    plugins: [externalizeDepsPlugin({ exclude: ['@genoffice/electron-utils'] })],
   },
   renderer: {
     resolve: { alias: workspaceAlias },

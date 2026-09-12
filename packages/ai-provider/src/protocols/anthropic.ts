@@ -185,12 +185,19 @@ async function anthropicTurn(
     if (!line.startsWith('data:')) continue
     const payload = line.slice(5).trim()
     if (!payload) continue
-    const event = JSON.parse(payload) as {
-      type?: string
-      index?: number
-      content_block?: { type?: string; id?: string; name?: string }
-      delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string }
-      error?: { message?: string } | string
+    // A truncated frame or a non-JSON keep-alive from a proxy should skip
+    // that event, not kill the entire AI turn with a parser error.
+    let event
+    try {
+      event = JSON.parse(payload) as {
+        type?: string
+        index?: number
+        content_block?: { type?: string; id?: string; name?: string }
+        delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string }
+        error?: { message?: string } | string
+      }
+    } catch {
+      continue
     }
     if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
       pendingTools.set(event.index ?? 0, {
@@ -219,6 +226,14 @@ async function anthropicTurn(
       // also catches gateway errors delivered in a non-Anthropic shape (no `type` field)
       throw new Error(sseErrorText(event.error, 'Claude stream error'))
     }
+  }
+  // Buffered tool arguments can take minutes; a gateway dropping the connection
+  // meanwhile is a billed in-progress turn, not the replayable empty stream below.
+  if (pendingTools.size > 0 && !stopReason) {
+    const received = [...pendingTools.values()].reduce((n, p) => n + p.json.length, 0)
+    throw new Error(
+      `Claude stream closed while sending tool arguments (${received} chars received); the connection was dropped`,
+    )
   }
   const lastTool = completedTools.at(-1)
   if (stopReason === 'max_tokens' && lastTool) lastTool.truncated = true
@@ -267,7 +282,19 @@ export async function chatAnthropic(
       error: `Claude HTTP ${response.status}: ${httpBodyDetail(await response.text())}`,
     }
   }
-  const json = (await response.json()) as { content?: Array<{ type: string; text?: string }> }
+  // A 200 with an HTML shell / empty / truncated body (gateway soft-failure)
+  // would make response.json() throw; return ok:false instead of leaking a
+  // raw SyntaxError to the caller.
+  const bodyText = await response.text()
+  let json: { content?: Array<{ type: string; text?: string }> }
+  try {
+    json = JSON.parse(bodyText) as { content?: Array<{ type: string; text?: string }> }
+  } catch {
+    return {
+      ok: false,
+      error: `Claude returned a non-JSON response: ${httpBodyDetail(bodyText)}`,
+    }
+  }
   const content = json.content
     ?.filter((c) => c.type === 'text')
     .map((c) => c.text ?? '')

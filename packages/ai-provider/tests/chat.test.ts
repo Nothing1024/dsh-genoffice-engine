@@ -42,7 +42,7 @@ describe('chatForProvider', () => {
     const result = await chatForProvider('anthropic', { apiKey: 'k', model: 'm' }, 'sys', 'hi')
     expect(result.ok).toBe(false)
     expect(result.error).toMatch(/Claude HTTP 403/)
-    expect(result.error).toMatch(/web page instead of an API response/)
+    expect(result.error).toMatch(/web page.*instead of an API response/)
     expect(result.error).not.toContain('<!doctype')
   })
 
@@ -69,7 +69,7 @@ describe('chatForProvider', () => {
       .fn()
       .mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
     vi.stubGlobal('fetch', fetchMock)
-    await chatForProvider('deepseek', { apiKey: 'k', model: 'deepseek-chat' }, 'sys', 'hi')
+    await chatForProvider('deepseek', { apiKey: 'k', model: 'deepseek-v4-pro' }, 'sys', 'hi')
     expect(fetchMock).toHaveBeenCalledWith(
       'https://api.deepseek.com/v1/chat/completions',
       expect.anything(),
@@ -99,6 +99,32 @@ describe('chatForProvider', () => {
     const result = await chatForProvider('custom', { apiKey: 'k', model: 'm' }, 'sys', 'hi')
     expect(result).toEqual({ ok: false, error: 'A custom provider requires a Base URL' })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('custom: omits Authorization when the key is empty for local servers', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await chatForProvider(
+      'custom',
+      { apiKey: '', model: 'llama3', baseUrl: 'http://localhost:11434/v1' },
+      'sys',
+      'hi',
+    )
+    const headers = fetchMock.mock.calls[0]![1].headers as Record<string, string>
+    expect(headers.Authorization).toBeUndefined()
+    fetchMock.mockClear()
+    fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }))
+    await chatForProvider(
+      'custom',
+      { apiKey: 'k', model: 'm', baseUrl: 'https://my-endpoint.example.com/v1' },
+      'sys',
+      'hi',
+    )
+    expect((fetchMock.mock.calls[0]![1].headers as Record<string, string>).Authorization).toBe(
+      'Bearer k',
+    )
   })
 
   it('genspark: routes by model prefix to the proxy endpoints', async () => {
@@ -144,5 +170,25 @@ describe('chatForProvider', () => {
       'hi',
     )
     expect(result).toEqual({ ok: false, error: 'AI returned an empty response' })
+  })
+
+  it('anthropic: a 200 with an HTML body is an error, not a thrown SyntaxError', async () => {
+    const html = '<!doctype html><html><body>gateway</body></html>'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(html, { status: 200 })))
+    const result = await chatForProvider('anthropic', { apiKey: 'k', model: 'm' }, 'sys', 'hi')
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/non-JSON response/)
+    expect(result.error).toMatch(/web page.*instead of an API response/)
+  })
+
+  it('openai: a 200 with an empty body is an error, not a thrown SyntaxError', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 200 })))
+    const result = await chatForProvider(
+      'openai',
+      { apiKey: 'k', model: 'gpt-4.1-mini' },
+      'sys',
+      'hi',
+    )
+    expect(result).toEqual({ ok: false, error: 'AI returned a non-JSON response: ' })
   })
 })

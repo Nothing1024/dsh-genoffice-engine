@@ -14,16 +14,17 @@ import { basename, dirname, join } from 'node:path'
 import { BrowserWindow, WebContentsView, app, dialog, ipcMain, shell } from 'electron'
 import type { WebContents } from 'electron'
 import {
+  buildPrintableHtml,
   configuredDefaultSaveDir,
   contextMenuLabels,
   installContextMenu,
   installNavigationGuard,
+  printHtmlToPdf,
   safeExternalUrl,
   showOpenDialogWithMemory,
 } from '@genoffice/electron-utils'
 import { createI18n, getUiLang } from '@genoffice/i18n'
-import { gskGenerateImage, hasGskAuth } from '@genoffice/ai-search'
-import { cloudToolsEnabled, type AiSettings } from '@genoffice/ai-provider'
+import { generateImageTool } from '@genoffice/ai-search'
 import { PDF_CHANNELS } from '../shared/ipc'
 import type {
   ExportImagesRequest,
@@ -52,6 +53,8 @@ import type {
   SavePdfResult,
   CropPagesRequest,
   CropPagesResult,
+  CreateDocumentRequest,
+  CreateDocumentResult,
   TextEditValidation,
   ValidateTextEditsRequest,
 } from '../shared/ipc'
@@ -319,6 +322,23 @@ const tDlg = createI18n({
     btnDontSave: 'Nie zapisuj',
     btnCancel: 'Anuluj',
   },
+  cs: {
+    dlgExportImages: 'Exportovat obrázky do složky',
+    dlgExtract: 'Extrahovat stránky jako PDF',
+    dlgInsert: 'Vyberte PDF k importu',
+    dlgSplit: 'Rozdělit PDF do složky',
+    dlgMerge: 'Vyberte soubory PDF ke sloučení',
+    dlgMergeSave: 'Uložit sloučený PDF jako',
+    dlgMergePages: 'Uložit sloučené stránky jako',
+    dlgReplace: 'Vyberte náhradní PDF',
+    dlgSplitPages: 'Uložit rozdělené stránky jako',
+    filterPdf: 'Dokumenty PDF',
+    closeUnsavedMsg: 'Tento PDF obsahuje neuložené změny.',
+    closeUnsavedDetail: 'Chcete je před zavřením uložit?',
+    btnSave: 'Uložit',
+    btnDontSave: 'Neukládat',
+    btnCancel: 'Zrušit',
+  },
   nl: {
     dlgExportImages: 'Afbeeldingen naar map exporteren',
     dlgExtract: "Pagina's extraheren als PDF",
@@ -429,12 +449,85 @@ interface RuntimePaths {
   rendererFile?: string
   /** Shell router used to open generated PDFs in a new GenOffice tab. */
   openGeneratedPath?: (path: string) => boolean
+  /** Host-owned cross-app document creator (the shell routes DOCX into Docs). */
+  createDocument?: (request: CreateDocumentRequest) => Promise<CreateDocumentResult>
 }
 
 let runtime: RuntimePaths = { preloadPath: '' }
 
 export function configurePdfRuntime(paths: RuntimePaths): void {
   runtime = paths
+}
+
+const MAX_CREATE_DOCUMENT_TITLE_CHARS = 200
+const MAX_CREATE_DOCUMENT_CONTENT_CHARS = 2_000_000
+
+function parseCreateDocumentRequest(request: unknown): CreateDocumentRequest | null {
+  if (!request || typeof request !== 'object') return null
+  const { type, title, content } = request as Record<string, unknown>
+  if (type !== 'docx' && type !== 'pdf' && type !== 'md') return null
+  if (
+    typeof title !== 'string' ||
+    title.trim() === '' ||
+    title.length > MAX_CREATE_DOCUMENT_TITLE_CHARS
+  )
+    return null
+  if (
+    typeof content !== 'string' ||
+    content.trim() === '' ||
+    content.length > MAX_CREATE_DOCUMENT_CONTENT_CHARS
+  )
+    return null
+  return { type, title: title.trim(), content }
+}
+
+function sanitizeGeneratedDocumentTitle(title: string): string {
+  const cleaned = title
+    // eslint-disable-next-line no-control-regex -- generated file names must reject controls
+    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, '_')
+    .trim()
+    .slice(0, 80)
+    .trim()
+  return cleaned && cleaned !== '.' && cleaned !== '..' ? cleaned : 'Untitled'
+}
+
+function uniqueGeneratedTextPath(dir: string, title: string, ext: 'md' | 'html'): string {
+  const stem = sanitizeGeneratedDocumentTitle(title)
+  let candidate = join(dir, `${stem}.${ext}`)
+  for (let i = 2; existsSync(candidate); i += 1) candidate = join(dir, `${stem}-${i}.${ext}`)
+  return candidate
+}
+
+async function createStandaloneDocument(
+  request: CreateDocumentRequest,
+): Promise<CreateDocumentResult> {
+  if (request.type === 'docx') {
+    return {
+      ok: false,
+      error: 'Creating DOCX files requires the GenOffice shell or Docs app.',
+    }
+  }
+  const title = sanitizeGeneratedDocumentTitle(request.title)
+  try {
+    if (request.type === 'pdf') {
+      const bytes = await printHtmlToPdf(
+        buildPrintableHtml(title, request.content),
+        () =>
+          new BrowserWindow({ show: false, webPreferences: { sandbox: true, javascript: false } }),
+      )
+      const path = uniqueGeneratedPdfPath(configuredDefaultSaveDir(app), `${title}.pdf`)
+      await writeFile(path, bytes)
+      openGeneratedPdf(path)
+      return { ok: true, path }
+    }
+    // md / html: the source is the file; standalone has no sibling editor to open it in
+    const path = uniqueGeneratedTextPath(configuredDefaultSaveDir(app), title, request.type)
+    await writeFile(path, request.content, 'utf8')
+    shell.showItemInFolder(path)
+    return { ok: true, path }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 function openGeneratedPdf(path: string): void {
@@ -468,6 +561,11 @@ export function pdfIsDirty(webContentsId: number): boolean {
   return dirtyByWc.has(webContentsId)
 }
 
+/** Drop the mirrored dirty flag (webContents.reload does not destroy the view). */
+export function clearPdfDirty(webContentsId: number): void {
+  dirtyByWc.delete(webContentsId)
+}
+
 // ── Content-derived auto-naming (pdf's analog of sheets' autoRenameWorkbook) ──
 
 /** Paths of shell-created blank PDFs still carrying their untitled name; only these may auto-rename */
@@ -496,7 +594,10 @@ function sanitizeAutoRenameBase(raw: string): string | null {
     .replace(/^\.+|\.+$/g, '')
     .trim()
   if (!cleaned) return null
-  return cleaned.length > 40 ? cleaned.slice(0, 40).trim() : cleaned
+  // Windows device names stay reserved with an extension (CON.pdf is still
+  // CON): suffix them so the no-clobber move works there instead of failing.
+  const safe = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(cleaned) ? cleaned + '_' : cleaned
+  return safe.length > 40 ? safe.slice(0, 40).trim() : safe
 }
 
 export type NoClobberMoveResult = 'moved' | 'occupied' | 'failed'
@@ -711,16 +812,6 @@ function withSignatures(
 
 let ipcRegistered = false
 
-/** live read of the shared ai-settings.json (written by the shell settings pane) */
-function gskCloudToolsOn(): boolean {
-  try {
-    const raw = readFileSync(join(app.getPath('userData'), 'ai-settings.json'), 'utf8')
-    return cloudToolsEnabled(JSON.parse(raw) as Partial<AiSettings>)
-  } catch {
-    return true // no settings file yet = default on
-  }
-}
-
 function registerPdfIpc(): void {
   if (ipcRegistered) return
   ipcRegistered = true
@@ -742,6 +833,24 @@ function registerPdfIpc(): void {
     const buf = await readFile(path)
     return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
   })
+
+  ipcMain.handle(
+    PDF_CHANNELS.createDocument,
+    async (e, request: unknown): Promise<CreateDocumentResult> => {
+      if (!allowedByWc.has(e.sender.id)) {
+        return { ok: false, error: 'pdf: sender is not a registered PDF view' }
+      }
+      const parsed = parseCreateDocumentRequest(request)
+      if (!parsed) return { ok: false, error: 'pdf: invalid create-document request' }
+      const create = runtime.createDocument
+      if (!create) return { ok: false, error: 'pdf: document creation is unavailable in this host' }
+      try {
+        return await create(parsed)
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    },
+  )
 
   ipcMain.handle(PDF_CHANNELS.save, async (e, request: SavePdfRequest): Promise<SavePdfResult> => {
     const path = request?.path
@@ -838,6 +947,13 @@ function registerPdfIpc(): void {
       throw new Error('pdf: path not granted to this view')
     }
     return readStaticFormFills(new Uint8Array(await readFile(path)))
+  })
+
+  ipcMain.handle(PDF_CHANNELS.ocrPage, async (_e, png: unknown) => {
+    // bad payload = failed page ([]), never "no engine" (null) — null stops the caller's pass
+    if (typeof png !== 'string' || png.length === 0 || png.length > 64 * 1024 * 1024) return []
+    const { ocrPagePng } = await import('./ocr')
+    return ocrPagePng(png)
   })
 
   ipcMain.handle(
@@ -1241,28 +1357,11 @@ function registerPdfIpc(): void {
   // slides' ai:generate-image is only registered once a slides view exists, so pdf needs its own
   ipcMain.handle(
     PDF_CHANNELS.generateImage,
-    async (_e, op: { prompt?: unknown; aspectRatio?: unknown }) => {
-      if (!hasGskAuth())
-        return {
-          error: 'Genspark account is not logged in on this machine; ask the user to log in first',
-        }
-      if (!gskCloudToolsOn())
-        return {
-          error:
-            'Genspark cloud tools are turned off in Settings (AI Model); enable them to use this tool',
-        }
-      const prompt = String(op?.prompt ?? '').trim()
-      if (!prompt) return { error: 'prompt must not be empty' }
-      try {
-        const r = await gskGenerateImage({
-          prompt,
-          aspectRatio: op?.aspectRatio ? String(op.aspectRatio) : undefined,
-        })
-        return { url: r.url }
-      } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) }
-      }
-    },
+    (_e, op: { prompt?: unknown; aspectRatio?: unknown }) =>
+      generateImageTool(join(app.getPath('userData'), 'ai-settings.json'), {
+        prompt: String(op?.prompt ?? ''),
+        aspectRatio: op?.aspectRatio ? String(op.aspectRatio) : undefined,
+      }),
   )
 
   ipcMain.handle(PDF_CHANNELS.listSignatures, () => withSignatures(async (list) => list))
@@ -1309,9 +1408,11 @@ function registerPdfIpc(): void {
 
 function grantAndTrack(wc: WebContents, openPath?: string | null): void {
   const wcId = wc.id
+  const allowedPaths = new Set<string>()
+  allowedByWc.set(wcId, allowedPaths)
   if (openPath && existsSync(openPath)) {
     openPathByWc.set(wcId, openPath)
-    allowedByWc.set(wcId, new Set([openPath]))
+    allowedPaths.add(openPath)
   }
   // External links inside the PDF (Link annots with target=_blank) go to the system browser
   wc.setWindowOpenHandler(({ url }) => {
@@ -1328,6 +1429,12 @@ function grantAndTrack(wc: WebContents, openPath?: string | null): void {
     closeSaveWaiters.delete(wcId)
     saveAsWaiters.get(wcId)?.(false)
     saveAsWaiters.delete(wcId)
+  })
+  // reload() remounts the renderer without destroying webContents, so the
+  // destroyed handler never runs. A remount discards in-memory edits; the
+  // close guard must not still think the tab is dirty.
+  wc.on('did-start-loading', () => {
+    dirtyByWc.delete(wcId)
   })
 }
 
@@ -1355,6 +1462,7 @@ export function startPdfStandalone(): void {
     preloadPath: join(__dirname, '../preload/index.js'),
     rendererUrl: process.env.ELECTRON_RENDERER_URL,
     rendererFile: join(__dirname, '../renderer/index.html'),
+    createDocument: createStandaloneDocument,
   })
   void app.whenReady().then(() => {
     registerPdfIpc()

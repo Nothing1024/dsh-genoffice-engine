@@ -7,9 +7,13 @@ import '@genoffice/ui/tokens.css'
 import '@genoffice/ui/screentip.css'
 import '@genoffice/ui/color-picker.css'
 import '@genoffice/ui/dropdown.css'
+import '@genoffice/ui/ribbon-collapse.css'
+import '@genoffice/ui/markdown.css'
+import '@genoffice/ui/ai-panel-prefs.css'
+import '@genoffice/ui/ai-scope-quote.css'
 import './styles.css'
 import './fonts/fonts.css'
-import { installScreenTips } from '@genoffice/ui'
+import { applyAiPanelPrefs, installScreenTips } from '@genoffice/ui'
 
 installScreenTips()
 
@@ -35,6 +39,11 @@ async function bootstrap(): Promise<void> {
   document.documentElement.lang = htmlLang(lang)
   applyTheme(theme)
   window.desktop?.onThemeChanged(applyTheme)
+  void window.desktop
+    ?.getAiPanelPrefs?.()
+    .then(applyAiPanelPrefs)
+    .catch(() => {})
+  window.desktop?.onAiPanelPrefsChanged?.(applyAiPanelPrefs)
   createRoot(document.getElementById('root')!).render(
     <LocaleProvider initial={lang}>
       <App />

@@ -5,6 +5,10 @@
  * per-sheet print settings; nothing renders in the grid (Univer has no
  * page-layout view), everything lands in the saved file.
  */
+import { isMetafileMime, metafileToDataUrl } from '@genoffice/docx-engine/metafile'
+import type { WorkbookOperation } from '../domain/workbook-dsl'
+import type { ApplyOutcome } from '../domain/workbook.types'
+
 import { columnLabel } from '../domain/cell-address'
 import {
   isSheetRemoved,
@@ -19,7 +23,12 @@ import { t } from './i18n/locale'
 import { effectivePageBreaks } from './page-break-preview'
 import { COLOR_SCHEMES, FONT_SCHEMES, rethemeStyles, THEME_PRESETS } from './themes'
 import { loadVisibleRange } from './univer-sync'
-import { buildSheetPrintPayload, type PrintWorksheet } from './print-html'
+import {
+  buildSheetPrintPayload,
+  type HeaderFooterPictureImage,
+  type PrintWorksheet,
+} from './print-html'
+import { resolveEffectivePageSetup, type HeaderFooterPictureSlot } from './print-settings'
 import type { LazyWorkbookState, UniverRuntime } from './univer-state'
 
 const PAPER_NAMES: Record<string, string> = {
@@ -42,7 +51,25 @@ export interface PageLayoutContext {
   setPendingEdits: (count: number) => void
   /// Re-renders the Page Break Preview overlay when page geometry changed.
   refreshPageBreakPreview?: () => void
+  /// Page-setup edits run as set_page_setup ops through the shared executor.
+  runOps: (
+    ops: readonly WorkbookOperation[],
+    successMessage?: string | null,
+  ) => Promise<ApplyOutcome>
 }
+
+const PAGE_SETUP_OP_FIELDS = new Set([
+  'orientation',
+  'paperSize',
+  'scale',
+  'fitToWidth',
+  'fitToHeight',
+  'fitToPage',
+  'margins',
+  'printGridlines',
+  'printHeadings',
+  'printArea',
+])
 
 export function handlePageLayoutCommand(ctx: PageLayoutContext, rest: string): void {
   const runtime = ctx.univerRef.current
@@ -55,11 +82,35 @@ export function handlePageLayoutCommand(ctx: PageLayoutContext, rest: string): v
   const worksheet = runtime.univerAPI.getActiveWorkbook()?.getActiveSheet()
   const sheetId = worksheet?.getSheetId()
   if (!sheetId || isSheetRemoved(state.editJournal, sheetId)) return
-  const record = (patch: PageSetupJournalState, note: string): void => {
+  const recordDirect = (patch: PageSetupJournalState, note: string): void => {
     recordPageSetup(state.editJournal, sheetId, patch)
     ctx.setPendingEdits(journalSize(state.editJournal))
     ctx.setMessage(t('appPageSetupRecorded', { note }))
     ctx.refreshPageBreakPreview?.()
+  }
+  // Fields set_page_setup carries (fitToPage is derived by the executor);
+  // breaks and print titles have no op yet and journal directly.
+  const record = (patch: PageSetupJournalState, note: string): void => {
+    if (!Object.keys(patch).every((key) => PAGE_SETUP_OP_FIELDS.has(key))) {
+      recordDirect(patch, note)
+      return
+    }
+    const op: WorkbookOperation = {
+      op: 'set_page_setup',
+      sheetId,
+      ...(patch.orientation !== undefined ? { orientation: patch.orientation } : {}),
+      ...(patch.paperSize !== undefined ? { paperSize: patch.paperSize } : {}),
+      ...(patch.scale !== undefined ? { scale: patch.scale } : {}),
+      ...(patch.fitToWidth !== undefined ? { fitToWidth: patch.fitToWidth } : {}),
+      ...(patch.fitToHeight !== undefined ? { fitToHeight: patch.fitToHeight } : {}),
+      ...(patch.margins !== undefined ? { margins: patch.margins } : {}),
+      ...(patch.printGridlines !== undefined ? { printGridlines: patch.printGridlines } : {}),
+      ...(patch.printHeadings !== undefined ? { printHeadings: patch.printHeadings } : {}),
+      ...(patch.printArea !== undefined ? { printArea: patch.printArea } : {}),
+    }
+    void ctx
+      .runOps([op], t('appPageSetupRecorded', { note }))
+      .then((outcome) => outcome.ok && ctx.refreshPageBreakPreview?.())
   }
   const separator = rest.indexOf(':')
   const key = separator === -1 ? rest : rest.slice(0, separator)
@@ -300,15 +351,31 @@ export async function handleExportPdf(ctx: PageLayoutContext): Promise<void> {
     return
   }
   try {
-    const pageSetup = state?.editJournal.pageSetup.get(worksheet.getSheetId()) ?? {}
+    const sheetId = worksheet.getSheetId()
+    const journal = state?.editJournal.pageSetup.get(sheetId) ?? {}
+    const fileSetup = state?.sheetFilePageSetups.get(sheetId) ?? null
+    const fileSheet = state?.file.sheets.find((sheet) => sheet.id === sheetId)
+    const setup = resolveEffectivePageSetup(
+      journal,
+      fileSetup,
+      {
+        ...(fileSheet?.printArea === undefined ? {} : { printArea: fileSheet.printArea }),
+        ...(fileSheet?.printTitles === undefined ? {} : { printTitles: fileSheet.printTitles }),
+      },
+      state?.editJournal.structuralOps.get(sheetId) ?? [],
+    )
     const baseName = (state?.file.name ?? 'Book1').replace(/\.[^.]+$/, '')
+    ctx.setMessage(t('appPdfRendering'))
+    const pictures = state
+      ? await loadHeaderFooterPictures(state.file.sessionId, setup.headerFooterPictures)
+      : new Map<string, HeaderFooterPictureImage>()
     const payload = buildSheetPrintPayload(
       worksheet as unknown as PrintWorksheet,
-      pageSetup,
+      setup,
       `${baseName}.pdf`,
       worksheet.getSheetName(),
+      pictures,
     )
-    ctx.setMessage(t('appPdfRendering'))
     const result = await window.desktopApi.exportPdf(payload)
     ctx.setMessage(
       result.canceled ? t('appPdfCanceled') : t('appPdfExported', { path: result.path }),
@@ -316,4 +383,38 @@ export async function handleExportPdf(ctx: PageLayoutContext): Promise<void> {
   } catch (error: unknown) {
     ctx.setMessage(error instanceof Error ? error.message : t('appPdfExportFailed'))
   }
+}
+
+/// Fetches the file's `&G` header/footer pictures as data URLs, keyed by
+/// VML slot. Metafiles rasterize to PNG (Chromium cannot paint EMF/WMF); a
+/// picture that fails to load is left out — its `&G` then prints nothing,
+/// which is also what Excel shows for a slot without a picture.
+async function loadHeaderFooterPictures(
+  sessionId: string,
+  slots: readonly HeaderFooterPictureSlot[],
+): Promise<Map<string, HeaderFooterPictureImage>> {
+  const pictures = new Map<string, HeaderFooterPictureImage>()
+  await Promise.all(
+    slots.map(async (slot) => {
+      try {
+        const media = await window.desktopApi.readWorkbookMedia({ sessionId, visualId: slot.id })
+        const dataUrl = isMetafileMime(media.mediaType)
+          ? await metafileToDataUrl(base64ToBytes(media.base64), media.mediaType)
+          : `data:${media.mediaType};base64,${media.base64}`
+        if (dataUrl) {
+          pictures.set(slot.position, { dataUrl, widthPt: slot.widthPt, heightPt: slot.heightPt })
+        }
+      } catch (reason: unknown) {
+        console.warn(`header/footer picture unavailable (${slot.position})`, reason)
+      }
+    }),
+  )
+  return pictures
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
 }

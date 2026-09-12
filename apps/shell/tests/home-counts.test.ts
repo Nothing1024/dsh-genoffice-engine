@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createI18n } from '@genoffice/i18n'
-import { pageRecentPaths } from '../src/main/recent-files'
+import { normalizeRecentQuery, pageRecentPaths } from '../src/main/recent-files'
 import { fileCountKey, timelineCountKey, visiblePageCount } from '../src/renderer/src/counts'
 import { strings } from '../src/renderer/src/strings'
 
@@ -34,7 +34,47 @@ describe('home visible counts', () => {
     expect(visiblePageCount(page)).toBe(1)
   })
 
-  it('excludes stale paths from totals and rows', () => {
+  it('counts .xlsm under the sheets (xlsx) filter', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'shell-counts-'))
+    tempDirs.push(dir)
+    const bookPath = join(dir, 'book.xlsx')
+    const macroPath = join(dir, 'macro.xlsm')
+    const docPath = join(dir, 'notes.docx')
+    writeFileSync(bookPath, 'sheet')
+    writeFileSync(macroPath, 'sheet')
+    writeFileSync(docPath, 'doc')
+
+    const page = pageRecentPaths(
+      [bookPath, macroPath, docPath],
+      { ext: 'xlsx', offset: 0, limit: 50 },
+      new Set(),
+    )
+
+    expect(page.total).toBe(2)
+    expect(page.entries.map((entry) => entry.path)).toEqual([bookPath, macroPath])
+  })
+
+  it('counts legacy .xls under the sheets (xlsx) filter', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'shell-counts-'))
+    tempDirs.push(dir)
+    const bookPath = join(dir, 'book.xlsx')
+    const legacyPath = join(dir, 'legacy.xls')
+    const docPath = join(dir, 'notes.docx')
+    writeFileSync(bookPath, 'sheet')
+    writeFileSync(legacyPath, 'sheet')
+    writeFileSync(docPath, 'doc')
+
+    const page = pageRecentPaths(
+      [bookPath, legacyPath, docPath],
+      { ext: 'xlsx', offset: 0, limit: 50 },
+      new Set(),
+    )
+
+    expect(page.total).toBe(2)
+    expect(page.entries.map((entry) => entry.path)).toEqual([bookPath, legacyPath])
+  })
+
+  it('keeps unavailable paths listed at their position, flagged missing (r158)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'shell-counts-'))
     tempDirs.push(dir)
     const existingPath = join(dir, 'existing.xlsx')
@@ -43,9 +83,38 @@ describe('home visible counts', () => {
 
     const page = pageRecentPaths([missingPath, existingPath], {}, new Set())
 
+    // a transiently unstat-able file (disconnected drive, pending mount) must
+    // not vanish from the list — it renders dimmed with an unavailable state
+    expect(page.total).toBe(2)
+    expect(page.totalAll).toBe(2)
+    expect(page.entries.map((entry) => [entry.path, entry.missing === true])).toEqual([
+      [missingPath, true],
+      [existingPath, false],
+    ])
+    expect(page.entries[0].mtimeMs).toBe(0)
+    expect(page.entries[0].ext).toBe('xlsx')
+  })
+})
+
+describe('recent query ext normalization', () => {
+  it('trims whitespace, strips leading dots, and lowercases the filter', () => {
+    expect(normalizeRecentQuery({ ext: '.XLSX' }).ext).toBe('xlsx')
+    expect(normalizeRecentQuery({ ext: ' xlsx ' }).ext).toBe('xlsx')
+    expect(normalizeRecentQuery({ ext: '...md' }).ext).toBe('md')
+    expect(normalizeRecentQuery({ ext: '...' }).ext).toBeUndefined()
+    expect(normalizeRecentQuery({ ext: '' }).ext).toBeUndefined()
+    expect(normalizeRecentQuery({}).ext).toBeUndefined()
+  })
+
+  it('applies the normalized filter to the page', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'shell-counts-'))
+    tempDirs.push(dir)
+    const bookPath = join(dir, 'book.xlsx')
+    writeFileSync(bookPath, 'sheet')
+
+    const page = pageRecentPaths([bookPath], { ext: '.XLSX', limit: 50 }, new Set())
     expect(page.total).toBe(1)
-    expect(page.totalAll).toBe(1)
-    expect(page.entries.map((entry) => entry.path)).toEqual([existingPath])
+    expect(page.entries.map((entry) => entry.path)).toEqual([bookPath])
   })
 })
 

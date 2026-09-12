@@ -39,6 +39,10 @@
   --sheets-chip-bg: #f3f7f4;
   --sheets-member-bg: #f6f8f7;
   --sheets-member-ink: #5c6660;
+  --sheets-validation-prompt-bg: #ffffe1;
+  --sheets-validation-prompt-border: #808080;
+  --sheets-validation-prompt-ink: #555;
+  --sheets-validation-prompt-shadow: rgb(0 0 0 / 18%);
 
   /* content-side constants: charts, shapes and their selection chrome sit on
    * the paper-like grid and never follow the theme */
@@ -62,8 +66,6 @@
   --sheets-shape-border: #aeb4b8;
   --sheets-shape-bg: rgb(255 255 255 / 94%);
   --sheets-shape-ink: #596068;
-  --sheets-shape-err-border: #d9a4a4;
-  --sheets-shape-err-ink: #9a3030;
   --sheets-content-danger: #b42318;
 
   /* dark chips and black translucent masks/shadows hold in both themes */
@@ -126,6 +128,10 @@
   --sheets-chip-bg: #24312a;
   --sheets-member-bg: #2f2f2f;
   --sheets-member-ink: #a9b2ac;
+  --sheets-validation-prompt-bg: #3c3826;
+  --sheets-validation-prompt-border: #8f8663;
+  --sheets-validation-prompt-ink: #f2ecd0;
+  --sheets-validation-prompt-shadow: rgb(0 0 0 / 45%);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -154,6 +160,10 @@
     --sheets-chip-bg: #24312a;
     --sheets-member-bg: #2f2f2f;
     --sheets-member-ink: #a9b2ac;
+    --sheets-validation-prompt-bg: #3c3826;
+    --sheets-validation-prompt-border: #8f8663;
+    --sheets-validation-prompt-ink: #f2ecd0;
+    --sheets-validation-prompt-shadow: rgb(0 0 0 / 45%);
   }
 }
 
@@ -178,14 +188,15 @@
 /* Cell-content font aliases (document data, theme-independent): without these,
  * Office sans families the OS lacks silently fall back to Chromium's serif
  * default on the grid canvas. local() keeps a real installed font first; the
- * bundled Carlito (metric-compatible with Calibri) guarantees Excel-matching
- * widths before the Helvetica/Arial approximations. Canvas fillText never
- * triggers @font-face downloads, so main.tsx loads these explicitly. */
+ * bundled Carlito (metric-compatible with Calibri, shared via
+ * @genoffice/ui/fonts) guarantees Excel-matching widths before the
+ * Helvetica/Arial approximations. Canvas fillText never triggers @font-face
+ * downloads, so main.tsx loads these explicitly. */
 @font-face {
   font-family: Aptos;
   src:
-    local('Aptos'), local('Calibri'), local('Carlito'), url('./fonts/Carlito-Regular.ttf'),
-    local('Helvetica Neue'), local('Arial');
+    local('Aptos'), local('Calibri'), local('Carlito'),
+    url('@genoffice/ui/fonts/Carlito-Regular.ttf'), local('Helvetica Neue'), local('Arial');
 }
 
 @font-face {
@@ -193,7 +204,7 @@
   font-weight: bold;
   src:
     local('Aptos Bold'), local('Calibri Bold'), local('Carlito Bold'),
-    url('./fonts/Carlito-Bold.ttf'), local('Helvetica Neue Bold'), local('Arial Bold');
+    url('@genoffice/ui/fonts/Carlito-Bold.ttf'), local('Helvetica Neue Bold'), local('Arial Bold');
 }
 
 @font-face {
@@ -201,7 +212,8 @@
   font-style: italic;
   src:
     local('Aptos Italic'), local('Calibri Italic'), local('Carlito Italic'),
-    url('./fonts/Carlito-Italic.ttf'), local('Helvetica Neue Italic'), local('Arial Italic');
+    url('@genoffice/ui/fonts/Carlito-Italic.ttf'), local('Helvetica Neue Italic'),
+    local('Arial Italic');
 }
 
 @font-face {
@@ -210,22 +222,50 @@
   font-style: italic;
   src:
     local('Aptos Bold Italic'), local('Calibri Bold Italic'), local('Carlito Bold Italic'),
-    url('./fonts/Carlito-BoldItalic.ttf'), local('Helvetica Neue Bold Italic'),
+    url('@genoffice/ui/fonts/Carlito-BoldItalic.ttf'), local('Helvetica Neue Bold Italic'),
     local('Arial Bold Italic');
+}
+
+/* 'Aptos Narrow' lives in CELL_FONT_ALIASES (cell-font-fallback.ts): a CSS
+ * face here would shadow the width-corrected substitute for italic runs.
+ * Italics synthesize from the corrected upright faces. */
+
+@font-face {
+  font-family: Carlito;
+  src: local('Carlito'), url('@genoffice/ui/fonts/Carlito-Regular.ttf');
+}
+
+@font-face {
+  font-family: Carlito;
+  font-weight: bold;
+  src: local('Carlito Bold'), url('@genoffice/ui/fonts/Carlito-Bold.ttf');
+}
+
+@font-face {
+  font-family: Carlito;
+  font-style: italic;
+  src: local('Carlito Italic'), url('@genoffice/ui/fonts/Carlito-Italic.ttf');
+}
+
+@font-face {
+  font-family: Carlito;
+  font-weight: bold;
+  font-style: italic;
+  src: local('Carlito Bold Italic'), url('@genoffice/ui/fonts/Carlito-BoldItalic.ttf');
 }
 
 @font-face {
   font-family: Calibri;
   src:
-    local('Calibri'), local('Carlito'), url('./fonts/Carlito-Regular.ttf'), local('Helvetica Neue'),
-    local('Arial');
+    local('Calibri'), local('Carlito'), url('@genoffice/ui/fonts/Carlito-Regular.ttf'),
+    local('Helvetica Neue'), local('Arial');
 }
 
 @font-face {
   font-family: Calibri;
   font-weight: bold;
   src:
-    local('Calibri Bold'), local('Carlito Bold'), url('./fonts/Carlito-Bold.ttf'),
+    local('Calibri Bold'), local('Carlito Bold'), url('@genoffice/ui/fonts/Carlito-Bold.ttf'),
     local('Helvetica Neue Bold'), local('Arial Bold');
 }
 
@@ -233,7 +273,7 @@
   font-family: Calibri;
   font-style: italic;
   src:
-    local('Calibri Italic'), local('Carlito Italic'), url('./fonts/Carlito-Italic.ttf'),
+    local('Calibri Italic'), local('Carlito Italic'), url('@genoffice/ui/fonts/Carlito-Italic.ttf'),
     local('Helvetica Neue Italic'), local('Arial Italic');
 }
 
@@ -243,40 +283,13 @@
   font-style: italic;
   src:
     local('Calibri Bold Italic'), local('Carlito Bold Italic'),
-    url('./fonts/Carlito-BoldItalic.ttf'), local('Helvetica Neue Bold Italic'),
+    url('@genoffice/ui/fonts/Carlito-BoldItalic.ttf'), local('Helvetica Neue Bold Italic'),
     local('Arial Bold Italic');
 }
 
-/* Localized CJK cell-font aliases (document data): Korean-produced workbooks
- * name fonts in Hangul; without these the canvas family is unresolvable and
- * Hangul falls back through Chromium's serif default. */
-@font-face {
-  font-family: '맑은 고딕';
-  src: local('Malgun Gothic'), local('Apple SD Gothic Neo'), local('AppleGothic');
-}
-
-@font-face {
-  font-family: '맑은 고딕';
-  font-weight: bold;
-  src:
-    local('Malgun Gothic Bold'), local('MalgunGothicBold'), local('Apple SD Gothic Neo Bold'),
-    local('AppleSDGothicNeo-Bold'), local('AppleGothic');
-}
-
-@font-face {
-  font-family: '돋움';
-  src: local('Dotum'), local('AppleGothic'), local('Apple SD Gothic Neo');
-}
-
-/* Korean faces ship no italics; only weight needs a rule (font-synthesis is
- * off for DOM surfaces — the grid canvas synthesizes on its own). */
-@font-face {
-  font-family: '돋움';
-  font-weight: bold;
-  src:
-    local('Dotum Bold'), local('Apple SD Gothic Neo Bold'), local('AppleSDGothicNeo-Bold'),
-    local('AppleGothic');
-}
+/* Hangul-named cell-font aliases ('맑은 고딕', '돋움') live in
+ * CELL_FONT_ALIASES (cell-font-fallback.ts), which supports the per-script
+ * width correction Malgun Gothic needs. */
 
 * {
   box-sizing: border-box;
@@ -284,7 +297,7 @@
 
 body {
   margin: 0;
-  min-width: 900px;
+  min-width: 720px;
   min-height: 100vh;
   overflow: hidden;
   /* Grayscale antialiasing to match docs/slides: without it, same-weight text renders noticeably bolder on macOS */
@@ -1626,6 +1639,129 @@ button.check-item:hover {
   background: var(--surface);
 }
 
+/* Floating selection Ask AI entry and send-now popover (docs/slides parity). */
+.ai-ask-trigger {
+  position: fixed;
+  z-index: 59;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-30);
+  background: var(--surface);
+  color: var(--color-ai-action);
+  font-family: var(--gs-font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  box-shadow: var(--sheets-shadow-menu);
+  cursor: pointer;
+}
+
+.ai-ask-trigger:hover {
+  background: var(--hover);
+}
+
+.ai-ask-pop {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-12);
+  background: var(--surface);
+  box-shadow: var(--sheets-shadow-menu);
+  font-family: var(--gs-font-sans);
+}
+
+.ai-ask-pop-title {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ai-ask-pop-sub {
+  margin-top: -4px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.ai-ask-pop-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-8);
+  outline: none;
+  background: var(--color-bg-page);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 14px;
+}
+
+.ai-ask-pop-input:focus {
+  border-color: var(--accent);
+}
+
+.ai-ask-pop-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-ask-chip {
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-30);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.ai-ask-chip:hover {
+  background: var(--hover);
+  color: var(--color-text-primary);
+}
+
+.ai-ask-pop-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-ask-cancel,
+.ai-ask-confirm {
+  padding: 6px 12px;
+  border-radius: var(--radius-6);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ai-ask-cancel {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.ai-ask-confirm {
+  border: 1px solid transparent;
+  background: var(--color-ai-action);
+  color: var(--color-ai-action-text);
+}
+
+.ai-ask-confirm:hover:not(:disabled) {
+  background: var(--color-ai-action-hover);
+}
+
+.ai-ask-confirm:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .copilot {
   position: relative;
   display: flex;
@@ -1878,7 +2014,7 @@ textarea:focus {
 .xlsx-image,
 .xlsx-shape,
 .xlsx-visual-loading,
-.xlsx-visual-error {
+.xlsx-visual-unavailable {
   width: 100%;
   height: 100%;
   margin: 0;
@@ -1917,7 +2053,7 @@ textarea:focus {
 
 .shape-editable .chart-edit-button {
   top: 2px;
-  right: 26px;
+  right: 2px;
   width: 20px;
   height: 20px;
   font-size: 11px;
@@ -2043,6 +2179,9 @@ textarea:focus {
 
 .chart-svg {
   width: 100%;
+  /* Wide anchors: without a height cap the aspect-derived height overflows
+     the frame and clips the bottom axis rows (side-legend layouts). */
+  max-height: 100%;
   min-height: 0;
   flex: 1 1 auto;
 }
@@ -2057,10 +2196,13 @@ textarea:focus {
   font-size: 9px;
 }
 
+/* Size container: the text below sizes in cq units so it follows the
+   sheet zoom with the float box (--shape-px = one zoomed px). */
 .xlsx-shape-drawn {
   position: relative;
   width: 100%;
   height: 100%;
+  container-type: size;
 }
 
 .xlsx-shape-drawn svg {
@@ -2072,10 +2214,6 @@ textarea:focus {
 /* Rotated shape: the anchor box stores rotated bounds; the inner box
    restores the true frame (sized in cq units by the component), centered
    on the anchor center before the rotate. */
-.xlsx-shape-rotated {
-  container-type: size;
-}
-
 .xlsx-shape-rotated-inner {
   position: absolute;
   left: 50%;
@@ -2087,9 +2225,9 @@ textarea:focus {
   inset: 0;
   display: grid;
   place-items: center;
-  padding: 6px;
+  padding: calc(var(--shape-px, 1px) * 6);
   text-align: center;
-  font-size: 12px;
+  font-size: calc(var(--shape-px, 1px) * 12);
   color: var(--sheets-chart-ink);
   overflow: hidden;
 }
@@ -2102,7 +2240,7 @@ textarea:focus {
   justify-content: center;
   align-items: stretch;
   text-align: initial;
-  padding: 4px 8px;
+  padding: calc(var(--shape-px, 1px) * 4) calc(var(--shape-px, 1px) * 8);
 }
 
 .xlsx-shape-drawn .shape-anchor-t {
@@ -2111,6 +2249,12 @@ textarea:focus {
 
 .xlsx-shape-drawn .shape-anchor-b {
   justify-content: flex-end;
+}
+
+/* bodyPr clip: Excel cuts the text at the inset edge, not the frame edge. */
+.xlsx-shape-drawn .shape-text-clip {
+  overflow: clip;
+  overflow-clip-margin: content-box;
 }
 
 .shape-paragraph {
@@ -2137,10 +2281,6 @@ textarea:focus {
   border: 2px solid var(--sheets-select-frame);
   pointer-events: none;
   z-index: 1;
-}
-
-.shape-editable.selected .shape-delete-button {
-  opacity: 1;
 }
 
 /* Selection handles: white dots on the frame, selected only. */
@@ -2202,30 +2342,36 @@ textarea:focus {
   cursor: ew-resize;
 }
 
-.shape-editable .shape-delete-button {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  z-index: 3;
+/* Delete affordance of the SELECTED visual only. Portaled to <body> and
+   placed just outside the frame's top-right corner (VisualDeleteButton
+   positions it; the float container would clip anything outside the box),
+   so it never covers a small picture the way the old in-frame button did.
+   Same layer as the Ask AI trigger: above the grid, below dialogs. */
+.shape-delete-button {
+  position: fixed;
+  z-index: 59;
+  display: grid;
+  place-items: center;
   width: 20px;
   height: 20px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-small);
-  background: var(--sheets-float-btn-bg);
+  background: var(--surface);
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1;
-  opacity: 0;
+  box-shadow: var(--sheets-shadow-menu);
   cursor: pointer;
 }
 
-.shape-editable:hover .shape-delete-button {
-  opacity: 1;
+.shape-delete-button:not([data-ready='true']) {
+  visibility: hidden;
 }
 
-.shape-editable .shape-delete-button:hover {
+.shape-delete-button:hover {
   color: var(--sheets-content-danger);
-  background: var(--sheets-paper);
+  background: var(--hover);
 }
 
 /* Body-level clone shown while moving a visual: escapes the float
@@ -2246,14 +2392,18 @@ textarea:focus {
   pointer-events: none;
 }
 
+.shape-editable:has(> .shape-text-editor) {
+  container-type: size;
+}
+
 .shape-text-editor {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
-  padding: 6px;
+  padding: calc(var(--shape-px, 1px) * 6);
   text-align: center;
-  font-size: 12px;
+  font-size: calc(var(--shape-px, 1px) * 12);
   color: var(--sheets-chart-ink);
   outline: 2px solid var(--sheets-select-frame);
   outline-offset: -2px;
@@ -2277,6 +2427,82 @@ textarea:focus {
   display: block;
   overflow: visible;
   pointer-events: none;
+}
+
+.data-validation-dropdown-button {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+  cursor: default;
+  appearance: none;
+}
+
+.univer-z-10:has(.data-validation-dropdown-button),
+.univer-z-10:has(.data-validation-input-message) {
+  overflow: visible !important;
+}
+
+.univer-z-10:has(.data-validation-input-message) > .univer-overflow-hidden {
+  overflow: visible !important;
+}
+
+/* Cell alert popup: the title row is fixed at 20px, so a wrapped title
+   ("Number stored as text") overlaps the message. */
+.univer-w-\[156px\].univer-shadow > .univer-h-5 {
+  height: auto;
+  min-height: 1.25rem;
+  align-items: flex-start;
+}
+
+.univer-w-\[156px\].univer-shadow > .univer-h-5 > svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.data-validation-dropdown-button:hover {
+  border-color: var(--border-hover);
+  background: var(--hover);
+  color: var(--text);
+}
+
+.data-validation-dropdown-button svg {
+  width: 8px;
+  height: 8px;
+  display: block;
+  fill: currentcolor;
+  pointer-events: none;
+}
+
+.data-validation-input-message {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 4px;
+  overflow: hidden;
+  border: 1px solid var(--sheets-validation-prompt-border);
+  background: var(--sheets-validation-prompt-bg);
+  box-shadow: 1px 1px 2px var(--sheets-validation-prompt-shadow);
+  color: var(--sheets-validation-prompt-ink);
+  font-family: inherit;
+  font-size: 9px;
+  line-height: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  user-select: none;
+  transform: translateY(4px);
+}
+
+.data-validation-input-message-title {
+  font-weight: 600;
 }
 
 .page-break-line {
@@ -2600,6 +2826,15 @@ textarea:focus {
   flex-direction: column-reverse;
 }
 
+/* Excel lays top/bottom pie legends out as a wrapping row, not a column. */
+.pie-legend-bottom > .chart-legend,
+.pie-legend-top > .chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 12px;
+}
+
 .pie-legend-left {
   flex-direction: row-reverse;
 }
@@ -2680,9 +2915,108 @@ textarea:focus {
   object-fit: contain;
 }
 
+/* a:srcRect crop: the frame clips an oversized img offset by the crop. */
+.xlsx-image-crop {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.xlsx-image-crop img {
+  position: absolute;
+  display: block;
+  max-width: none;
+}
+
+/* Embedded OLE object without a cached preview: Excel's bordered box with a
+ * document icon and the object's type caption, sized to the anchor. Shares
+ * the shape chrome tokens (system window/windowText in Excel). */
+.xlsx-ole-placeholder {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 3px;
+  overflow: hidden;
+  border: 1px solid var(--sheets-shape-border);
+  background: var(--sheets-shape-bg);
+  color: var(--sheets-shape-ink);
+  font:
+    11px 'Segoe UI',
+    sans-serif;
+  text-align: center;
+  user-select: none;
+}
+
+/* Cached preview picture: the VML frame/backdrop come inline from the file;
+ * the picture fits inside like a plain xlsx-image. */
+.xlsx-ole-frame {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.xlsx-ole-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+}
+
+.xlsx-ole-caption {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xlsx-slicer-placeholder {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--sheets-shape-border);
+  background: var(--sheets-shape-bg);
+  color: var(--sheets-shape-ink);
+  font:
+    700 11px 'Segoe UI',
+    sans-serif;
+  user-select: none;
+}
+
+.xlsx-slicer-caption {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--sheets-shape-border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* In-cell rich-value picture: fits the cell box, aspect preserved (Excel). */
+.xlsx-cell-image {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.xlsx-cell-image img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
 .xlsx-shape,
-.xlsx-visual-loading,
-.xlsx-visual-error {
+.xlsx-visual-loading {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2693,11 +3027,6 @@ textarea:focus {
     12px 'Segoe UI',
     sans-serif;
   text-align: center;
-}
-
-.xlsx-visual-error {
-  border-color: var(--sheets-shape-err-border);
-  color: var(--sheets-shape-err-ink);
 }
 
 .inline-tools .color-tool {
@@ -3788,6 +4117,14 @@ textarea:focus {
   font-size: 14px;
 }
 
+/* in-answer citation links: click jumps the grid to the cited cell/range */
+.ai-md .ai-md-nav {
+  color: var(--accent);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
 /* Collapsible tool-activity group.
    Unlike docs/slides, this app renders the group BEFORE the reply text, so the
    gap to the surrounding content comes from margin-bottom, not margin-top. */
@@ -4418,6 +4755,52 @@ textarea:focus {
 
 .ai-attach-btn:hover {
   filter: brightness(0.7);
+}
+
+/* Selection-scope chip above the composer: shown only for a deliberate
+   multi-cell selection, so the resting single-cell state adds no chrome. */
+.ai-scope-row {
+  padding: 13px 14px 0;
+}
+
+.ai-scope-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px 3px 10px;
+  border-radius: var(--radius-30);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-size: var(--text-caption);
+  font-weight: 500;
+}
+
+/* the run in flight owns this scope: no dismiss control, so no room for one */
+.ai-scope-hint.is-locked {
+  padding-right: 10px;
+}
+
+.ai-scope-hint::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ai-scope-clear {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+  opacity: 0.65;
+  cursor: pointer;
+}
+
+.ai-scope-clear:hover {
+  opacity: 1;
 }
 
 /* attachment chips above the composer */
@@ -5129,4 +5512,57 @@ textarea:focus {
 .fn-filter-row .gs-dd {
   flex-shrink: 0;
   min-width: 120px;
+}
+
+/* Excel split color tools: the glyph applies the current color, the slim
+   caret opens the palette. The pair reads as one control — shared hover
+   tint, individually highlighted halves (docs-ribbon parity). */
+.inline-tools .menu-select.color-split {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.inline-tools .color-split .color-tool {
+  min-width: 24px;
+  border-radius: var(--radius-small) 0 0 var(--radius-small);
+}
+
+.inline-tools .color-tool-caret {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  width: 13px;
+  height: 30px;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 0 var(--radius-small) var(--radius-small) 0;
+}
+
+.inline-tools .color-tool-caret .chev {
+  margin-left: 0;
+}
+
+.inline-tools .color-split:hover .color-tool:not(:disabled),
+.inline-tools .color-split:hover .color-tool-caret:not(:disabled) {
+  background: var(--ribbon-hover);
+}
+
+.inline-tools .color-tool-caret:hover:not(:disabled),
+.inline-tools .color-tool-caret.is-active {
+  background: var(--ribbon-active, var(--ribbon-hover));
+}
+
+/* Border dropdown entries: glyph + label, Excel-style; the drop sits inside
+   .inline-tools, so the span sheds the 28×30 toggle box and its hover */
+.menu-select-drop .menu-option-icon {
+  display: inline-grid;
+  place-items: center;
+  min-width: 0;
+  height: auto;
+  margin-right: 8px;
+  vertical-align: -3px;
+}
+
+.menu-select-drop .menu-option-icon:hover {
+  background: transparent;
 }

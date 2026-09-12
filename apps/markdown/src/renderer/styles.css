@@ -12,6 +12,9 @@
   --md-code-inline-bg: rgb(129 139 152 / 14%);
   --md-table-header-bg: #f6f8fa;
   --md-ai-changed: rgb(255 213 79 / 40%);
+  --md-ai-anchor-bg: rgb(80 128 220 / 14%);
+  --md-ai-anchor-line: #5080dc;
+  --md-on-accent: #ffffff;
   --md-selection: color-mix(in srgb, var(--accent) 10%, transparent);
   --md-text-selection: color-mix(in srgb, var(--accent) 32%, transparent);
   --md-focus: var(--accent);
@@ -29,6 +32,13 @@
   --md-tip-shadow: 0 4px 6px rgb(0 0 0 / 10%);
   /* same paper shadow as the pdf app's --pdf-shadow-page */
   --md-page-shadow: 0 1px 4px rgb(0 0 0 / 18%);
+  /* toast pill is a dark surface in both themes */
+  --md-toast-bg: rgb(35 35 37 / 92%);
+  --md-toast-error-bg: rgb(196 49 75 / 95%);
+  --md-toast-ink: #ffffff;
+  --md-toast-ok: #34c759;
+  /* diagrams are document content: white paper behind them in both themes */
+  --md-diagram-bg: #ffffff;
 }
 
 [data-theme='dark'] {
@@ -41,6 +51,9 @@
   --md-code-inline-bg: rgb(129 139 152 / 22%);
   --md-table-header-bg: #282c32;
   --md-ai-changed: rgb(255 213 79 / 28%);
+  --md-ai-anchor-bg: rgb(96 148 240 / 22%);
+  --md-ai-anchor-line: #6a9aec;
+  --md-on-accent: #ffffff;
   --md-selection: color-mix(in srgb, var(--accent) 20%, transparent);
   --md-text-selection: color-mix(in srgb, var(--accent) 40%, transparent);
   --md-focus: var(--accent);
@@ -57,6 +70,11 @@
   --md-pop-shadow: 0 8px 24px rgb(0 0 0 / 50%);
   --md-tip-shadow: 0 4px 6px rgb(0 0 0 / 35%);
   --md-page-shadow: 0 1px 4px rgb(0 0 0 / 18%);
+  --md-toast-bg: rgb(35 35 37 / 92%);
+  --md-toast-error-bg: rgb(196 49 75 / 95%);
+  --md-toast-ink: #ffffff;
+  --md-toast-ok: #34c759;
+  --md-diagram-bg: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -70,6 +88,9 @@
     --md-code-inline-bg: rgb(129 139 152 / 22%);
     --md-table-header-bg: #282c32;
     --md-ai-changed: rgb(255 213 79 / 28%);
+    --md-ai-anchor-bg: rgb(96 148 240 / 22%);
+    --md-ai-anchor-line: #6a9aec;
+    --md-on-accent: #ffffff;
     --md-selection: color-mix(in srgb, var(--accent) 20%, transparent);
     --md-text-selection: color-mix(in srgb, var(--accent) 40%, transparent);
     --md-focus: var(--accent);
@@ -86,6 +107,11 @@
     --md-pop-shadow: 0 8px 24px rgb(0 0 0 / 50%);
     --md-tip-shadow: 0 4px 6px rgb(0 0 0 / 35%);
     --md-page-shadow: 0 1px 4px rgb(0 0 0 / 18%);
+    --md-toast-bg: rgb(35 35 37 / 92%);
+    --md-toast-error-bg: rgb(196 49 75 / 95%);
+    --md-toast-ink: #ffffff;
+    --md-toast-ok: #34c759;
+    --md-diagram-bg: #ffffff;
   }
 }
 
@@ -157,7 +183,7 @@ button {
 .editor-scroll {
   flex: 1;
   overflow-y: auto;
-  /* same canvas backdrop as the slides workspace; the doc page stays white */
+  /* same canvas backdrop as the slides workspace; .doc-page follows the theme surface */
   background: var(--canvas);
 }
 
@@ -1955,6 +1981,7 @@ html.genoffice-popover-open .ribbon-tabs {
 }
 
 .app-content {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -1972,6 +1999,60 @@ html.genoffice-popover-open .ribbon-tabs {
 .app-main .editor-scroll {
   flex: 1;
   min-width: 0;
+}
+
+/* ---- document outline sidebar (PDF bookmark parity) ---- */
+
+.md-outline {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 232px;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  padding: 8px 4px;
+  overflow-y: auto;
+}
+
+.md-outline-title {
+  padding: 2px 10px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.md-outline-empty {
+  padding: 2px 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.md-outline-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.md-outline-item {
+  display: block;
+  width: 100%;
+  border: none;
+  background: none;
+  text-align: left;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  padding-right: 8px;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-outline-item:hover {
+  background: var(--hover);
 }
 
 /* ---- transient AI-change highlight ---- */
@@ -2033,6 +2114,49 @@ html.genoffice-popover-open .ribbon-tabs {
 
 .md-codeblock-copy:hover {
   background: var(--hover);
+}
+
+/* ---- mermaid diagrams (```mermaid code blocks) ---- */
+
+/* the source stays in the DOM (ProseMirror needs its contentDOM) but is
+   visually collapsed while the caret is outside the block */
+.md-mermaid-collapsed pre {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  opacity: 0;
+}
+
+.md-mermaid-preview {
+  margin: 0.8em 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--md-diagram-bg);
+  text-align: center;
+  cursor: text;
+}
+
+.md-mermaid:not(.md-mermaid-collapsed) .md-mermaid-preview {
+  margin-top: 8px;
+}
+
+.md-mermaid-preview svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.md-mermaid-error {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--md-error-border);
+  border-radius: 6px;
+  background: var(--md-error-bg);
+  color: var(--md-error);
+  font-size: 12.5px;
+  white-space: pre-wrap;
 }
 
 /* ---- floating table menu ---- */
@@ -2269,4 +2393,487 @@ div.tiptap-mathematics-render {
 
 .md-math-delete:hover {
   background: var(--danger-bg);
+}
+
+/* ---- selection scope chip in the AI composer header ---- */
+
+.ai-scope-row {
+  margin-bottom: 7px;
+}
+
+.ai-scope-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: var(--radius-30);
+  background: var(--accent-soft);
+  font-size: 11.5px;
+  color: var(--accent-dark);
+  font-weight: 500;
+}
+
+.ai-scope-hint::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ai-scope-hint .ai-scope-label,
+.ai-scope-hint .ai-scope-clear {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ai-scope-hint .ai-scope-clear {
+  opacity: 0.65;
+}
+
+.ai-scope-hint .ai-scope-clear:hover {
+  opacity: 1;
+}
+
+.ai-scope-preview {
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-8);
+  background: var(--color-bg-page);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  max-height: 96px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* in-answer citation links: click selects and scrolls to the cited block */
+.ai-md .ai-md-nav {
+  color: var(--accent);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.ai-md .ai-md-nav:hover {
+  text-decoration-style: solid;
+}
+
+/* queued-edit anchor highlight inside the document (decoration, never document data) */
+.ai-queue-anchor {
+  background: var(--md-ai-anchor-bg);
+  border-bottom: 2px dashed var(--md-ai-anchor-line);
+  cursor: pointer;
+}
+
+/* state selection kept visible while the Ask-AI input owns the DOM selection;
+   translucent so it overlays run highlights (document canvas, not themed chrome) */
+.md-inactive-selection {
+  --md-inactive-selection-bg: rgb(0 0 0 / 18%);
+
+  background-color: var(--md-inactive-selection-bg);
+}
+
+/* ---- floating Ask-AI entry that follows the text selection ---- */
+
+.ai-ask-trigger {
+  position: fixed;
+  z-index: 59;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--color-ai-action);
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: var(--md-pop-shadow);
+  cursor: pointer;
+}
+
+.ai-ask-trigger:hover {
+  background: var(--hover);
+}
+
+/* anchored ask popover (shared look with docs/slides, markdown tokens) */
+.ai-ask-pop {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-12);
+  background: var(--surface);
+  box-shadow: var(--md-pop-shadow);
+}
+
+.ai-ask-pop-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ai-ask-pop-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.ai-ask-pop-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ai-ask-pop-title {
+  padding-right: 24px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ai-ask-pop-sub {
+  margin-top: -4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-ask-pop-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-8);
+  background: var(--color-bg-page);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.ai-ask-pop-input:focus {
+  border-color: var(--accent);
+}
+
+.ai-ask-pop-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-ask-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ai-ask-chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.ai-ask-pop-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-ask-cancel,
+.ai-ask-confirm {
+  padding: 5px 12px;
+  border-radius: var(--radius-6);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ai-ask-cancel {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.ai-ask-cancel:hover {
+  background: var(--hover);
+}
+
+.ai-ask-cancel:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ai-ask-confirm {
+  border: 1px solid transparent;
+  background: var(--color-ai-action);
+  color: var(--color-ai-action-text);
+}
+
+.ai-ask-confirm:hover:not(:disabled) {
+  background: var(--color-ai-action-hover);
+}
+
+.ai-ask-confirm:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---- queue card above the composer ---- */
+
+.ai-queue {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-12);
+  background: var(--color-bg-subtle);
+  overflow: hidden;
+}
+
+.ai-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.ai-queue-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ai-queue-count {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ai-queue-fold {
+  margin-left: auto;
+  display: inline-flex;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.ai-queue-fold.folded {
+  transform: rotate(-90deg);
+}
+
+.ai-queue-hint {
+  padding: 0 10px 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ai-queue-list {
+  margin: 0;
+  padding: 0 6px 4px;
+  list-style: none;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.ai-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 6px;
+  border-radius: var(--radius-6);
+  font-size: 12px;
+  color: var(--text);
+  cursor: default;
+}
+
+.ai-queue-row:hover {
+  background: var(--hover);
+}
+
+.ai-queue-row.stale {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.ai-queue-ord {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ai-queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-queue-target {
+  margin-right: 5px;
+  color: var(--text-dim);
+}
+
+.ai-queue-target::after {
+  content: ' ·';
+}
+
+.ai-queue-edit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-6);
+  background: var(--color-bg-page);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.ai-queue-row-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.ai-queue-row:hover .ai-queue-row-actions {
+  opacity: 1;
+}
+
+.ai-queue-row-btn {
+  display: inline-flex;
+  padding: 2px;
+  border: none;
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.ai-queue-row-btn:hover {
+  background: var(--active-bg);
+  color: var(--text);
+}
+
+.ai-queue-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 8px;
+}
+
+.ai-queue-confirm {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.ai-queue-discard {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ai-queue-discard:hover {
+  background: var(--hover);
+}
+
+.ai-queue-send {
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-6);
+  background: var(--accent);
+  color: var(--md-on-accent);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ai-queue-send:disabled,
+.ai-queue-discard:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ================= transient toast (action feedback) ================= */
+
+.app-toast {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translate(-50%, -8px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--md-toast-bg);
+  color: var(--md-toast-ink);
+  font-size: 13px;
+  box-shadow: var(--md-pop-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+  max-width: 60vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.app-toast.error {
+  background: var(--md-toast-error-bg);
+}
+
+.app-toast-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.app-toast.success .app-toast-icon {
+  color: var(--md-toast-ok);
 }

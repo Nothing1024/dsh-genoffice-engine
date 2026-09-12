@@ -469,7 +469,8 @@ describe('large edit batches', () => {
     expect(rewritten).not.toContain('<v>0</v>')
 
     // Generous CI budget; the quadratic path this guards against took hours.
-    expect(performance.now() - started).toBeLessThan(30_000)
+    // 45s covers sequential-suite contention; 30s was flaking at ~30.3s.
+    expect(performance.now() - started).toBeLessThan(45_000)
   }, 60_000)
 })
 

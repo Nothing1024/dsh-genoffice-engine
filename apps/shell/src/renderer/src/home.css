@@ -268,17 +268,18 @@ body.vib .home {
   color: #b3261e;
 }
 
-/* rescue panel while waiting for the browser sign-in (auto-open may have failed) */
+/* one-line rescue hint while waiting for the browser sign-in (auto-open may have failed) */
 .login-hint {
   position: absolute;
   left: -8px;
   bottom: calc(100% + 4px);
   width: calc(100% + 16px);
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 2px;
-  padding: 8px;
-  border-radius: 12px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
   background: var(--surface);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
   z-index: 30;
@@ -286,22 +287,44 @@ body.vib .home {
 
 .login-hint button {
   border: none;
-  border-radius: 10px;
   background: none;
   font: inherit;
-  font-size: 13px;
-  line-height: 20px;
-  padding: 6px 8px;
-  color: var(--text-primary);
   cursor: pointer;
-  text-align: left;
 }
 
 .login-hint button:hover {
   background: var(--bg-hover);
 }
 
-.login-hint .login-hint-open {
+.login-hint-open {
+  flex: 1;
+  min-width: 0;
+  border-radius: 7px;
+  font-size: 12.5px;
+  line-height: 17px;
+  padding: 4px 6px;
+  color: var(--accent);
+  text-align: start;
+}
+
+.login-hint-copy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  align-self: center;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border-radius: 7px;
+  color: var(--text-muted);
+}
+
+.login-hint-copy:hover {
+  color: var(--text-primary);
+}
+
+.login-hint-copy.copied {
   color: var(--accent);
 }
 
@@ -716,6 +739,13 @@ body.vib .home {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* unavailable recents (disconnected drive / moved / deleted) stay listed, dimmed */
+.recent-item.missing .recent-name,
+.recent-item.missing .recent-path,
+.recent-item.missing .recent-icon {
+  opacity: 0.55;
 }
 
 .star-btn {
@@ -1754,7 +1784,86 @@ body.vib .home {
     transform: rotate(360deg);
   }
 }
+
+/* Drag-over affordance while OS files hover anywhere over the window (the
+   open itself is handled by the preload drop bridge, not this overlay) */
+.home-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300; /* above modals (100): a drag in progress always leads */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-overlay);
+  /* never intercepts events — the drop must land on the page underneath */
+  pointer-events: none;
+}
+
+.home-drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 36px 56px;
+  background: var(--surface);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-16);
+  box-shadow: var(--shadow-modal-strong);
+  color: var(--accent);
+  animation: menu-in 0.12s ease;
+}
+
+.home-drop-card h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.home-drop-card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Motion accessibility: suppress all animation for users who opt out */
+/* PowerPoint-sized minimum window (720px): the fixed 232px sidebar and the
+   eight-column file grid no longer fit side by side */
+@media (max-width: 900px) {
+  .sidebar {
+    width: 200px;
+  }
+
+  .content {
+    padding: 28px 20px 40px;
+  }
+
+  .recents-toolbar {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+
+  .recents-heading {
+    white-space: nowrap;
+  }
+
+  .recent-columns,
+  .recent-item {
+    grid-template-columns: 18px 24px minmax(0, 1fr) 110px 24px 28px;
+  }
+
+  .recent-columns .col-path,
+  .recent-columns .col-size,
+  .recent-path,
+  .recent-size {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

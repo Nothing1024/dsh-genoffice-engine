@@ -6,6 +6,7 @@ import { saveEditSelection } from '../TextEditOverlay'
 import { armColorInput } from '../color-input'
 import { displayFontFamily } from '../konva-adapter'
 import { useSystemFontFamilies } from '../system-fonts'
+import { useFontCatalog } from '../font-manager'
 import {
   GensparkMark,
   IconAiBeautify,
@@ -14,6 +15,8 @@ import {
   IconAlignCenter,
   IconAlignJustify,
   IconAlignLeft,
+  IconDirLtr,
+  IconDirRtl,
   IconAlignRight,
   IconBullets,
   IconClearFormat,
@@ -72,6 +75,7 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
     canPaste,
     curBulletChar,
     curAlign,
+    curRtl,
     curFontFamily,
     curFontSizeMixed,
     curFontSizePt,
@@ -89,6 +93,7 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
     onAddSlideWithLayout,
     onAiPreset,
     onAlign,
+    onDirection,
     onArrange,
     onFlip,
     onCopy,
@@ -152,6 +157,23 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
   // (opening via the caret or focusing shows the full list)
   const [fontFilter, setFontFilter] = useState('')
   const { families: systemFontFamilies, load: loadSystemFonts } = useSystemFontFamilies()
+  const {
+    catalog: fontCatalog,
+    busy: fontBusy,
+    failed: fontFailed,
+    load: loadFontCatalog,
+    download: downloadFont,
+    installLocal: installLocalFonts,
+  } = useFontCatalog()
+  // Catalog families stay listed after install (store fonts are invisible to
+  // queryLocalFonts). Installed ones dedupe against the built-in/system sections;
+  // uninstalled ones always show here so built-in names like Noto Sans JP keep an
+  // in-picker download path (the built-in row is hidden below while uninstalled).
+  const catalogFonts = fontCatalog.filter(
+    (c) =>
+      !c.installed || (!FONT_FAMILIES.includes(c.family) && !systemFontFamilies.includes(c.family)),
+  )
+  const uninstalledCatalog = new Set(fontCatalog.filter((c) => !c.installed).map((c) => c.family))
   const matchesFontFilter = (f: string) =>
     !fontFilter.trim() || f.toLowerCase().includes(fontFilter.trim().toLowerCase())
   const EMU_PER_PX = 9525
@@ -492,6 +514,7 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
                     // popup (size/color/...) before opening the font list
                     closePanels(['font'])
                     loadSystemFonts()
+                    loadFontCatalog()
                     setFontOpen(true)
                   }}
                   onBlur={() => {
@@ -524,7 +547,10 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
                     if (editing || hasTextSelection) {
                       closeSiblingPanels(e, closePanels, 'font')
                       setFontFilter('')
-                      if (!fontOpen) loadSystemFonts()
+                      if (!fontOpen) {
+                        loadSystemFonts()
+                        loadFontCatalog()
+                      }
                       setFontOpen((v) => !v)
                     }
                   }}
@@ -544,6 +570,9 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
                     : FONT_FAMILIES
                   )
                     .filter(matchesFontFilter)
+                    // Built-in names that are uninstalled catalog fonts render in the
+                    // downloadable section instead (apply-only would set a missing font)
+                    .filter((f) => f === curFontFamily || !uninstalledCatalog.has(f))
                     .map((f) => (
                       <button
                         key={f}
@@ -577,6 +606,65 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
                       ))}
                     </>
                   )}
+                  {catalogFonts.some((c) => matchesFontFilter(c.family)) && (
+                    <>
+                      <div className="rb-menu-group-label">{t('ribbonFontsDownloadable')}</div>
+                      {catalogFonts
+                        .filter((c) => matchesFontFilter(c.family))
+                        .map((c) =>
+                          c.installed ? (
+                            <button
+                              key={c.family}
+                              className={c.family === curFontFamily ? 'on' : ''}
+                              style={{ fontFamily: fontPreviewFamily(c.family) }}
+                              onMouseDown={(e) => {
+                                e.preventDefault()
+                                onFontFamily(c.family)
+                                setFontOpen(false)
+                              }}
+                            >
+                              {c.family}
+                            </button>
+                          ) : (
+                            <button
+                              key={c.family}
+                              className="rb-font-download"
+                              disabled={fontBusy.has(c.family)}
+                              onMouseDown={(e) => {
+                                e.preventDefault()
+                                void downloadFont(c.family).then((ok) => {
+                                  if (ok) {
+                                    onFontFamily(c.family)
+                                    setFontOpen(false)
+                                  }
+                                })
+                              }}
+                            >
+                              {c.family}
+                              <span className="rb-font-download-tag">
+                                {fontBusy.has(c.family)
+                                  ? t('ribbonFontDownloading')
+                                  : fontFailed.has(c.family)
+                                    ? t('ribbonFontDownloadFailed')
+                                    : '⤓'}
+                              </span>
+                            </button>
+                          ),
+                        )}
+                    </>
+                  )}
+                  <button
+                    className="rb-font-install-local"
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      void installLocalFonts().then((families) => {
+                        if (families.length === 1) onFontFamily(families[0]!)
+                        if (families.length) setFontOpen(false)
+                      })
+                    }}
+                  >
+                    {t('ribbonFontInstallLocal')}
+                  </button>
                 </div>
               )}
             </div>
@@ -987,6 +1075,27 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
                       onMouseDown={(e) => {
                         e.preventDefault()
                         if (editing || hasSelection) onAlign(align)
+                      }}
+                    >
+                      {icon}
+                    </button>
+                  ))}
+                  <span className="rb-mini-sep" />
+                  {(
+                    [
+                      [false, <IconDirLtr key="ltr" size={20} />, t('ribbonDirLtr')],
+                      [true, <IconDirRtl key="rtl" size={20} />, t('ribbonDirRtl')],
+                    ] as const
+                  ).map(([rtl, icon, label]) => (
+                    <button
+                      key={rtl ? 'rtl' : 'ltr'}
+                      className={`rb-icon ${curRtl === rtl ? 'active' : ''}`}
+                      disabled={!editing && !hasSelection}
+                      data-tip={label}
+                      aria-label={label}
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        if (editing || hasSelection) onDirection(rtl)
                       }}
                     >
                       {icon}

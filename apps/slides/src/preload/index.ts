@@ -1,9 +1,13 @@
+import type { AiPanelPrefs } from '@genoffice/ui'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
+import type { RenderSlide } from '@genoffice/pptx-render'
 import type { ProjectApi } from '@genoffice/project-store'
+import { installDropOpenBridge } from '@genoffice/electron-utils/drop-open'
 import type {
   AddChartOp,
   AddElementOp,
+  AiRunFailure,
   ApplyEditScriptOp,
   ApplyTxnOp,
   AddImageBytesOp,
@@ -79,7 +83,9 @@ import type {
   MenuCommand,
   OpenResult,
   SlidesApi,
+  AutoSaveDefault,
   UiTheme,
+  SetEffectsPatch,
 } from '../shared/ipc'
 
 const api: SlidesApi = {
@@ -98,6 +104,18 @@ const api: SlidesApi = {
     ipcRenderer.on('app:theme-changed', listener)
     return () => ipcRenderer.removeListener('app:theme-changed', listener)
   },
+  getAutoSaveDefault: () => ipcRenderer.invoke('app:get-auto-save-default'),
+  onAutoSaveDefaultChanged: (handler) => {
+    const listener = (_event: IpcRendererEvent, value: AutoSaveDefault) => handler(value)
+    ipcRenderer.on('app:auto-save-default-changed', listener)
+    return () => ipcRenderer.removeListener('app:auto-save-default-changed', listener)
+  },
+  getAiPanelPrefs: () => ipcRenderer.invoke('app:get-ai-panel-prefs'),
+  onAiPanelPrefsChanged: (handler) => {
+    const listener = (_event: IpcRendererEvent, prefs: AiPanelPrefs) => handler(prefs)
+    ipcRenderer.on('app:ai-panel-prefs-changed', listener)
+    return () => ipcRenderer.removeListener('app:ai-panel-prefs-changed', listener)
+  },
   onChromePressed: (handler) => {
     const listener = () => handler()
     ipcRenderer.on('app:chrome-pressed', listener)
@@ -106,17 +124,34 @@ const api: SlidesApi = {
   setShowFullScreen: (on) => ipcRenderer.invoke('slides:show-fullscreen', on),
   privateFontFaces: () => ipcRenderer.invoke('slides:private-font-faces'),
   privateFontData: (id) => ipcRenderer.invoke('slides:private-font-data', id),
+  fontCatalog: () => ipcRenderer.invoke('slides:font-catalog'),
+  fontDownload: (family) => ipcRenderer.invoke('slides:font-download', family),
+  fontInstallLocal: () => ipcRenderer.invoke('slides:font-install-local'),
+  fontMissing: () => ipcRenderer.invoke('slides:font-missing'),
+  onFontsChanged: (handler) => {
+    const listener = () => handler()
+    ipcRenderer.on('slides:fonts-changed', listener)
+    return () => ipcRenderer.removeListener('slides:fonts-changed', listener)
+  },
   openPptx: (fitWidthPx) => ipcRenderer.invoke('slides:open', fitWidthPx),
   openPptxPath: (path, fitWidthPx) => ipcRenderer.invoke('slides:open-path', path, fitWidthPx),
   consumePendingOpen: (fitWidthPx) => ipcRenderer.invoke('slides:consume-pending-open', fitWidthPx),
   newBlank: (fitWidthPx) => ipcRenderer.invoke('slides:new-blank', fitWidthPx),
-  htmlToPptx: (
-    pagesHtml: string[],
+  landGeneratedPages: (
+    pageMarkers: string[],
     fitWidthPx: number,
     mode?: 'replace' | 'append' | 'replace_at' | 'insert_at',
     atIndex?: number,
     deckName?: string,
-  ) => ipcRenderer.invoke('slides:html-to-pptx', pagesHtml, fitWidthPx, mode, atIndex, deckName),
+  ) =>
+    ipcRenderer.invoke(
+      'slides:land-generated-pages',
+      pageMarkers,
+      fitWidthPx,
+      mode,
+      atIndex,
+      deckName,
+    ),
   cloudGenStatus: () => ipcRenderer.invoke('slides:cloud-gen-status'),
   cloudGeneratePage: (op: {
     brief: string
@@ -159,6 +194,18 @@ const api: SlidesApi = {
     sourceId: string
     anchor: 'top' | 'middle' | 'bottom'
   }) => ipcRenderer.invoke('slides:set-text-anchor', op),
+  setTextBodyProps: (op: {
+    slideIndex: number
+    sourceId: string
+    props: {
+      vert?: 'horz' | 'eaVert' | 'vert' | 'vert270' | 'wordArtVert'
+      autofit?: 'none' | 'shrink' | 'resize'
+      insets?: Partial<{ l: number; t: number; r: number; b: number }>
+      wrap?: boolean
+    }
+  }) => ipcRenderer.invoke('slides:set-text-body-props', op),
+  setEffects: (op: { slideIndex: number; sourceId: string; effects: SetEffectsPatch }) =>
+    ipcRenderer.invoke('slides:set-effects', op),
   clipboardExternal: () => ipcRenderer.invoke('slides:clipboard-external'),
   groupElements: (op: GroupElementsOp) => ipcRenderer.invoke('slides:group-elements', op),
   ungroupElement: (op: UngroupElementOp) => ipcRenderer.invoke('slides:ungroup-element', op),
@@ -186,6 +233,7 @@ const api: SlidesApi = {
   editStroke: (op: EditStrokeOp) => ipcRenderer.invoke('slides:edit-stroke', op),
   flipElements: (op: FlipElementOp) => ipcRenderer.invoke('slides:flip-elements', op),
   editBackground: (op: EditBackgroundOp) => ipcRenderer.invoke('slides:edit-background', op),
+  pickPictureFile: () => ipcRenderer.invoke('slides:pick-picture-file'),
   insertImage: (slideIndex: number, fitWidthPx: number) =>
     ipcRenderer.invoke('slides:insert-image', slideIndex, fitWidthPx),
   copySlide: (slideIndex: number, pngBase64?: string) =>
@@ -193,6 +241,7 @@ const api: SlidesApi = {
   pasteSlide: (op: PasteSlideOp) => ipcRenderer.invoke('slides:paste-slide', op),
   repasteSlide: (op: RepasteSlideOp) => ipcRenderer.invoke('slides:repaste-slide', op),
   hasSlideClipboard: () => ipcRenderer.invoke('slides:has-slide-clipboard'),
+  clipboardProbe: () => ipcRenderer.invoke('slides:clipboard-probe'),
   deleteSlide: (slideIndex: number) => ipcRenderer.invoke('slides:delete-slide', slideIndex),
   reorderElement: (op: ReorderElementOp) => ipcRenderer.invoke('slides:reorder-element', op),
   editTableCell: (op: EditTableCellOp) => ipcRenderer.invoke('slides:edit-table-cell', op),
@@ -283,6 +332,16 @@ const api: SlidesApi = {
     ipcRenderer.on('slides:history-changed', listener)
     return () => ipcRenderer.removeListener('slides:history-changed', listener)
   },
+  onDeckChanged: (
+    handler: (state: { slides: RenderSlide[]; size: { cx: number; cy: number } }) => void,
+  ) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      state: { slides: RenderSlide[]; size: { cx: number; cy: number } },
+    ) => handler(state)
+    ipcRenderer.on('slides:deck-changed', listener)
+    return () => ipcRenderer.removeListener('slides:deck-changed', listener)
+  },
   reportCloseSaveResult: (ok: boolean) => ipcRenderer.send('slides:close-save-result', ok === true),
   setAutoSavePref: (on: boolean) => ipcRenderer.send('slides:autosave-pref', on === true),
   isDirty: () => ipcRenderer.invoke('slides:is-dirty'),
@@ -308,6 +367,7 @@ const api: SlidesApi = {
   aiStreamCancel: (requestId: string) => ipcRenderer.invoke('ai:stream-cancel', requestId),
   aiGskStatus: (withEmail?: boolean) => ipcRenderer.invoke('ai:gsk-status', withEmail),
   aiGskLogin: () => ipcRenderer.invoke('ai:gsk-login'),
+  aiLogRunFailure: (entry: AiRunFailure) => ipcRenderer.invoke('ai:log-run-failure', entry),
   webSearch: (query: string, maxResults?: number) =>
     ipcRenderer.invoke('ai:web-search', query, maxResults),
   imageSearch: (query: string, maxResults?: number) =>
@@ -404,3 +464,6 @@ const projectApi: ProjectApi = {
   getTimeline: (args) => ipcRenderer.invoke('project:timeline', args),
 }
 contextBridge.exposeInMainWorld('projectApi', projectApi)
+
+// open documents dragged from the OS onto this tab as a new shell tab
+installDropOpenBridge()

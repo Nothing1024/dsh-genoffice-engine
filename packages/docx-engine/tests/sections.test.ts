@@ -545,3 +545,53 @@ describe('SaveOptions.numbering write-back', () => {
     expect(reparsed.numbering.get('9')!.levels[0].numFmt).toBe('bullet')
   })
 })
+
+describe('pgBorders details', () => {
+  it('parses display/offsetFrom/space/sz/color from the sides', async () => {
+    const { sectionSettingsFromXml } = await import('../src/section')
+    const s = sectionSettingsFromXml(
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+        '<w:pgMar w:top="1417" w:right="1134" w:bottom="1134" w:left="1417"/>' +
+        '<w:pgBorders w:display="firstPage" w:offsetFrom="page">' +
+        '<w:top w:val="single" w:sz="18" w:space="24" w:color="1F497D"/>' +
+        '<w:left w:val="single" w:sz="18" w:space="24" w:color="1F497D"/>' +
+        '<w:bottom w:val="single" w:sz="18" w:space="24" w:color="1F497D"/>' +
+        '<w:right w:val="single" w:sz="18" w:space="24" w:color="1F497D"/>' +
+        '</w:pgBorders></w:sectPr>',
+    )
+    expect(s.pageBorder).toBe(true)
+    const side = { val: 'single', widthPt: 2.25, spacePt: 24, color: '1F497D' }
+    expect(s.pageBorderProps).toEqual({
+      display: 'firstPage',
+      offsetFrom: 'page',
+      spacePt: 24,
+      widthPt: 2.25,
+      color: '1F497D',
+      sides: { top: side, left: side, bottom: side, right: side },
+    })
+  })
+
+  it('keeps per-side style/width for mixed compound borders', async () => {
+    const { sectionSettingsFromXml } = await import('../src/section')
+    const s = sectionSettingsFromXml(
+      '<w:sectPr><w:pgBorders w:offsetFrom="page">' +
+        '<w:top w:val="thinThickSmallGap" w:sz="24" w:space="24" w:color="auto"/>' +
+        '<w:bottom w:val="thickThinSmallGap" w:sz="24" w:space="24" w:color="auto"/>' +
+        '</w:pgBorders></w:sectPr>',
+    )
+    expect(s.pageBorderProps?.sides).toEqual({
+      top: { val: 'thinThickSmallGap', widthPt: 3, spacePt: 24 },
+      bottom: { val: 'thickThinSmallGap', widthPt: 3, spacePt: 24 },
+    })
+    expect(s.pageBorderProps?.color).toBeUndefined()
+  })
+
+  it('none-only sides leave pageBorderProps unset', async () => {
+    const { sectionSettingsFromXml } = await import('../src/section')
+    const s = sectionSettingsFromXml(
+      '<w:sectPr><w:pgBorders><w:top w:val="none"/></w:pgBorders></w:sectPr>',
+    )
+    expect(s.pageBorder).toBe(false)
+    expect(s.pageBorderProps).toBeUndefined()
+  })
+})

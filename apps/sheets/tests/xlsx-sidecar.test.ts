@@ -1,6 +1,8 @@
+import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
@@ -59,8 +61,110 @@ describe('XLSX Rust sidecar', () => {
         }),
       )
       expect(result.cells).toEqual([
-        { row: 0, column: 0, value: 'Old' },
-        { row: 0, column: 1, value: 10 },
+        { row: 0, column: 0, value: 'Old', styleIndex: 0 },
+        { row: 0, column: 1, value: 10, styleIndex: 0 },
+      ])
+    } finally {
+      if (sessionId) await client.close(sessionId)
+      client.stop()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a queued request whose out-of-band cancel arrived first', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'xlsx-cancel-test-'))
+    const path = join(directory, 'fixture.xlsx')
+    await writeFile(path, await buildCompatibilityFixture())
+    const child = spawn(sidecarBinaryPath(), [], { stdio: ['pipe', 'pipe', 'pipe'] })
+    try {
+      const lines = createInterface({ input: child.stdout })
+      const replies = new Map<string, { ok: boolean; error?: { code: string } }>()
+      const waiters = new Map<string, () => void>()
+      lines.on('line', (line) => {
+        const reply = JSON.parse(line) as { requestId: string; ok: boolean }
+        replies.set(reply.requestId, reply)
+        waiters.get(reply.requestId)?.()
+      })
+      const replyFor = (requestId: string) =>
+        new Promise<{ ok: boolean; error?: { code: string } }>((resolve) => {
+          const settled = replies.get(requestId)
+          if (settled) return resolve(settled)
+          waiters.set(requestId, () => resolve(replies.get(requestId)!))
+        })
+      const send = (request: Record<string, unknown>) =>
+        child.stdin.write(`${JSON.stringify({ version: 1, ...request })}\n`)
+
+      send({ requestId: 'c1', command: 'cancel', targetRequestId: 'victim' })
+      send({ requestId: 'victim', command: 'open', path })
+      send({ requestId: 'survivor', command: 'open', path })
+
+      expect((await replyFor('c1')).ok).toBe(true)
+      const victim = await replyFor('victim')
+      expect(victim.ok).toBe(false)
+      expect(victim.error?.code).toBe('cancelled')
+      expect((await replyFor('survivor')).ok).toBe(true)
+    } finally {
+      child.kill()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes CRLF line breaks in shared and inline strings to LF', async () => {
+    const zip = new JSZip()
+    zip.file(
+      'xl/workbook.xml',
+      `<?xml version="1.0"?>
+      <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets>
+      </workbook>`,
+    )
+    zip.file(
+      'xl/_rels/workbook.xml.rels',
+      `<?xml version="1.0"?>
+      <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1"
+          Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+          Target="worksheets/sheet1.xml"/>
+      </Relationships>`,
+    )
+    zip.file(
+      'xl/worksheets/sheet1.xml',
+      `<?xml version="1.0"?>
+      <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <dimension ref="A1:B1"/>
+        <sheetData><row r="1">
+          <c r="A1" t="s"><v>0</v></c>
+          <c r="B1" t="inlineStr"><is><t xml:space="preserve">Inline\r\nBreak</t></is></c>
+        </row></sheetData>
+      </worksheet>`,
+    )
+    zip.file(
+      'xl/sharedStrings.xml',
+      `<?xml version="1.0"?>
+      <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1">
+        <si><t xml:space="preserve">Shared\r\nBreak</t></si>
+      </sst>`,
+    )
+
+    const directory = await mkdtemp(join(tmpdir(), 'xlsx-sidecar-crlf-'))
+    const path = join(directory, 'crlf.xlsx')
+    await writeFile(path, await zip.generateAsync({ type: 'nodebuffer' }))
+    const client = new XlsxSidecarClient(sidecarBinaryPath())
+    let sessionId: string | null = null
+    try {
+      const opened = openResultSchema.parse(await client.open(path))
+      sessionId = opened.sessionId
+      const result = workbookRangeResultSchema.parse(
+        await client.readRange({
+          sessionId,
+          sheetId: 'sheet-1',
+          range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 1 },
+        }),
+      )
+      expect(result.cells).toEqual([
+        { row: 0, column: 0, value: 'Shared\nBreak', styleIndex: 0 },
+        { row: 0, column: 1, value: 'Inline\nBreak', styleIndex: 0 },
       ])
     } finally {
       if (sessionId) await client.close(sessionId)
@@ -376,6 +480,7 @@ describe('XLSX Rust sidecar', () => {
           headerRowCount: 1,
           showRowStripes: true,
           showColumnStripes: false,
+          filterActive: true,
           name: 'Table1',
           columns: ['Item', 'B', 'C', 'D'],
           styleName: 'TableStyleMedium2',
@@ -464,6 +569,7 @@ describe('XLSX Rust sidecar', () => {
         formulas: ['6'],
         dxfIndex: 0,
         priority: 1,
+        stopIfTrue: true,
         ranges: [{ startRow: 1, startColumn: 0, endRow: 2, endColumn: 0 }],
       })
       expect(result.conditionalRules[1]).toMatchObject({
@@ -644,7 +750,7 @@ async function buildStructureFixture(): Promise<Buffer> {
       <autoFilter ref="A1:D4"/>
       <mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells>
       <conditionalFormatting sqref="A2:A3">
-        <cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>6</formula></cfRule>
+        <cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan" stopIfTrue="1"><formula>6</formula></cfRule>
         <cfRule type="dataBar" priority="2">
           <dataBar showValue="0"><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar>
           <extLst><ext uri="{B025F937-C7B1-47D3-B67F-A62EFF666E3E}"
@@ -694,6 +800,9 @@ async function buildStructureFixture(): Promise<Buffer> {
     `<?xml version="1.0"?>
     <table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
       id="1" name="Table1" displayName="Table1" ref="A1:D4" headerRowCount="1">
+      <autoFilter ref="A1:D4">
+        <filterColumn colId="0"><filters><filter val="x"/></filters></filterColumn>
+      </autoFilter>
       <tableColumns count="4">
         <tableColumn id="1" name="Item"/><tableColumn id="2" name="B"/>
         <tableColumn id="3" name="C"/><tableColumn id="4" name="D"/>
@@ -824,3 +933,21 @@ async function buildVisualFixture(): Promise<Buffer> {
   )
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
 }
+
+// On Windows an unrunnable sidecar binary (corrupt exe, AV-blocked —
+// CreateProcess errors outside Node's delayed-error set) makes spawn() throw
+// synchronously ("spawn UNKNOWN"). An empty binary path reproduces the same
+// synchronous-throw class cross-platform without needing a broken exe.
+describe('XlsxSidecarClient spawn failure', () => {
+  it('start() prewarm swallows synchronous spawn failures instead of crashing the caller', () => {
+    const client = new XlsxSidecarClient('')
+    expect(() => client.start()).not.toThrow()
+  })
+
+  it('requests reject with the binary path when the sidecar cannot spawn', async () => {
+    const client = new XlsxSidecarClient('')
+    await expect(client.open(join(tmpdir(), 'missing.xlsx'))).rejects.toThrow(
+      /XLSX sidecar failed to start/,
+    )
+  })
+})

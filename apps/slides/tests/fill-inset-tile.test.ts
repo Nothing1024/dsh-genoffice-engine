@@ -79,6 +79,68 @@ describe('fillToKonva stretch fillRect insets (tdf153466)', () => {
   })
 })
 
+describe('a:lin scaled gradients stretch the angle with the box aspect (prod_048 measured)', () => {
+  it('45° scaled on a wide box turns near-vertical: direction ∝ (h·cosθ, w·sinθ)', () => {
+    const r = fillToKonva(
+      {
+        kind: 'gradient',
+        angleDeg: 45,
+        scaled: true,
+        stops: [
+          { pos: 0, color: '#FF0000' },
+          { pos: 1, color: '#00B050' },
+        ],
+      } as any,
+      1000,
+      100,
+    )
+    const s = r.fillLinearGradientStartPoint!
+    const e = r.fillLinearGradientEndPoint!
+    const [dx, dy] = [e.x - s.x, e.y - s.y]
+    // (h, w)/|.| = (100, 1000) normalized -> dy/dx = 10
+    expect(dy / dx).toBeCloseTo(10, 5)
+    expect(dx).toBeGreaterThan(0)
+  })
+
+  it('unscaled 45° keeps the true diagonal direction', () => {
+    const r = fillToKonva(
+      {
+        kind: 'gradient',
+        angleDeg: 45,
+        stops: [
+          { pos: 0, color: '#FF0000' },
+          { pos: 1, color: '#00B050' },
+        ],
+      } as any,
+      1000,
+      100,
+    )
+    const s = r.fillLinearGradientStartPoint!
+    const e = r.fillLinearGradientEndPoint!
+    expect((e.y - s.y) / (e.x - s.x)).toBeCloseTo(1, 5)
+  })
+
+  it('axis-aligned angles are unchanged by scaling', () => {
+    const r = fillToKonva(
+      {
+        kind: 'gradient',
+        angleDeg: 90,
+        scaled: true,
+        stops: [
+          { pos: 0, color: '#FF0000' },
+          { pos: 1, color: '#00B050' },
+        ],
+      } as any,
+      1000,
+      100,
+    )
+    const s = r.fillLinearGradientStartPoint!
+    const e = r.fillLinearGradientEndPoint!
+    expect(e.x - s.x).toBeCloseTo(0, 5)
+    expect(e.y - s.y).toBeCloseTo(100, 5)
+  })
+})
+
 describe('gradient ramps interpolate in linear sRGB (tdf105739)', () => {
   it('subdivides a two-stop ramp with linear-light midpoints', () => {
     const r = fillToKonva(
@@ -104,7 +166,7 @@ describe('gradient ramps interpolate in linear sRGB (tdf105739)', () => {
     expect(Math.abs(b0 - 55)).toBeLessThanOrEqual(2)
   })
 
-  it('alpha fades interpolate premultiplied: a transparent stop contributes no color', () => {
+  it('alpha fades interpolate straight: color ramps toward the transparent stop hue', () => {
     const r = fillToKonva(
       {
         kind: 'gradient',
@@ -118,9 +180,37 @@ describe('gradient ramps interpolate in linear sRGB (tdf105739)', () => {
       100,
     )
     const stops = r.fillLinearGradientColorStops!
-    // Straight interpolation would wash the midpoint toward white; PowerPoint keeps the
-    // opaque stop's hue through the fade and only ramps the alpha.
+    // PowerPoint-measured (controlled probe over black + white backdrops, both stop
+    // orders): the midpoint color is the linear-sRGB straight mix toward white,
+    // NOT the premultiplied navy — alpha ramps linearly.
     const mid = stops[stops.indexOf(0.5) + 1] as string
+    const [r0, g0, b0, a0] = mid.match(/[\d.]+/g)!.map(Number)
+    expect(Math.abs(r0 - 189)).toBeLessThanOrEqual(2)
+    expect(Math.abs(g0 - 190)).toBeLessThanOrEqual(2)
+    expect(Math.abs(b0 - 194)).toBeLessThanOrEqual(2)
+    expect(a0).toBeCloseTo(0.5, 2)
+  })
+
+  it('transparent stop color is masked when two visible stops remain (fade stays navy)', () => {
+    const r = fillToKonva(
+      {
+        kind: 'gradient',
+        angleDeg: 0,
+        stops: [
+          { pos: 0, color: '#FFFFFF00' },
+          { pos: 0.5, color: '#29354D' },
+          { pos: 1, color: '#29354D' },
+        ],
+      } as any,
+      100,
+      100,
+    )
+    const stops = r.fillLinearGradientColorStops!
+    // PowerPoint drops fully-transparent stop colors from the color ramp when ≥2 visible
+    // stops remain: the whole fade keeps the navy hue and only alpha ramps (probe-measured).
+    const first = stops[1] as string
+    expect(first).toBe('rgba(41,53,77,0)')
+    const mid = stops[stops.indexOf(0.25) + 1] as string
     const [r0, g0, b0, a0] = mid.match(/[\d.]+/g)!.map(Number)
     expect(Math.abs(r0 - 41)).toBeLessThanOrEqual(1)
     expect(Math.abs(g0 - 53)).toBeLessThanOrEqual(1)

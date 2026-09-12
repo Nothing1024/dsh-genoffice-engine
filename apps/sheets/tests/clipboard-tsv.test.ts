@@ -14,9 +14,17 @@ describe('clipboard TSV serialization', () => {
   })
 
   it('quotes fields with embedded newlines and normalizes \\r to \\n', () => {
-    expect(clipboardField({ v: 'greater \r\rthan' })).toBe('"greater \nthan"')
+    expect(clipboardField({ v: 'greater \r\rthan' })).toBe('"greater \n\nthan"')
+    expect(clipboardField({ v: 'a\r\rb' })).toBe('"a\n\nb"')
+    expect(clipboardField({ v: 'a\r\nb' })).toBe('"a\nb"')
     expect(clipboardField({ v: 'a\tb' })).toBe('"a\tb"')
     expect(clipboardField({ v: 'say "hi"' })).toBe('"say ""hi"""')
+    expect(clipboardField({ v: 'plain' })).toBe('plain')
+  })
+
+  it('keeps significant trailing newlines (quoted) instead of stripping them', () => {
+    expect(clipboardField({ v: 'a\n' })).toBe('"a\n"')
+    expect(clipboardField({ v: 'a\r\n' })).toBe('"a\n"')
     expect(clipboardField({ v: 'plain' })).toBe('plain')
   })
 

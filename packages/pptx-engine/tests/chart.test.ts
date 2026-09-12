@@ -108,6 +108,22 @@ describe('parseChartXml', () => {
     expect(m.series[0]!.pointColors?.[2]).toBe('#0000AA')
   })
 
+  it('parses outline-only pie points: c:dPt noFill + per-point a:ln', () => {
+    const PIE = `<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
+<c:pieChart><c:varyColors val="1"/><c:ser><c:idx val="0"/>
+  <c:dPt><c:idx val="0"/><c:spPr><a:noFill/><a:ln w="19050"><a:solidFill><a:srgbClr val="AA0000"/></a:solidFill></a:ln></c:spPr></c:dPt>
+  <c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:srgbClr val="0000AA"/></a:solidFill><a:ln><a:noFill/></a:ln></c:spPr></c:dPt>
+  <c:val><c:numRef><c:f>y</c:f><c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt><c:pt idx="2"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val>
+</c:ser></c:pieChart></c:plotArea></c:chart></c:chartSpace>`
+    const s = parseChartXml(PIE)!.series[0]!
+    expect(s.pointNoFill).toEqual([true])
+    expect(s.pointLines?.[0]).toEqual({ color: '#AA0000', widthPt: 1.5 })
+    expect(s.pointColors?.[1]).toBe('#0000AA')
+    expect(s.pointLines?.[1]).toEqual({ color: null })
+    expect(s.pointNoFill?.[1]).toBeUndefined()
+    expect(s.pointLines?.[2]).toBeUndefined()
+  })
+
   it('parses pie explosion: series-level c:explosion and per-point c:dPt overrides', () => {
     const PIE = `<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
 <c:pie3DChart><c:ser><c:idx val="0"/>
@@ -777,5 +793,144 @@ describe('axis units / gridline defaults / title overlay', () => {
     expect(m.valAxis?.gridColorAuto).toBe(true)
     expect(m.valAxis?.minorGridAuto).toBe(true)
     expect(m.catAxis?.gridColorAuto).toBe(true)
+  })
+})
+
+describe('dual plot groups and cache-less series', () => {
+  const ser = (idx: number, name: string, vals: string, axIds = '') =>
+    `<c:ser><c:idx val="${idx}"/><c:order val="${idx}"/>` +
+    `<c:tx><c:strRef><c:f>S!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>${name}</c:v></c:pt></c:strCache></c:strRef></c:tx>` +
+    `<c:val>${vals}</c:val></c:ser>${axIds}`
+  const cached =
+    '<c:numRef><c:f>S!$B$2:$B$3</c:f><c:numCache><c:ptCount val="2"/>' +
+    '<c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef>'
+  const uncached = '<c:numRef><c:f>ext!$C$2:$C$3</c:f></c:numRef>'
+
+  it('two c:lineChart nodes (secondary-axis group) both contribute series', () => {
+    const xml =
+      `<?xml version="1.0"?><c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:layout/>` +
+      `<c:lineChart>${ser(0, 'P', cached)}<c:axId val="1"/><c:axId val="2"/></c:lineChart>` +
+      `<c:lineChart>${ser(1, 'S', cached)}<c:axId val="1"/><c:axId val="3"/></c:lineChart>` +
+      `<c:catAx><c:axId val="1"/></c:catAx>` +
+      `<c:valAx><c:axId val="2"/><c:axPos val="l"/><c:delete val="0"/></c:valAx>` +
+      `<c:valAx><c:axId val="3"/><c:axPos val="r"/><c:delete val="0"/></c:valAx>` +
+      `</c:plotArea></c:chart></c:chartSpace>`
+    const m = parseChartXml(xml)!
+    expect(m).not.toBeNull()
+    expect(m.series.length).toBe(2)
+    expect(m.series.map((s) => s.name)).toEqual(['P', 'S'])
+    expect(m.series[1]!.secondaryAxis).toBe(true)
+  })
+
+  it('a series whose val has a numRef but no cache is dropped (PowerPoint plots and lists nothing)', () => {
+    const xml =
+      `<?xml version="1.0"?><c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:layout/>` +
+      `<c:lineChart>${ser(0, 'Flow', uncached)}${ser(1, 'Temp', cached)}</c:lineChart>` +
+      `</c:plotArea></c:chart></c:chartSpace>`
+    const m = parseChartXml(xml)!
+    expect(m.series.length).toBe(1)
+    expect(m.series[0]!.name).toBe('Temp')
+  })
+
+  it('an all-gaps cached series keeps its slot (ptCount sized, no points)', () => {
+    const gaps =
+      '<c:numRef><c:f>S!$B$2:$B$3</c:f><c:numCache><c:ptCount val="2"/></c:numCache></c:numRef>'
+    const xml =
+      `<?xml version="1.0"?><c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:layout/>` +
+      `<c:lineChart>${ser(0, 'Gaps', gaps)}</c:lineChart>` +
+      `</c:plotArea></c:chart></c:chartSpace>`
+    const m = parseChartXml(xml)!
+    expect(m.series.length).toBe(1)
+    expect(m.series[0]!.values).toEqual([null, null])
+  })
+})
+
+describe('category tick skips', () => {
+  it('parses explicit c:tickLblSkip / c:tickMarkSkip on the category axis', () => {
+    const xml =
+      `<?xml version="1.0"?><c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:layout/>` +
+      `<c:lineChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>S!$B$2</c:f><c:numCache><c:ptCount val="2"/>` +
+      `<c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>` +
+      `<c:axId val="1"/><c:axId val="2"/></c:lineChart>` +
+      `<c:catAx><c:axId val="1"/><c:tickLblSkip val="192"/><c:tickMarkSkip val="192"/></c:catAx>` +
+      `<c:valAx><c:axId val="2"/><c:axPos val="l"/><c:delete val="0"/></c:valAx>` +
+      `</c:plotArea></c:chart></c:chartSpace>`
+    const m = parseChartXml(xml)!
+    expect(m.catAxis?.tickLblSkip).toBe(192)
+    expect(m.catAxis?.tickMarkSkip).toBe(192)
+  })
+})
+
+describe('buildChartSpaceXml colorScheme / holeSizePct (genpptx parity)', () => {
+  const BASE2 = {
+    kind: 'bar' as const,
+    categories: ['A', 'B'],
+    series: [
+      { name: 'S1', values: [1, 2] },
+      { name: 'S2', values: [3, 4] },
+    ],
+    offset: { x: 0, y: 0, cx: 100, cy: 100 },
+  }
+
+  it('per-series spPr lands at the schema position (after c:tx, before c:cat) and round-trips', () => {
+    const xml = buildChartSpaceXml({ ...BASE2, colorScheme: ['#C00000', '#00B050'] })
+    expect(xml).toMatch(
+      /<c:ser><c:idx val="0"\/><c:order val="0"\/><c:tx>.*?<\/c:tx><c:spPr><a:solidFill><a:srgbClr val="C00000"\/><\/a:solidFill><\/c:spPr><c:cat>/s,
+    )
+    const m = parseChartXml(xml)!
+    expect(m.series.map((s) => s.color)).toEqual(['#C00000', '#00B050'])
+  })
+
+  it('colors cycle over the series when the scheme is shorter', () => {
+    const xml = buildChartSpaceXml({ ...BASE2, colorScheme: ['#112233'] })
+    const m = parseChartXml(xml)!
+    expect(m.series.map((s) => s.color)).toEqual(['#112233', '#112233'])
+  })
+
+  it('combo chart: the line series gets a stroke color, not a fill', () => {
+    const xml = buildChartSpaceXml({
+      ...BASE2,
+      kind: 'comboBarLine',
+      colorScheme: ['#C00000', '#0070C0'],
+    })
+    expect(xml).toMatch(
+      /<c:lineChart>.*?<c:spPr><a:ln w="28575"><a:solidFill><a:srgbClr val="0070C0"\/><\/a:solidFill><\/a:ln><\/c:spPr>/s,
+    )
+  })
+
+  it('doughnut holeSizePct is written and round-trips (clamped to 1..90)', () => {
+    const opts = { ...BASE2, kind: 'doughnut' as const }
+    expect(buildChartSpaceXml({ ...opts, holeSizePct: 72 })).toContain('<c:holeSize val="72"/>')
+    expect(buildChartSpaceXml(opts)).toContain('<c:holeSize val="50"/>')
+    expect(buildChartSpaceXml({ ...opts, holeSizePct: 400 })).toContain('<c:holeSize val="90"/>')
+    const m = parseChartXml(buildChartSpaceXml({ ...opts, holeSizePct: 72 }))!
+    expect(m.holePct).toBe(72)
+  })
+})
+
+describe('colorScheme on line-family kinds (Bugbot: fill-only spPr keeps theme line colors)', () => {
+  it('plain line chart series get stroke colors, not fills', () => {
+    const xml = buildChartSpaceXml({
+      kind: 'line',
+      categories: ['A', 'B'],
+      series: [{ name: 'S1', values: [1, 2] }],
+      offset: { x: 0, y: 0, cx: 100, cy: 100 },
+      colorScheme: ['#FF00FF'],
+    })
+    expect(xml).toContain('<c:spPr><a:ln w="28575"><a:solidFill><a:srgbClr val="FF00FF"/>')
+    expect(xml).not.toMatch(/<c:spPr><a:solidFill>/)
+  })
+
+  it('scatter and radar are line-family too', () => {
+    for (const kind of ['scatter', 'radar'] as const) {
+      const xml = buildChartSpaceXml({
+        kind,
+        categories: ['1', '2'],
+        series: [{ name: 'S', values: [3, 4] }],
+        offset: { x: 0, y: 0, cx: 100, cy: 100 },
+        colorScheme: ['#123456'],
+      })
+      expect(xml, kind).toContain('<a:ln w="28575"><a:solidFill><a:srgbClr val="123456"/>')
+    }
   })
 })

@@ -50,6 +50,8 @@ export type RenderFill =
       kind: 'gradient'
       stops: Array<{ pos: number; color: string }>
       angleDeg: number
+      /** <a:lin scaled="1">: angle stretches with the box aspect (45° runs corner-to-corner) */
+      scaled?: boolean
       radial?: boolean
       /** Actual <a:path path> kind (circle/rect/shape); rendering approximates all as radial */
       path?: 'circle' | 'rect' | 'shape'
@@ -98,7 +100,7 @@ export interface RenderStroke {
   /** Compound line type (<a:ln cmpd>; drawn single on canvas, kept for editing round-trip) */
   compound?: 'sng' | 'dbl' | 'thickThin' | 'thinThick' | 'tri'
   /** Gradient line (<a:ln><a:gradFill>); color then holds the first stop as a fallback */
-  gradient?: { stops: Array<{ pos: number; color: string }>; angleDeg: number }
+  gradient?: { stops: Array<{ pos: number; color: string }>; angleDeg: number; scaled?: boolean }
 }
 
 /** Outer shadow converted to px. */
@@ -108,11 +110,35 @@ export interface RenderGlow {
   blurPx: number
 }
 
+/** Reflection: flipped fading copy drawn below the node. */
+export interface RenderReflection {
+  blurPx: number
+  /** Opacity at the touching edge (0..1) */
+  startAlpha: number
+  /** Fade extent as a fraction of the node height (0..1) */
+  endPos: number
+  distPx: number
+}
+
 export interface RenderShadow {
   color: string
   blurPx: number
   offsetX: number
   offsetY: number
+  /** Source distance (px) and direction (deg) — offsetX/offsetY lose the direction
+   * when the distance is 0 (perspective presets), so editors read these instead */
+  distPx?: number
+  dirDeg?: number
+  /** Inner shadow (cast inside the shape edges) — the renderer draws an inset overlay instead of canvas shadow props */
+  inner?: boolean
+  /** Perspective silhouette scale (1 = 100%; scaleY may be negative = flipped upward) */
+  scaleX?: number
+  scaleY?: number
+  /** Perspective silhouette skew (degrees) */
+  skewXDeg?: number
+  skewYDeg?: number
+  /** Silhouette anchor edge/corner ('b', 'bl', 'br', ...) */
+  algn?: string
 }
 
 /** A laid-out text glyph block (one contiguous same-format span within a line). */
@@ -144,12 +170,14 @@ export interface GlyphRun {
   logicalOrder?: number
   /** Letter spacing (px, appended after each char, may be negative; maps to <a:rPr spc>, fed to canvas letterSpacing by the renderer) */
   letterSpacingPx?: number
+  /** Kern pairs disabled (fontSize below the rPr kern threshold): the draw layer must not kern either */
+  kerningOff?: boolean
   /** Text outline (<a:rPr><a:ln>, commonly used by WordArt) */
   outline?: { color: string; widthPx: number }
   /** Run outer shadow (px), drawn via canvas shadow props */
   shadow?: { color: string; blurPx: number; offsetX: number; offsetY: number }
   /** WordArt gradient text fill (resolved stops; angleDeg 0 = left→right, 90 = top→bottom) */
-  gradient?: { stops: Array<{ pos: number; color: string }>; angleDeg: number }
+  gradient?: { stops: Array<{ pos: number; color: string }>; angleDeg: number; scaled?: boolean }
   /** Run glow (zero-offset canvas shadow) */
   glow?: { color: string; blurPx: number }
   /** Run reflection: the renderer draws a faded mirrored copy below the baseline */
@@ -158,8 +186,10 @@ export interface GlyphRun {
   justifyExtraPx?: number
   /** Super/subscript baseline shift (px, positive = up; <a:rPr baseline>), already baked into baselineY */
   baselineShiftPx?: number
-  /** Latin word in vertical text: drawn rotated 90° clockwise (x/baselineY is the rotation anchor) */
+  /** Drawn rotated 90° clockwise (x/baselineY is the rotation anchor): Latin words in eaVert columns, or every glyph of a vert block */
   rotate90?: boolean
+  /** Drawn rotated 90° counterclockwise (vert270 blocks; x/baselineY is the rotation anchor) */
+  rotate270?: boolean
   /** Bullet glyph (non-body content injected by layout; text editors should skip it) */
   isBullet?: boolean
   /** RTL direction-level run (Arabic/Hebrew): the renderer must set canvas direction=rtl so punctuation/neutral chars land on the far side */
@@ -185,10 +215,14 @@ export interface TextLine {
   paraStart?: boolean
   /** Trailing whitespace swallowed when wrapping (the editor re-adds a space when joining lines; hard breaks/CJK wrapping don't set it) */
   trailingSpace?: boolean
+  /** The exact swallowed whitespace (spaces / U+3000 / tabs); absent on stored decks → a single space */
+  trailingText?: string
   /** The line ends with an <a:br/> soft break; value = the sentinel run's model index (the editor round-trips soft breaks with it) */
   softBreakAfter?: number
   /** Paragraph horizontal alignment (editor display) */
   align?: 'left' | 'center' | 'right' | 'justify'
+  /** Effective paragraph base direction is RTL (explicit a:pPr rtl or first-strong-character inference); ribbon/editor display state */
+  rtl?: boolean
   /** Paragraph indent level (editor Tab multi-level list display) */
   level?: number
   /** Paragraph left margin in px (editor display: body text starts here, not at the inset edge) */
@@ -216,10 +250,16 @@ export interface RenderTextLayout {
   inkBottom?: number
   /** bodyPr wrap (false = no wrapping, overflows the box; the editor also doesn't wrap) */
   wrap: boolean
-  /** bodyPr vert: vertical column layout (lines = columns, right→left); vert/vert270/wordArtVert degrade to eaVert */
+  /** bodyPr autofit mode (noAutofit/normAutofit/spAutoFit), surfaced for the format pane */
+  autofit?: 'none' | 'shrink' | 'resize'
+  /** bodyPr vert. eaVert/wordArtVert: vertical column layout (lines = columns, right→left;
+   * wordArtVert keeps Latin upright too). vert/vert270: whole-block rotation (lines keep
+   * pre-rotation tops/heights; every run carries rotate90/rotate270). */
   vert?: 'eaVert' | 'vert' | 'vert270' | 'wordArtVert'
   /** WordArt text extrusion: glyphs get offset copies in this color behind them (px) */
   extrusion?: { color: string; dx: number; dy: number }
+  /** WordArt envelope warp: the renderer bends glyphs along the preset's curves */
+  txWarp?: { prst: string; adj?: Record<string, number> }
 }
 
 /** Connector/line endpoint arrow description (for rendering, sizes converted to px). */
@@ -236,6 +276,8 @@ export interface ShapeRenderNode extends RenderNodeBase {
   type: 'shape' | 'text'
   /** Placeholder type (title/ctrTitle/subTitle/body/…); empty placeholders draw hint text on the canvas */
   placeholder?: string
+  /** Insert > Text Box rather than Insert > Shape: the edit overlay must not center a fresh body */
+  txBox?: boolean
   presetGeometry?: string
   /** Raw avLst adjust values (OOXML units) for the edit layer's adjust handles */
   adjust?: Record<string, number>
@@ -260,9 +302,12 @@ export interface ShapeRenderNode extends RenderNodeBase {
   fill: RenderFill
   /** <a:fillOverlay>: second fill drawn over the base with multiply blending */
   fillOverlay?: RenderFill
+  /** Soft-edge feather radius (px) */
+  softEdgePx?: number
   stroke?: RenderStroke
   shadow?: RenderShadow
   glow?: RenderGlow
+  reflection?: RenderReflection
   /** scene3d+sp3d extrusion: pre-projected shaded faces (painter order) replacing the flat geometry */
   extrusion?: { faces: ExtrusionFaceRender[]; wireframe?: boolean }
   text?: RenderTextLayout
@@ -294,6 +339,7 @@ export interface PictureRenderNode extends RenderNodeBase {
   stroke?: RenderStroke
   shadow?: RenderShadow
   glow?: RenderGlow
+  reflection?: RenderReflection
   /** Source element cNvPr name (the edit layer identifies its own elements, e.g. freehand ink) */
   name?: string
   /** Source element cNvPr descr payload (freehand ink vector points etc.) */
@@ -447,7 +493,7 @@ export interface ChartRenderNode extends RenderNodeBase {
   /** Legend swatches */
   swatches: Array<{ x: number; y: number; w: number; h: number; color: string }>
   /** Freeform filled paths (SVG data), painter's order — pseudo-3D pie rims / bar extrusion faces */
-  paths?: Array<{ d: string; fill: string; stroke?: string; dy?: number }>
+  paths?: Array<{ d: string; fill: string; stroke?: string; strokeWidthPx?: number; dy?: number }>
   /** Pie/doughnut wedges (angles: 12 o'clock = -90°, clockwise, Konva Arc semantics) */
   wedges?: Array<{
     cx: number
@@ -457,6 +503,11 @@ export interface ChartRenderNode extends RenderNodeBase {
     startDeg: number
     sweepDeg: number
     color: string
+    /** Outline-only wedge (c:dPt noFill); color then only feeds the legend swatch */
+    noFill?: boolean
+    /** Per-point outline; undefined = default hairline white separator */
+    stroke?: string
+    strokeWidthPx?: number
   }>
 }
 

@@ -5,16 +5,27 @@
  * (image generation, media analysis, style templates).
  */
 import { app, ipcMain, nativeImage, net, shell } from 'electron'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import {
   AiCreditsError,
   AiTimeoutError,
   isAiNetworkError,
+  isAiOverloadedError,
   defaultAiSettings,
   activeProvider,
-  cloudToolsEnabled,
+  maxOutputTokensOf,
   resolveAiSettings,
+  setAiUserAgent,
   setRescueFetch,
   streamForProvider,
   type AiSettings,
@@ -23,20 +34,22 @@ import {
   type GenSparkAccountStatus,
   type LegacyAiSettings,
 } from '@genoffice/ai-provider'
+import { shutdownCodexAppServers } from '@genoffice/ai-provider/codex-app-server'
 import { fetchRemoteImage } from '@genoffice/electron-utils'
 import {
-  webSearch,
-  imageSearch,
+  webSearchTool,
+  imageSearchTool,
   ensureGenofficeLogin,
   gskApiKey,
-  gskGenerateImage,
-  gskAnalyzeMedia,
+  generateImageTool,
+  analyzeMediaTool,
   gskLoginInfo,
   hasGskAuth,
 } from '@genoffice/ai-search'
 import { addPicture, editPictureSrcRect, replacePictureBytes } from '@genoffice/pptx-engine'
 import { matchesElementRef } from '@genoffice/pptx-engine/identity'
 import { coverCropFractions } from '../shared/cover-crop'
+import type { AiRunFailure } from '../shared/ipc'
 import { EMU_PER_PX_96 } from '@genoffice/pptx-render'
 import { tm } from './i18n-main'
 import { pushHistory, rebuildSlide, scheduleHistoryNotify, sessions } from './session-state'
@@ -44,11 +57,6 @@ import { pushHistory, rebuildSlide, scheduleHistoryNotify, sessions } from './se
 // ---- AI settings + streaming proxy (the main process does the networking to avoid renderer CORS; implementation shared via @genoffice/ai-provider) ----
 
 const AI_SETTINGS_PATH = () => join(app.getPath('userData'), 'ai-settings.json')
-
-/** live read: the shell settings pane writes the file; every tool call re-checks */
-function gskCloudToolsOn(): boolean {
-  return cloudToolsEnabled(readJson<Partial<AiSettings>>(AI_SETTINGS_PATH(), {}))
-}
 
 function readJson<T>(path: string, fallback: T): T {
   try {
@@ -66,9 +74,38 @@ function writeJson(path: string, value: unknown): void {
 
 const activeAiStreams = new Map<string, AbortController>()
 
+// ---- Post-mortem log for runs that produced no usable reply ----
+
+const AI_RUN_FAILURES_PATH = () => join(app.getPath('userData'), 'ai-run-failures.jsonl')
+/** Enough of a repetition blowup to recognize the pattern, without storing megabytes */
+const RUN_FAILURE_TEXT_MAX = 20_000
+/** Rotated (one generation kept) rather than grown without bound */
+const RUN_FAILURES_MAX_BYTES = 2_000_000
+
+function appendRunFailure(entry: AiRunFailure): void {
+  const path = AI_RUN_FAILURES_PATH()
+  try {
+    if (existsSync(path) && statSync(path).size > RUN_FAILURES_MAX_BYTES) {
+      renameSync(path, `${path}.1`)
+    }
+    const record = {
+      ts: new Date().toISOString(),
+      ...entry,
+      instruction: entry.instruction.slice(0, RUN_FAILURE_TEXT_MAX),
+      streamed: entry.streamed.slice(0, RUN_FAILURE_TEXT_MAX),
+      streamedChars: entry.streamed.length,
+    }
+    appendFileSync(path, JSON.stringify(record) + '\n', 'utf-8')
+  } catch {
+    /* Diagnostics must never break a run */
+  }
+}
+
 export function registerAiIpc(): void {
+  app.once('before-quit', shutdownCodexAppServers)
   // Node fetch (undici) direct connections get reset under VPN/tun setups; retry over Chromium's stack
   setRescueFetch((url, init) => net.fetch(url, init))
+  setAiUserAgent(`GenOffice/${app.getVersion()}`)
 
   ipcMain.handle('ai:get-settings', (): AiSettings => {
     const stored = readJson<Partial<AiSettings> & LegacyAiSettings>(AI_SETTINGS_PATH(), {})
@@ -97,10 +134,14 @@ export function registerAiIpc(): void {
     writeJson(AI_SETTINGS_PATH(), settings)
   })
 
+  ipcMain.handle('ai:log-run-failure', (_event, entry: AiRunFailure) => {
+    appendRunFailure(entry)
+  })
+
   ipcMain.handle('ai:stream', async (event, request: AiStreamRequest) => {
     const { requestId, settings, system, messages } = request
     const tools = request.tools ?? []
-    const maxTokens = request.maxTokens ?? 8192
+    const maxTokens = request.maxTokens ?? maxOutputTokensOf(settings)
     const provider = settings.provider
     let config = settings.providers?.[provider]
     // The genspark key never enters the settings file; it is fetched from the gsk login state per request
@@ -110,7 +151,7 @@ export function registerAiIpc(): void {
     const send = (chunk: AiStreamChunk) => {
       if (!event.sender.isDestroyed()) event.sender.send('ai:stream-chunk', chunk)
     }
-    if (!config?.apiKey) {
+    if (!config || (provider !== 'codex' && !config.apiKey)) {
       send({
         requestId,
         type: 'error',
@@ -118,7 +159,7 @@ export function registerAiIpc(): void {
       })
       return
     }
-    if (!config.model) {
+    if (provider !== 'codex' && !config.model) {
       send({ requestId, type: 'error', error: tm('errNoModel') })
       return
     }
@@ -133,13 +174,23 @@ export function registerAiIpc(): void {
       send({ requestId, type: 'ping' })
     }
     try {
+      let stopReason: string | undefined
       await streamForProvider(provider, config, system, messages, tools, maxTokens, {
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         signal: controller.signal,
         onDelta: (text) => send({ requestId, type: 'delta', text }),
+        onReasoningDelta: (text) => send({ requestId, type: 'reasoning', text }),
         onToolCall: (toolCall) => send({ requestId, type: 'tool-call', toolCall }),
         onActivity: ping,
+        onStopReason: (reason) => {
+          stopReason = reason
+        },
       })
-      send({ requestId, type: 'done' })
+      send(
+        stopReason === undefined
+          ? { requestId, type: 'done' }
+          : { requestId, type: 'done', stopReason },
+      )
     } catch (err) {
       if (controller.signal.aborted) {
         send({ requestId, type: 'done' })
@@ -156,7 +207,9 @@ export function registerAiIpc(): void {
               ? { errorCode: 'credits' as const }
               : isAiNetworkError(err)
                 ? { errorCode: 'network' as const }
-                : {}),
+                : isAiOverloadedError(err)
+                  ? { errorCode: 'overloaded' as const }
+                  : {}),
         })
       }
     } finally {
@@ -171,10 +224,10 @@ export function registerAiIpc(): void {
   // Search tools (content + images), Serper with DuckDuckGo fallback
   ipcMain.handle('ai:web-search', async (_event, query: string, maxResults?: number) => {
     try {
-      return await webSearch(
+      return await webSearchTool(
+        AI_SETTINGS_PATH(),
         String(query),
         typeof maxResults === 'number' ? maxResults : 6,
-        gskCloudToolsOn(),
       )
     } catch (err) {
       return { results: [], method: 'error', error: String(err) }
@@ -183,10 +236,10 @@ export function registerAiIpc(): void {
 
   ipcMain.handle('ai:image-search', async (_event, query: string, maxResults?: number) => {
     try {
-      return await imageSearch(
+      return await imageSearchTool(
+        AI_SETTINGS_PATH(),
         String(query),
         typeof maxResults === 'number' ? maxResults : 8,
-        gskCloudToolsOn(),
       )
     } catch (err) {
       return { images: [], method: 'error', error: String(err) }
@@ -213,14 +266,9 @@ export function registerSlidesOnlyAiIpc(): void {
         imageSize?: string
       },
     ) => {
-      if (!hasGskAuth()) return { error: tm('errGskCli') }
-      if (!gskCloudToolsOn())
-        return {
-          error:
-            'Genspark cloud tools are turned off in Settings (AI Model); enable them to use this tool',
-        }
-      try {
-        const r = await gskGenerateImage({
+      return generateImageTool(
+        AI_SETTINGS_PATH(),
+        {
           prompt: String(op.prompt),
           model: op.model ? String(op.model) : undefined,
           referenceImageUrls: Array.isArray(op.referenceImageUrls)
@@ -228,32 +276,23 @@ export function registerSlidesOnlyAiIpc(): void {
             : undefined,
           aspectRatio: op.aspectRatio ? String(op.aspectRatio) : undefined,
           imageSize: op.imageSize ? String(op.imageSize) : undefined,
-        })
-        return { url: r.url }
-      } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) }
-      }
+        },
+        { notLoggedInError: tm('errGskCli') },
+      )
     },
   )
 
   ipcMain.handle(
     'ai:analyze-media',
     async (_event, op: { mediaUrls: string[]; requirements: string }) => {
-      if (!hasGskAuth()) return { error: tm('errGskCli') }
-      if (!gskCloudToolsOn())
-        return {
-          error:
-            'Genspark cloud tools are turned off in Settings (AI Model); enable them to use this tool',
-        }
-      try {
-        const text = await gskAnalyzeMedia({
+      return analyzeMediaTool(
+        AI_SETTINGS_PATH(),
+        {
           mediaUrls: (op.mediaUrls ?? []).map(String),
           requirements: String(op.requirements ?? ''),
-        })
-        return { text }
-      } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) }
-      }
+        },
+        { notLoggedInError: tm('errGskCli') },
+      )
     },
   )
 

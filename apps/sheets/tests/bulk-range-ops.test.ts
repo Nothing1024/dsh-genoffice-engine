@@ -193,6 +193,11 @@ describe('replaceOccurrences (shared by expansion and the chunked executor)', ()
   it('keeps a literal $ in the replacement literal', () => {
     expect(replaceOccurrences('price: X', 'X', '$1.00', false)).toBe('price: $1.00')
   })
+
+  it('leaves text unchanged for an empty needle', () => {
+    expect(replaceOccurrences('abc', '', 'X', false)).toBe('abc')
+    expect(replaceOccurrences('abc', '', 'X', true)).toBe('abc')
+  })
 })
 
 describe('InMemoryWorkbookAdapter (demo mode)', () => {

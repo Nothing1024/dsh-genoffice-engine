@@ -131,9 +131,52 @@ function parseStopColor(c: string): [number, number, number, number] | null {
 
 const SUBDIVISIONS = 8
 
+/**
+ * PowerPoint's color ramp ignores the color of fully-transparent stops: their RGB is
+ * replaced by the visible-stop ramp sampled at their position (clamped at the ends), so
+ * white@0% → navy → navy fades stay navy. Only when fewer than two visible stops remain
+ * does the declared color survive and the fade washes toward it (navy → white@0% probes
+ * measured both behaviors over black and white backdrops).
+ */
+function maskTransparentStopColors(
+  sorted: Array<{ pos: number; color: string }>,
+): Array<{ pos: number; color: string }> {
+  const parsed = sorted.map((s) => parseStopColor(s.color))
+  const visible: Array<{ pos: number; rgb: [number, number, number] }> = []
+  for (let i = 0; i < sorted.length; i++) {
+    const p = parsed[i]
+    if (p && p[3] > 0) visible.push({ pos: sorted[i]!.pos, rgb: [p[0], p[1], p[2]] })
+  }
+  if (visible.length < 2 || visible.length === sorted.length) return sorted
+  const sample = (pos: number): [number, number, number] => {
+    if (pos <= visible[0]!.pos) return visible[0]!.rgb
+    const last = visible[visible.length - 1]!
+    if (pos >= last.pos) return last.rgb
+    let j = 1
+    while (visible[j]!.pos < pos) j++
+    const lo = visible[j - 1]!
+    const hi = visible[j]!
+    const t = hi.pos === lo.pos ? 0 : (pos - lo.pos) / (hi.pos - lo.pos)
+    const ch = (i: number) =>
+      Math.round(
+        linToSrgb(
+          srgbToLin(lo.rgb[i]! / 255) +
+            (srgbToLin(hi.rgb[i]! / 255) - srgbToLin(lo.rgb[i]! / 255)) * t,
+        ) * 255,
+      )
+    return [ch(0), ch(1), ch(2)]
+  }
+  return sorted.map((s, i) => {
+    const p = parsed[i]
+    if (!p || p[3] > 0) return s
+    const [r, g, b] = sample(s.pos)
+    return { pos: s.pos, color: `rgba(${r},${g},${b},0)` }
+  })
+}
+
 /** Konva colorStops array with linear-sRGB interpolated midpoints between each stop pair. */
 function linearRampStops(stops: Array<{ pos: number; color: string }>): Array<number | string> {
-  const sorted = [...stops].sort((a, b) => a.pos - b.pos)
+  const sorted = maskTransparentStopColors([...stops].sort((a, b) => a.pos - b.pos))
   const out: Array<number | string> = []
   for (let i = 0; i < sorted.length; i++) {
     const cur = sorted[i]!
@@ -145,18 +188,15 @@ function linearRampStops(stops: Array<{ pos: number; color: string }>): Array<nu
     if (!a || !b) continue
     const [lr, lg, lb] = [srgbToLin(a[0] / 255), srgbToLin(a[1] / 255), srgbToLin(a[2] / 255)]
     const [mr, mg, mb] = [srgbToLin(b[0] / 255), srgbToLin(b[1] / 255), srgbToLin(b[2] / 255)]
-    // Alpha-varying pairs interpolate premultiplied (PowerPoint semantics): a transparent
-    // stop contributes no color, so white@0% → navy stays navy through the fade instead of
-    // washing toward white (straight interpolation) — measured on prod alpha-fade overlays.
-    const [aA, aB] = [a[3], b[3]]
+    // Alpha-varying pairs interpolate straight (non-premultiplied): PowerPoint ramps the
+    // color channels toward the transparent stop's hue and the alpha linearly — measured
+    // on a controlled probe (navy→white@0 both stop orders, over black and white backdrops).
     for (let k = 1; k < SUBDIVISIONS; k++) {
       const t = k / SUBDIVISIONS
-      const al = aA + (aB - aA) * t
-      const mix = (x: number, y: number) =>
-        al > 0 ? (x * aA + (y * aB - x * aA) * t) / al : x + (y - x) * t
-      const r = Math.round(linToSrgb(mix(lr, mr)) * 255)
-      const g = Math.round(linToSrgb(mix(lg, mg)) * 255)
-      const bl = Math.round(linToSrgb(mix(lb, mb)) * 255)
+      const al = a[3] + (b[3] - a[3]) * t
+      const r = Math.round(linToSrgb(lr + (mr - lr) * t) * 255)
+      const g = Math.round(linToSrgb(lg + (mg - lg) * t) * 255)
+      const bl = Math.round(linToSrgb(lb + (mb - lb) * t) * 255)
       out.push(
         cur.pos + (next.pos - cur.pos) * t,
         al >= 1 ? `rgb(${r},${g},${bl})` : `rgba(${r},${g},${bl},${al.toFixed(3)})`,
@@ -164,6 +204,28 @@ function linearRampStops(stops: Array<{ pos: number; color: string }>): Array<nu
     }
   }
   return out
+}
+
+/**
+ * Unit direction of an a:lin gradient. scaled="1" declares the angle in a square
+ * fill box that stretches with the shape, so the rendered direction is the angle
+ * unsquashed by the aspect ratio: tanθ' = tanθ × (w/h). Measured on prod_048's
+ * 45°-scaled full-width band: the ramp midline runs top-left → bottom-right through
+ * the near-vertical direction (h·cosθ, w·sinθ), pixel-matching PowerPoint's export;
+ * the untransformed 45° (and the diagonal direction (w·cosθ, h·sinθ)) both miss it.
+ */
+function linearGradientDirection(
+  angleDeg: number,
+  scaled: boolean | undefined,
+  w: number,
+  h: number,
+): [number, number] {
+  const rad = (angleDeg * Math.PI) / 180
+  if (!scaled) return [Math.cos(rad), Math.sin(rad)]
+  const vx = h * Math.cos(rad)
+  const vy = w * Math.sin(rad)
+  const n = Math.hypot(vx, vy) || 1
+  return [vx / n, vy / n]
 }
 
 /** Cached shape-sized pattern canvases for rect/shape path gradients. */
@@ -296,9 +358,7 @@ export function fillToKonva(
           fillRadialGradientColorStops: linearRampStops(fill.stops),
         }
       }
-      const rad = (fill.angleDeg * Math.PI) / 180
-      const dx = Math.cos(rad)
-      const dy = Math.sin(rad)
+      const [dx, dy] = linearGradientDirection(fill.angleDeg, fill.scaled, w, h)
       // Gradient vector length = the box's projection onto the gradient direction,
       // so the ramp spans exactly the shape (PowerPoint semantics for a:lin)
       const cx = w / 2
@@ -394,9 +454,7 @@ export function strokeToKonva(
   const grad = stroke.gradient
   let gradProps = {}
   if (grad && size) {
-    const rad = (grad.angleDeg * Math.PI) / 180
-    const dx = Math.cos(rad)
-    const dy = Math.sin(rad)
+    const [dx, dy] = linearGradientDirection(grad.angleDeg, grad.scaled, size.w, size.h)
     const cx = size.w / 2
     const cy = size.h / 2
     const len = Math.abs(dx) * size.w + Math.abs(dy) * size.h
@@ -416,9 +474,15 @@ export function strokeToKonva(
   }
 }
 
-/** Outer shadow → Konva shadow attributes; without a shadow, glow is approximated with a zero-offset shadow. */
+/** Inner/perspective shadows can't be expressed as canvas shadow props — they draw as an offscreen overlay instead. */
+export function isOverlayShadow(s: RenderShadow | undefined): boolean {
+  return !!s && (!!s.inner || s.scaleX != null || s.scaleY != null || !!s.skewXDeg || !!s.skewYDeg)
+}
+
+/** Outer shadow → Konva shadow attributes; without a shadow, glow is approximated with a zero-offset shadow.
+ * Overlay shadows (inner/perspective) are excluded here — see shapeShadowOverlay. */
 export function shadowToKonva(
-  shadow: RenderShadow | undefined,
+  rawShadow: RenderShadow | undefined,
   glow?: RenderGlow,
 ): {
   shadowColor?: string
@@ -427,6 +491,7 @@ export function shadowToKonva(
   shadowOffsetY?: number
   shadowEnabled?: boolean
 } {
+  const shadow = isOverlayShadow(rawShadow) ? undefined : rawShadow
   if (!shadow && glow) {
     return {
       shadowColor: normalizeColor(glow.color),
@@ -444,6 +509,132 @@ export function shadowToKonva(
     shadowOffsetY: shadow.offsetY,
     shadowEnabled: true,
   }
+}
+
+// ── Overlay shadows (inner / perspective) ───────────────────────────────
+// Canvas shadow props can only cast a blurred copy outward; inner shadows and the
+// skewed/scaled perspective silhouettes are rendered into an offscreen canvas that
+// NodeBody stacks as a Konva.Image around the geometry.
+
+/** Shape geometry in local box px, expressible as a Path2D. */
+export type ShadowGeom =
+  | { kind: 'rect'; w: number; h: number; cornerRadius?: number }
+  | { kind: 'ellipse'; w: number; h: number }
+  | { kind: 'polygon'; points: number[] }
+  | { kind: 'path'; data: string }
+
+function geomPath2D(g: ShadowGeom): Path2D {
+  const p = new Path2D()
+  if (g.kind === 'rect') {
+    if (g.cornerRadius) p.roundRect(0, 0, g.w, g.h, g.cornerRadius)
+    else p.rect(0, 0, g.w, g.h)
+  } else if (g.kind === 'ellipse') {
+    p.ellipse(g.w / 2, g.h / 2, g.w / 2, g.h / 2, 0, 0, Math.PI * 2)
+  } else if (g.kind === 'polygon') {
+    for (let i = 0; i + 1 < g.points.length; i += 2) {
+      if (i === 0) p.moveTo(g.points[0]!, g.points[1]!)
+      else p.lineTo(g.points[i]!, g.points[i + 1]!)
+    }
+    p.closePath()
+  } else {
+    return new Path2D(g.data)
+  }
+  return p
+}
+
+export interface ShadowOverlay {
+  canvas: HTMLCanvasElement
+  /** Placement relative to the shape box's top-left (local px) */
+  x: number
+  y: number
+  /** Local px covered by the canvas (draw size for the Konva.Image) */
+  w: number
+  h: number
+  /** True = paint under the geometry (perspective silhouette); false = over it (inner shadow) */
+  under: boolean
+}
+
+const shadowOverlayCache = new Map<string, ShadowOverlay | null>()
+
+/** algn anchor → local point of the shape box the perspective transform pivots on ('b' is the OOXML default). */
+function algnPoint(algn: string | undefined, w: number, h: number): [number, number] {
+  const a = algn ?? 'b'
+  const x = a.includes('l') ? 0 : a.includes('r') ? w : w / 2
+  const y = a.includes('t') ? 0 : a.includes('b') ? h : h / 2
+  return [x, y]
+}
+
+/**
+ * Build the overlay canvas for an inner or perspective shadow.
+ * Inner: clip to the geometry and fill its INVERSE (evenodd) offset by the shadow
+ * distance — only the cast shadow lands inside the clip, giving a true inset shadow.
+ * Perspective: the geometry silhouette filled with the shadow color, run through the
+ * outerShdw sx/sy/kx/ky transform around the algn anchor and gaussian-blurred.
+ * Returns null when the shadow needs no overlay or no 2D context exists (jsdom).
+ */
+export function shapeShadowOverlay(
+  shadow: RenderShadow | undefined,
+  geom: ShadowGeom,
+  boxW: number,
+  boxH: number,
+): ShadowOverlay | null {
+  if (!shadow || !isOverlayShadow(shadow) || boxW < 1 || boxH < 1) return null
+  const key = JSON.stringify([shadow, geom, Math.round(boxW * 4), Math.round(boxH * 4)])
+  const hit = shadowOverlayCache.get(key)
+  if (hit !== undefined) return hit
+  if (shadowOverlayCache.size > 200) shadowOverlayCache.clear()
+  const dpr = Math.min(globalThis.devicePixelRatio || 1, 2)
+  const build = (): ShadowOverlay | null => {
+    const path = geomPath2D(geom)
+    if (shadow.inner) {
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.ceil(boxW * dpr))
+      canvas.height = Math.max(1, Math.ceil(boxH * dpr))
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return null
+      ctx.scale(dpr, dpr)
+      ctx.clip(path)
+      // canvas shadow params live in device space (transforms don't apply to them)
+      ctx.shadowColor = normalizeColor(shadow.color)
+      ctx.shadowBlur = shadow.blurPx * dpr
+      ctx.shadowOffsetX = shadow.offsetX * dpr
+      ctx.shadowOffsetY = shadow.offsetY * dpr
+      const pad = shadow.blurPx + Math.abs(shadow.offsetX) + Math.abs(shadow.offsetY) + 4
+      const inv = new Path2D()
+      inv.rect(-pad, -pad, boxW + 2 * pad, boxH + 2 * pad)
+      inv.addPath(path)
+      ctx.fillStyle = '#000'
+      ctx.fill(inv, 'evenodd')
+      return { canvas, x: 0, y: 0, w: boxW, h: boxH, under: false }
+    }
+    // Perspective silhouette: generous padding for skew/flip/blur/offset overhang
+    const pad =
+      shadow.blurPx + Math.abs(shadow.offsetX) + Math.abs(shadow.offsetY) + Math.max(boxW, boxH)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.ceil((boxW + 2 * pad) * dpr))
+    canvas.height = Math.max(1, Math.ceil((boxH + 2 * pad) * dpr))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.scale(dpr, dpr)
+    if (shadow.blurPx) ctx.filter = `blur(${shadow.blurPx / 2}px)`
+    const [ax, ay] = algnPoint(shadow.algn, boxW, boxH)
+    ctx.translate(pad + shadow.offsetX + ax, pad + shadow.offsetY + ay)
+    ctx.transform(
+      shadow.scaleX ?? 1,
+      Math.tan(((shadow.skewYDeg ?? 0) * Math.PI) / 180),
+      Math.tan(((shadow.skewXDeg ?? 0) * Math.PI) / 180),
+      shadow.scaleY ?? 1,
+      0,
+      0,
+    )
+    ctx.translate(-ax, -ay)
+    ctx.fillStyle = normalizeColor(shadow.color)
+    ctx.fill(path)
+    return { canvas, x: -pad, y: -pad, w: boxW + 2 * pad, h: boxH + 2 * pad, under: true }
+  }
+  const built = build()
+  shadowOverlayCache.set(key, built)
+  return built
 }
 
 // softEdge feathering: source image + radius → offscreen canvas with edges fading to transparent (cached by url+radius)
@@ -845,6 +1036,52 @@ export function duotoneImage(
   return c
 }
 
+/** Solid-fill shape with <a:softEdge>: the (rounded) rect pre-rendered with feathered edges. */
+const featherShapeCache = new Map<string, HTMLCanvasElement>()
+export function featheredShapeCanvas(
+  color: string,
+  w: number,
+  h: number,
+  radPx: number,
+  cornerRadiusPx = 0,
+  stroke?: { color: string; widthPx: number },
+): { canvas: HTMLCanvasElement; pad: number } {
+  const cw = Math.max(1, Math.round(w))
+  const ch = Math.max(1, Math.round(h))
+  const rad = Math.max(1, Math.round(radPx))
+  // Canvas strokes are centered on the path: pad the canvas so the outer half survives
+  const pad = stroke ? Math.ceil(stroke.widthPx / 2) : 0
+  const key = `${color}|${cw}|${ch}|${rad}|${Math.round(cornerRadiusPx)}|${stroke ? `${stroke.color}/${stroke.widthPx}` : ''}`
+  let c = featherShapeCache.get(key)
+  if (!c) {
+    c = document.createElement('canvas')
+    c.width = cw + 2 * pad
+    c.height = ch + 2 * pad
+    const ctx = c.getContext('2d')!
+    ctx.beginPath()
+    if (cornerRadiusPx > 0) ctx.roundRect(pad, pad, cw, ch, cornerRadiusPx)
+    else ctx.rect(pad, pad, cw, ch)
+    ctx.fillStyle = normalizeColor(color)
+    ctx.fill()
+    // The outline feathers together with the fill (PowerPoint applies softEdge to the composite)
+    if (stroke) {
+      ctx.strokeStyle = normalizeColor(stroke.color)
+      ctx.lineWidth = stroke.widthPx
+      ctx.stroke()
+    }
+    // Same alpha ramp as featheredImage: mask edge at 0.5r inset, blur 0.67r. The ramp
+    // starts from the composite's outer edge (stroke included) — the full padded canvas —
+    // so the padded outline half is inside the mask interior, not under its falloff.
+    ctx.globalCompositeOperation = 'destination-in'
+    ctx.filter = `blur(${(rad * 2) / 3}px)`
+    ctx.fillStyle = '#000'
+    ctx.fillRect(rad * 0.5, rad * 0.5, c.width - rad, c.height - rad)
+    if (featherShapeCache.size > 100) featherShapeCache.clear()
+    featherShapeCache.set(key, c)
+  }
+  return { canvas: c, pad }
+}
+
 export function featheredImage(
   img: HTMLImageElement,
   cacheKey: string,
@@ -873,18 +1110,49 @@ export function featheredImage(
   return c
 }
 
-/** Picture srcRect crop ratios → Konva Image crop (source-image pixel coordinates). */
+/**
+ * Picture srcRect crop ratios → Konva Image crop (source-image pixel coordinates).
+ * Negative srcRect values are insets: the source rect extends past the image, so the
+ * image occupies only a sub-rect of the frame and the rest stays empty (PowerPoint
+ * leaves those bands blank; common in Google Slides exports).
+ */
 export function cropToKonva(
   pic: PictureRenderNode,
   img: HTMLImageElement | undefined,
-): { crop?: { x: number; y: number; width: number; height: number } } {
+): {
+  crop?: { x: number; y: number; width: number; height: number }
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+} {
   const sr = pic.srcRect
   if (!sr || !img || !img.width || !img.height) return {}
-  const x = Math.max(sr.l, 0) * img.width
-  const y = Math.max(sr.t, 0) * img.height
-  const w = Math.max(img.width * (1 - Math.max(sr.l, 0) - Math.max(sr.r, 0)), 1)
-  const h = Math.max(img.height * (1 - Math.max(sr.t, 0) - Math.max(sr.b, 0)), 1)
-  return { crop: { x, y, width: w, height: h } }
+  const x0 = Math.max(sr.l, 0)
+  const y0 = Math.max(sr.t, 0)
+  const x1 = 1 - Math.max(sr.r, 0)
+  const y1 = 1 - Math.max(sr.b, 0)
+  const crop = {
+    x: x0 * img.width,
+    y: y0 * img.height,
+    width: Math.max(img.width * (x1 - x0), 1),
+    height: Math.max(img.height * (y1 - y0), 1),
+  }
+  if (sr.l >= 0 && sr.t >= 0 && sr.r >= 0 && sr.b >= 0) return { crop }
+  // The frame maps source span [l, 1-r]×[t, 1-b] onto the full box; place the
+  // visible sub-rect of the image at its share of that span.
+  const spanX = 1 - sr.l - sr.r
+  const spanY = 1 - sr.t - sr.b
+  if (spanX <= 0 || spanY <= 0) return { crop }
+  const boxW = pic.box.w
+  const boxH = pic.box.h
+  return {
+    crop,
+    x: (boxW * (x0 - sr.l)) / spanX,
+    y: (boxH * (y0 - sr.t)) / spanY,
+    width: Math.max((boxW * (x1 - x0)) / spanX, 1),
+    height: Math.max((boxH * (y1 - y0)) / spanY, 1),
+  }
 }
 
 /** Preset geometry name → Konva shape type (Phase 3 supports the common ones, the rest approximated as rectangles). */
@@ -921,7 +1189,7 @@ export interface GlyphDraw {
   fillAfterStrokeEnabled?: boolean
   /** RTL run: feeds Konva Text's direction so neutral punctuation lands on the correct side */
   direction?: 'rtl'
-  /** Vertical latin word: rotated 90° clockwise (x/y is the rotation anchor) */
+  /** Rotated glyph (eaVert latin words / vert blocks: 90; vert270 blocks: -90; x/y is the rotation anchor) */
   rotation?: number
   /** Text highlight (<a:rPr><a:highlight>): background rect drawn behind the run, covering the line box */
   highlight?: { x: number; y: number; w: number; h: number; color: string }
@@ -937,15 +1205,26 @@ export interface GlyphDraw {
   fillLinearGradientColorStops?: Array<number | string>
   /** Run reflection: the renderer draws a faded mirrored copy below the text */
   reflection?: boolean
+  /** WordArt warp transforms (per-character; position is the char center when offsets are set) */
+  scaleX?: number
+  scaleY?: number
+  offsetX?: number
+  offsetY?: number
 }
 
 // Same-script fallback chains for Japanese/Korean/Traditional Chinese (win/mac family names back each other up); shared by FONT_STACK and the unknown-font fallback
-const JA_SANS = "'Yu Gothic', 'Hiragino Sans', Meiryo, 'Noto Sans JP', sans-serif"
-const JA_SERIF = "'Yu Mincho', 'Hiragino Mincho ProN', 'MS Mincho', 'Noto Serif JP', serif"
+// Hangul outside a Korean face falls to Malgun Gothic (PowerPoint's script default; the main
+// process registers the private face when such text is measured), never the system default
+const HANGUL_TAIL = "'Malgun Gothic', "
+const JA_SANS =
+  "'Yu Gothic', 'Hiragino Sans', Meiryo, 'Noto Sans JP', " + HANGUL_TAIL + 'sans-serif'
+const JA_SERIF =
+  "'Yu Mincho', 'Hiragino Mincho ProN', 'MS Mincho', 'Noto Serif JP', " + HANGUL_TAIL + 'serif'
 const KO_SANS = "'Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif"
 const KO_SERIF = "Batang, AppleMyungjo, 'Noto Serif KR', serif"
-const TC_SANS = "'Microsoft JhengHei', 'PingFang TC', 'Heiti TC', 'Noto Sans TC', sans-serif"
-const TC_SERIF = "PMingLiU, 'Songti TC', 'Noto Serif TC', serif"
+const TC_SANS =
+  "'Microsoft JhengHei', 'PingFang TC', 'Heiti TC', 'Noto Sans TC', " + HANGUL_TAIL + 'sans-serif'
+const TC_SERIF = "PMingLiU, 'Songti TC', 'Noto Serif TC', " + HANGUL_TAIL + 'serif'
 const SERIF_HINT_RE =
   /mincho|明朝|batang|바탕|myeongjo|명조|gungsuh|궁서|mingliu|細明|標楷|宋|song/i
 
@@ -955,10 +1234,11 @@ const SERIF_HINT_RE =
  * Metrics are handled by the main process FontMetricsProvider's alias table.
  */
 const FONT_STACK: Record<string, string> = {
-  'microsoft yahei': "'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif",
-  微软雅黑: "'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif",
-  'pingfang sc': "'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif",
-  苹方: "'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif",
+  'microsoft yahei':
+    "'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', " + HANGUL_TAIL + 'sans-serif',
+  微软雅黑: "'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', " + HANGUL_TAIL + 'sans-serif',
+  'pingfang sc': "'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', " + HANGUL_TAIL + 'sans-serif',
+  苹方: "'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', " + HANGUL_TAIL + 'sans-serif',
   宋体: "SimSun, 'Songti SC', serif",
   simsun: "SimSun, 'Songti SC', serif",
   黑体: "SimHei, 'Heiti SC', sans-serif",
@@ -1035,21 +1315,125 @@ export function displayFontFamily(name: string): string {
   if (script === 'ja') return `'${name}', ${SERIF_HINT_RE.test(name) ? JA_SERIF : JA_SANS}`
   if (script === 'ko') return `'${name}', ${SERIF_HINT_RE.test(name) ? KO_SERIF : KO_SANS}`
   if (script === 'tc') return `'${name}', ${SERIF_HINT_RE.test(name) ? TC_SERIF : TC_SANS}`
-  return `'${name}', 'PingFang SC', 'Microsoft YaHei', sans-serif`
+  // same tail as the gt-measure stack in shaped-metrics.ts
+  return `'${name}', 'PingFang SC', 'Microsoft YaHei', 'Yu Gothic', 'Malgun Gothic', sans-serif`
+}
+
+/**
+ * Baseline anchoring for painted text, measured per family/style at a fixed size
+ * (font metrics scale linearly). Konva paints with canvas2d textBaseline='middle'
+ * anchored 0.5em below the node top; the middle→alphabetic distance is a per-font
+ * quantity Chromium derives from the drawing font's metrics — measuring the same ink
+ * from both baselines yields it exactly.
+ *
+ * Whether to paint the alphabetic baseline exactly on the engine's baselineY splits
+ * by font resolution (both branches pixel-matched against PowerPoint on prod run3):
+ * - The requested family resolves to a real face (system font or a registered private
+ *   FontFace): exact anchoring matches PowerPoint — the fixed 0.8em legacy rule sat
+ *   several px low on JP faces (prod_020/024/072 Meiryo UI improved 3-5pp with exact).
+ * - The family falls back to a script default (localized names, missing fonts):
+ *   PowerPoint's own substitute rendering sits where the legacy 0.8em rule painted,
+ *   and exact anchoring via the fallback font's metrics lands ~2px high
+ *   (prod_050 bisected: the engine line model was calibrated through the 0.8em rule
+ *   for fallback-drawn text).
+ */
+const MEASURE_PX = 100
+let baselineCtx: CanvasRenderingContext2D | null | undefined
+const baselineAnchor = new Map<string, { ratio: number; resolved: boolean }>()
+// Private/embedded FontFaces register after the first React render, and a Konva batchDraw
+// repaints existing nodes without recomputing their glyph y props — anchors measured
+// against the fallback font would stick. Bump an epoch on 'loadingdone' so glyph-building
+// components re-render (recomputing anchors against the now-loaded faces).
+let fontsEpoch = 0
+const fontsEpochSubs = new Set<() => void>()
+if (typeof document !== 'undefined')
+  document.fonts?.addEventListener?.('loadingdone', () => {
+    baselineAnchor.clear()
+    fontsEpoch++
+    for (const cb of fontsEpochSubs) cb()
+  })
+
+export function subscribeFontsEpoch(cb: () => void): () => void {
+  fontsEpochSubs.add(cb)
+  return () => fontsEpochSubs.delete(cb)
+}
+export function getFontsEpoch(): number {
+  return fontsEpoch
+}
+
+const RESOLVE_PROBE = 'Ilmg19日本語'
+
+function measureBaselineAnchor(
+  familyList: string,
+  bold?: boolean,
+  italic?: boolean,
+): { ratio: number; resolved: boolean } {
+  const key = `${familyList}|${bold ? 'b' : ''}${italic ? 'i' : ''}`
+  const hit = baselineAnchor.get(key)
+  if (hit) return hit
+  if (baselineCtx === undefined)
+    baselineCtx =
+      typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null
+  if (!baselineCtx) return { ratio: 0.8, resolved: false } // no canvas (unit tests): legacy rule
+  const ctx = baselineCtx
+  const style = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}`
+  // Does the primary family resolve? Its advance must differ from a bare generic under
+  // at least one generic fallback (a real face can't metric-match both serif and monospace)
+  const primary = /^'([^']+)'/.exec(familyList)?.[1] ?? familyList.split(',')[0]!.trim()
+  const w = (font: string) => {
+    ctx.font = `${style}${MEASURE_PX}px ${font}`
+    return ctx.measureText(RESOLVE_PROBE).width
+  }
+  const resolved =
+    w(`'${primary}', monospace`) !== w('monospace') || w(`'${primary}', serif`) !== w('serif')
+  // Same ink measured from both baselines: the ascent difference IS the exact distance
+  // from the 'middle' anchor down to the alphabetic baseline for the drawing font
+  ctx.font = `${style}${MEASURE_PX}px ${familyList}`
+  ctx.textBaseline = 'alphabetic'
+  const a1 = ctx.measureText('Hg').actualBoundingBoxAscent
+  ctx.textBaseline = 'middle'
+  const a2 = ctx.measureText('Hg').actualBoundingBoxAscent
+  const ratio = a1 > 0 || a2 > 0 ? 0.5 + (a1 - a2) / MEASURE_PX : 0.8
+  const anchor = { ratio, resolved }
+  baselineAnchor.set(key, anchor)
+  return anchor
+}
+
+/** baselineY − node top for painted text (see measureBaselineAnchor for the split). */
+function konvaBaselineAscent(
+  familyList: string,
+  sizePx: number,
+  bold?: boolean,
+  italic?: boolean,
+): number {
+  const a = measureBaselineAnchor(familyList, bold, italic)
+  return (a.resolved ? a.ratio : 0.8) * sizePx
+}
+
+/** Painted-baseline − engine-baselineY delta (the edit overlay cancels it to match pixels). */
+export function konvaBaselineDrop(
+  familyList: string,
+  sizePx: number,
+  bold?: boolean,
+  italic?: boolean,
+): number {
+  const a = measureBaselineAnchor(familyList, bold, italic)
+  return a.resolved ? 0 : (a.ratio - 0.8) * sizePx
 }
 
 export function glyphToDraw(run: GlyphRun): GlyphDraw {
   const styleParts: string[] = []
-  if (run.bold && !NO_SYNTHETIC_BOLD.has(run.fontFamily.normalize('NFKC').toLowerCase()))
-    styleParts.push('bold')
+  const effectiveBold =
+    !!run.bold && !NO_SYNTHETIC_BOLD.has(run.fontFamily.normalize('NFKC').toLowerCase())
+  if (effectiveBold) styleParts.push('bold')
   if (run.italic) styleParts.push('italic')
+  const family = displayFontFamily(run.fontFamily)
   return {
     text: run.text,
     x: run.x,
-    // Konva Text positions by top; its browser-backed text baseline is closest to 0.8em.
-    y: run.baselineY - run.fontSizePx * 0.8,
+    y: run.baselineY - konvaBaselineAscent(family, run.fontSizePx, effectiveBold, run.italic),
     fontSize: run.fontSizePx,
-    fontFamily: displayFontFamily(run.fontFamily),
+    fontFamily: family,
     fill: normalizeColor(run.color),
     fontStyle: styleParts.join(' ') || 'normal',
     textDecoration: [run.underline ? 'underline' : '', run.strike ? 'line-through' : '']
@@ -1057,7 +1441,12 @@ export function glyphToDraw(run: GlyphRun): GlyphDraw {
       .join(' '),
     ...((run.letterSpacingPx ?? 0) + (run.justifyExtraPx ?? 0)
       ? { letterSpacing: (run.letterSpacingPx ?? 0) + (run.justifyExtraPx ?? 0) }
-      : {}),
+      : run.kerningOff && !run.rtl
+        ? // Kerning must stay off (fontSize below the rPr kern threshold): a negligible
+          // letterSpacing flips Konva into per-letter drawing, which never kerns —
+          // matching the unkerned measurement (canvas fillText would kern the string)
+          { letterSpacing: 1e-4 }
+        : {}),
     ...(run.outline
       ? {
           stroke: normalizeColor(run.outline.color),
@@ -1066,7 +1455,7 @@ export function glyphToDraw(run: GlyphRun): GlyphDraw {
         }
       : {}),
     ...(run.rtl ? { direction: 'rtl' as const } : {}),
-    ...(run.rotate90 ? { rotation: 90 } : {}),
+    ...(run.rotate90 ? { rotation: 90 } : run.rotate270 ? { rotation: -90 } : {}),
     ...(run.shadow
       ? {
           shadowColor: normalizeColor(run.shadow.color),
@@ -1088,9 +1477,12 @@ export function glyphToDraw(run: GlyphRun): GlyphDraw {
       ? (() => {
           // Gradient in Text-node-local coords (origin = glyph top-left); 90° = top→bottom
           // across the em box, 0° = left→right across the run width
-          const rad = (run.gradient.angleDeg * Math.PI) / 180
-          const gx = Math.cos(rad)
-          const gy = Math.sin(rad)
+          const [gx, gy] = linearGradientDirection(
+            run.gradient.angleDeg,
+            run.gradient.scaled,
+            run.widthPx,
+            run.fontSizePx,
+          )
           const cx = run.widthPx / 2
           const cy = run.fontSizePx * 0.5
           // Same projection as shape fills: ramp length = the box's projection onto the direction
@@ -1148,11 +1540,15 @@ export function normalizeColor(c: string): string {
     const a = parseInt(h.slice(6, 8), 16) / 255
     return `rgba(${r},${g},${b},${a.toFixed(3)})`
   }
-  return c.startsWith('#') ? c : `#${c}`
+  return c.startsWith('#') || c.startsWith('rgb') ? c : `#${c}`
 }
 
 export function isEditableText(node: RenderNode): node is ShapeRenderNode {
-  return (node.type === 'text' || node.type === 'shape') && !!(node as ShapeRenderNode).text
+  if (node.type !== 'text' && node.type !== 'shape') return false
+  // A shape with no text body yet is still editable — setText creates the body and the
+  // engine injects <p:txBody>. Connectors are the exception: CT_Connector has no
+  // txBody child, so a line can never hold text.
+  return !(node as ShapeRenderNode).line
 }
 
 /** Polyline smooth → Konva Line tension (0 = polyline, 0.4 ≈ PPT smooth curve). */

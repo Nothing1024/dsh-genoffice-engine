@@ -396,11 +396,15 @@ export interface Props {
   curBulletChar: string | null
   /** Current paragraph alignment of the selection ('left' when unset; null = mixed/no text, nothing highlighted) */
   curAlign: 'left' | 'center' | 'right' | 'justify' | null
+  /** Effective base direction of the selection's paragraphs (null = mixed/no text, nothing highlighted) */
+  curRtl: boolean | null
   /** Editing: change the selection's font / set size (pt) */
   onFontFamily: (family: string) => void
   onFontSize: (pt: number) => void
   /** Paragraph alignment: execCommand while editing, element-level op when elements are selected */
   onAlign: (align: 'left' | 'center' | 'right' | 'justify') => void
+  /** Paragraph base direction toggle (selection while editing, element-level otherwise) */
+  onDirection: (rtl: boolean) => void
   /** Strikethrough: element-level toggle when selected but not editing (editing goes through onFormat) */
   onStrike: () => void
   /** B/I/U element-level toggle (when selected but not editing) */
@@ -555,6 +559,10 @@ export interface Props {
   onPictureOpacity?: (opacity: number) => void
   /** Picture: enter cutout (background removal) mode */
   onPictureCutout?: () => void
+  /** Picture: pick a file and swap the image in place */
+  onPictureReplace?: () => void
+  /** Picture: quarter turn (±90°) around its centre */
+  onPictureRotate?: (deltaDeg: -90 | 90) => void
   /** Selected picture's current border (null = none) */
   contextPictureStroke?: { color: string; widthPt: number; dashPreset?: string } | null
   /** Picture border (null clears it) */
@@ -573,7 +581,7 @@ export interface Props {
   /** Execute a table style operation */
   onEditTableStyle?: (op: Omit<EditTableStyleOp, 'slideIndex' | 'sourceId'>) => void
   /** Selected table's header-row/banded-rows current state (toggle display) */
-  tableStyleFlags?: { firstRow: boolean; bandRow: boolean } | null
+  tableStyleFlags?: { firstRow: boolean; bandRow: boolean; rtl?: boolean } | null
   /** Cell being edited in the selected table; shading applies to just this cell */
   tableActiveCell?: { row: number; col: number } | null
   /** Execute a chart edit operation */
@@ -608,6 +616,7 @@ export interface RibbonTabCtx extends Pick<
   | 'canPaste'
   | 'curBulletChar'
   | 'curAlign'
+  | 'curRtl'
   | 'curFontFamily'
   | 'curFontSizeMixed'
   | 'curFontSizePt'
@@ -626,6 +635,7 @@ export interface RibbonTabCtx extends Pick<
   | 'onAddSlideWithLayout'
   | 'onAiPreset'
   | 'onAlign'
+  | 'onDirection'
   | 'onArrange'
   | 'onFlip'
   | 'onCopy'

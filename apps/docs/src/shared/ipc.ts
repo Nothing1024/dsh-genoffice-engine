@@ -44,6 +44,7 @@ import type {
   GenSparkAccountStatus,
 } from '@genoffice/ai-provider'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
+import type { AiPanelPrefs } from '@genoffice/ui'
 
 export type { FaceVerticalMetrics }
 
@@ -58,7 +59,7 @@ export type {
   AiStreamRequest,
   GenSparkAccountStatus,
 } from '@genoffice/ai-provider'
-export { AI_PROVIDERS } from '@genoffice/ai-provider'
+export { AI_PROVIDERS } from '@genoffice/ai-provider/browser'
 
 // ---- agent protocol: canonical types live in @genoffice/agent-core ----
 
@@ -151,10 +152,42 @@ export type MenuCommand =
   | 'find'
   | 'print'
   | 'export-pdf'
+  | 'export-html'
   | 'word-count'
   | 'ai-proofread'
+  | 'shortcuts'
 
 export type UiTheme = 'light' | 'dark' | 'system'
+
+/** shell-wide AutoSave default; updatedAt is 0 until the user has ever set it */
+export interface AutoSaveDefault {
+  on: boolean
+  updatedAt: number
+}
+
+/** target file type of the AI create_document tool */
+export type CreateDocumentType = 'docx' | 'pdf' | 'md' | 'html'
+
+export interface CreateDocumentRequest {
+  type: CreateDocumentType
+  /** file name stem (sanitized main-side) */
+  title: string
+  /** docx/pdf: restricted HTML; md: Markdown source; html: a complete HTML document */
+  content: string
+}
+
+export interface CreateDocumentResult {
+  ok: boolean
+  /** the created file, when it is written directly (pdf/md); docx opens as a new tab that saves itself */
+  path?: string
+  error?: string
+}
+
+/** AI-authored content queued for a docs tab spawned by create_document */
+export interface AiDocContent {
+  title: string
+  html: string
+}
 
 export interface DesktopApi {
   /** current UI language (persisted by the shell in app-settings.json) */
@@ -169,6 +202,12 @@ export interface DesktopApi {
   getTheme(): Promise<UiTheme>
   /** theme switched from the shell home page */
   onThemeChanged(handler: (theme: UiTheme) => void): () => void
+  /** shell-wide AutoSave default (see useAutoSavePref) */
+  getAutoSaveDefault(): Promise<AutoSaveDefault>
+  onAutoSaveDefaultChanged(handler: (value: AutoSaveDefault) => void): () => void
+  /** AI panel text size + chat-input spellcheck (Settings → General in the shell) */
+  getAiPanelPrefs(): Promise<AiPanelPrefs>
+  onAiPanelPrefsChanged(handler: (prefs: AiPanelPrefs) => void): () => void
   /** press on the shell chrome (tab strip is a sibling WebContentsView whose
    *  clicks produce no DOM event here) — dismiss open popovers */
   onChromePressed(handler: () => void): () => void
@@ -187,6 +226,10 @@ export interface DesktopApi {
   consumePendingOpenDocx(): Promise<OpenDocxResult>
   /** returns true when this tab was created via "New Document" and should start blank */
   consumeNewBlankDoc(): Promise<boolean>
+  /** AI-authored content queued for this tab by create_document; one-shot, null when none */
+  consumeAiDocContent(): Promise<AiDocContent | null>
+  /** AI create_document: build a new standalone file and open it in a new tab */
+  createDocument(request: CreateDocumentRequest): Promise<CreateDocumentResult>
   /** receive documents opened from Finder/Explorer while the app is running */
   onOpenDocx(handler: (result: Exclude<OpenDocxResult, null>) => void): () => void
   /** File was renamed externally (renamed in the shell Home list) — pushes old and new paths; renderer syncs its save path and title bar */
@@ -209,6 +252,11 @@ export interface DesktopApi {
   writeRecoveryCopy(path: string, data: ArrayBuffer): Promise<{ ok: boolean }>
   /** tab closed but webContents kept alive (shell freeze workaround) — stop background timers */
   onTeardown(handler: () => void): () => void
+  /** one trusted space keystroke into this webContents — the only thing that
+   *  makes Blink respell existing text after the spellcheck attribute turns
+   *  back on (r168); the caller pauses the PM DOM observer and removes the
+   *  space again by script */
+  respellKick(): Promise<void>
   /** sourcePath: the document's current path — Save As uses its desired next-save
    *  password and commits that state to the chosen path only after success */
   saveDocxAs(
@@ -227,8 +275,9 @@ export interface DesktopApi {
   fontMetrics(family: string): Promise<FaceVerticalMetrics | null>
   getAiSettings(): Promise<AiSettings>
   setAiSettings(settings: AiSettings): Promise<void>
-  /** system print dialog for the current window; ok=false without error = canceled */
-  print(): Promise<{ ok: boolean; error?: string }>
+  /** system print dialog for the current window; ok=false without error = canceled.
+   *  scale: print scale inverting the preview's print zoom (print-zoom.ts) */
+  print(scale?: number): Promise<{ ok: boolean; error?: string }>
   /** render the document to PDF and ask where to save; size in twips.
    *  outPath is only honored when a previous export dialog chose that exact path */
   exportPdf(
@@ -236,11 +285,18 @@ export interface DesktopApi {
     pageWidthTwips: number,
     pageHeightTwips: number,
     outPath?: string,
+    scale?: number,
+  ): Promise<{ ok: boolean; path?: string; error?: string }>
+  exportHtml(
+    defaultName: string,
+    html: string,
+    outPath?: string,
   ): Promise<{ ok: boolean; path?: string; error?: string }>
   /** Mixed paper-size export: produce a set of PDF bytes (base64) at given sizes per the current print layout */
   printPdfBuffer(
     pageWidthTwips: number,
     pageHeightTwips: number,
+    scale?: number,
   ): Promise<{ ok: boolean; base64?: string; error?: string }>
   /** Merge grouped PDF fragments in order and write to disk (missing outPath opens
    *  the save dialog; a given outPath must come from a previous export dialog) */
@@ -284,12 +340,20 @@ export interface DesktopApi {
     error?: string
   }>
   fetchImage(url: string): Promise<{ base64: string; mime: string } | null>
+  /** AI image generation via the Genspark cloud channel (requires login + cloud tools) */
+  aiGenerateImage(op: {
+    prompt: string
+    aspectRatio?: string
+  }): Promise<{ url?: string; error?: string }>
   /** file picker for chat attachments (multi-select) */
   pickAttachments(): Promise<AttachmentAddResult | null>
   /** validate dropped paths and return attachment metadata */
   addAttachmentPaths(paths: string[]): Promise<AttachmentAddResult>
   /** persist a pasted clipboard image (no local path) to a temp file and add it as an attachment */
   addPastedImage(data: ArrayBuffer, ext: string): Promise<AttachmentAddResult>
+  /** copy an embedded picture to the OS clipboard as a real bitmap + <img>
+   *  html (r136: copying an image exported only the protected placeholder) */
+  copyImageToClipboard(dataUrl: string, metaJson?: string): Promise<boolean>
   /** read a slice of the extracted text of an attachment */
   readAttachment(path: string, offset: number, maxChars: number): Promise<AttachmentReadResult>
   /** read an image attachment as base64 for multimodal input (≤5MB) */

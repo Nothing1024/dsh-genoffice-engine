@@ -6,7 +6,8 @@
  * - SlideCanvas: shape content inside the interactive Group + group children + decoration layer
  * - SlideThumb: whole page statically scaled down
  */
-import React from 'react'
+import React, { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import type Konva from 'konva'
 import { Group, Rect, Ellipse, Text, Line, Arrow, Image as KImage, Path } from 'react-konva'
 import type {
   RenderNode,
@@ -17,9 +18,11 @@ import type {
   ChartRenderNode,
   GroupRenderNode,
   ArrowEndRender,
+  RenderReflection,
 } from '@genoffice/pptx-render'
 import {
   featheredImage,
+  featheredShapeCanvas,
   fillToKonva,
   processedImage,
   processedImageKey,
@@ -27,6 +30,9 @@ import {
   isDegenerateImage,
   strokeToKonva,
   shadowToKonva,
+  isOverlayShadow,
+  shapeShadowOverlay,
+  type ShadowGeom,
   cropToKonva,
   presetToShapeKind,
   shapeGlyphs,
@@ -34,9 +40,12 @@ import {
   normalizeColor,
   boxPivotProps,
   centerFillProps,
+  subscribeFontsEpoch,
+  getFontsEpoch,
 } from './konva-adapter'
 import { ChartBody } from './ChartBody'
 import { needsTextFrameHitArea } from './text-hit-area'
+import { warpGlyphs, measureGlyph } from './text-warp'
 
 export interface NodeBodyProps {
   node: RenderNode
@@ -62,7 +71,43 @@ export const NodeBody = React.memo(function NodeBody({
   flipHInherited,
   flipVInherited,
 }: NodeBodyProps) {
+  // Late-loading FontFaces (private/embedded) change glyph baseline anchors; the epoch
+  // subscription re-renders past React.memo so glyph y props recompute (a batchDraw alone
+  // repaints stale positions).
+  useSyncExternalStore(subscribeFontsEpoch, getFontsEpoch)
   const { box } = node
+
+  // Reflection: a flipped fading copy of the node drawn below it, then the node itself
+  // (the copy renders through NodeBody recursively with the reflection stripped)
+  const nodeRefl =
+    node.type === 'shape' || node.type === 'text' || node.type === 'picture'
+      ? (node as ShapeRenderNode | PictureRenderNode).reflection
+      : undefined
+  if (nodeRefl) {
+    const clone = { ...node, reflection: undefined } as RenderNode
+    return (
+      <>
+        <ReflectionCopy
+          node={clone}
+          images={images}
+          refl={nodeRefl}
+          w={box.w}
+          h={box.h}
+          hideText={hideText}
+          flipHInherited={flipHInherited}
+          flipVInherited={flipVInherited}
+        />
+        <NodeBody
+          node={clone}
+          images={images}
+          hideText={hideText}
+          hideCellText={hideCellText}
+          flipHInherited={flipHInherited}
+          flipVInherited={flipVInherited}
+        />
+      </>
+    )
+  }
 
   if (node.type === 'group') {
     const g = node as GroupRenderNode
@@ -101,22 +146,54 @@ export const NodeBody = React.memo(function NodeBody({
     const tiny = !!procImg && isDegenerateImage(procImg)
     const img = procImg && tiny ? (flatColorImage(procImg, srcKey) as HTMLImageElement) : procImg
     const clip = pic.clip
-    const image = img ? (
-      <KImage
-        image={
-          pic.softEdgePx && img.width
-            ? featheredImage(img, srcKey, pic.softEdgePx * (img.width / Math.max(box.w, 1)))
-            : img
-        }
-        width={box.w}
-        height={box.h}
-        {...(tiny ? {} : cropToKonva(pic, img))}
-        {...(pic.opacity != null ? { opacity: pic.opacity } : {})}
-        {...(clip ? {} : { ...strokeToKonva(pic.stroke), ...shadowToKonva(pic.shadow, pic.glow) })}
-      />
-    ) : (
-      <Rect width={box.w} height={box.h} fill="#eef" stroke="#99f" dash={[4, 4]} />
+    const cropProps = tiny || !img ? {} : cropToKonva(pic, img)
+    // srcRect inset: the image only covers a sub-rect of the frame. The full frame
+    // stays the hit target and carries the outline (PowerPoint selects/strokes the
+    // frame, not the visible sub-image); shadow stays on the painted pixels.
+    const inset = 'x' in cropProps
+    // Inner/perspective shadows draw as an offscreen overlay (canvas shadow props can't express them)
+    const picShadowOv = shapeShadowOverlay(
+      pic.shadow,
+      { kind: 'rect', w: box.w, h: box.h, cornerRadius: clip?.cornerRadiusPx },
+      box.w,
+      box.h,
     )
+    const picShadowImg = picShadowOv ? (
+      <KImage
+        image={picShadowOv.canvas}
+        x={picShadowOv.x}
+        y={picShadowOv.y}
+        width={picShadowOv.w}
+        height={picShadowOv.h}
+        listening={false}
+      />
+    ) : null
+    const image = img ? (
+      <>
+        {inset && !clip && (
+          <Rect width={box.w} height={box.h} fill="rgba(0,0,0,0)" {...strokeToKonva(pic.stroke)} />
+        )}
+        <KImage
+          image={
+            pic.softEdgePx && img.width
+              ? featheredImage(img, srcKey, pic.softEdgePx * (img.width / Math.max(box.w, 1)))
+              : img
+          }
+          width={box.w}
+          height={box.h}
+          {...cropProps}
+          {...(pic.opacity != null ? { opacity: pic.opacity } : {})}
+          {...(clip
+            ? {}
+            : {
+                ...(inset ? {} : strokeToKonva(pic.stroke)),
+                ...shadowToKonva(pic.shadow, pic.glow),
+              })}
+        />
+      </>
+    ) : pic.dataUrl ? (
+      <Rect width={box.w} height={box.h} fill="#eef" stroke="#99f" dash={[4, 4]} />
+    ) : null
     if (clip && img) {
       // picture styles shape clip: the image is clipped into the geometry, stroke follows the geometry outline;
       // shadow/glow is cast by an opaque backing shape (the image exactly covers it, so no color shows through)
@@ -130,9 +207,24 @@ export const NodeBody = React.memo(function NodeBody({
         ) : (
           <Rect width={box.w} height={box.h} cornerRadius={clip.cornerRadiusPx ?? 0} {...extra} />
         )
+      // Inset crops leave blank bands inside the geometry: back only the visible
+      // image sub-rect there (a full-geometry backing would show white through the bands)
+      const backing = (extra: Record<string, unknown>) =>
+        inset ? (
+          <Rect
+            x={cropProps.x}
+            y={cropProps.y}
+            width={cropProps.width}
+            height={cropProps.height}
+            {...extra}
+          />
+        ) : (
+          outline(extra)
+        )
       return (
         <>
-          {'shadowColor' in shadowProps && outline({ fill: '#ffffff', ...shadowProps })}
+          {picShadowOv?.under ? picShadowImg : null}
+          {'shadowColor' in shadowProps && backing({ fill: '#ffffff', ...shadowProps })}
           <Group
             clipFunc={(ctx) => {
               if (clip.pathData) return [new Path2D(clip.pathData)] as [Path2D]
@@ -156,16 +248,18 @@ export const NodeBody = React.memo(function NodeBody({
             {pic.fill &&
               outline({ ...fillToKonva(pic.fill, box.w, box.h, images, { x: box.x, y: box.y }) })}
             {/* Backdrop only for fully opaque previews: with partial opacity the two alphas would stack */}
-            {pic.bgColor && (pic.opacity ?? 1) >= 1 && outline({ fill: pic.bgColor })}
+            {pic.bgColor && (pic.opacity ?? 1) >= 1 && backing({ fill: pic.bgColor })}
             {image}
           </Group>
           {'stroke' in strokeProps && outline({ ...strokeProps, fillEnabled: false })}
+          {picShadowOv && !picShadowOv.under ? picShadowImg : null}
           {pic.media && <MediaBadge kind={pic.media} w={box.w} h={box.h} />}
         </>
       )
     }
     return (
       <>
+        {picShadowOv?.under ? picShadowImg : null}
         {/* spPr fill: PowerPoint always paints it behind the image, even a translucent one */}
         {pic.fill && (
           <Rect
@@ -179,6 +273,7 @@ export const NodeBody = React.memo(function NodeBody({
           <Rect width={box.w} height={box.h} fill={pic.bgColor} />
         )}
         {image}
+        {picShadowOv && !picShadowOv.under ? picShadowImg : null}
         {pic.media && <MediaBadge kind={pic.media} w={box.w} h={box.h} />}
       </>
     )
@@ -323,7 +418,20 @@ export const NodeBody = React.memo(function NodeBody({
   const fillProps = fillToKonva(shape.fill, box.w, box.h, images, { x: box.x, y: box.y })
   const strokeProps = strokeToKonva(shape.stroke, { w: box.w, h: box.h })
   const shadowProps = shadowToKonva(shape.shadow, shape.glow)
-  const glyphs = hideText ? [] : shapeGlyphs(shape)
+  let glyphs = hideText ? [] : shapeGlyphs(shape)
+  // WordArt envelope warp: per-character transforms replace the straight runs
+  const txWarp = shape.text?.txWarp
+  const warped =
+    txWarp && glyphs.length
+      ? warpGlyphs(
+          glyphs,
+          Math.max(box.w - (shape.text?.insets.l ?? 0) - (shape.text?.insets.r ?? 0), 1),
+          Math.max(box.h - (shape.text?.insets.t ?? 0) - (shape.text?.insets.b ?? 0), 1),
+          txWarp,
+          measureGlyph,
+        )
+      : null
+  if (warped) glyphs = warped
 
   // Connector/straight line: polyline (flip already baked into points), with optional arrow endpoints
   if (shape.line) {
@@ -488,16 +596,44 @@ export const NodeBody = React.memo(function NodeBody({
   } else {
     const rounded =
       presetToShapeKind(shape.presetGeometry) === 'roundRect' || shape.cornerRadiusPx != null
-    geom = (
-      <Rect
-        width={box.w}
-        height={box.h}
-        cornerRadius={rounded ? (shape.cornerRadiusPx ?? Math.min(box.w, box.h) * 0.167) : 0}
-        {...fillProps}
-        {...strokeProps}
-        {...shadowProps}
-      />
-    )
+    const cornerRadius = rounded ? (shape.cornerRadiusPx ?? Math.min(box.w, box.h) * 0.167) : 0
+    if (
+      shape.softEdgePx &&
+      shape.fill.kind === 'solid' &&
+      !shape.fillOverlay &&
+      box.w >= 1 &&
+      box.h >= 1
+    ) {
+      const feathered = featheredShapeCanvas(
+        shape.fill.color,
+        box.w,
+        box.h,
+        shape.softEdgePx,
+        cornerRadius,
+        shape.stroke ? { color: shape.stroke.color, widthPx: shape.stroke.widthPx } : undefined,
+      )
+      geom = (
+        <KImage
+          image={feathered.canvas}
+          x={-feathered.pad}
+          y={-feathered.pad}
+          width={box.w + 2 * feathered.pad}
+          height={box.h + 2 * feathered.pad}
+          {...shadowProps}
+        />
+      )
+    } else {
+      geom = (
+        <Rect
+          width={box.w}
+          height={box.h}
+          cornerRadius={cornerRadius}
+          {...fillProps}
+          {...strokeProps}
+          {...shadowProps}
+        />
+      )
+    }
   }
 
   // fillOverlay: PowerPoint blends the overlay against the shape's own fill in isolation.
@@ -541,15 +677,47 @@ export const NodeBody = React.memo(function NodeBody({
     })
   }
 
+  // Inner/perspective shadows draw as an offscreen overlay (canvas shadow props can't express them)
+  let shapeShadowUnder: React.ReactNode = null
+  let shapeShadowOver: React.ReactNode = null
+  if (isOverlayShadow(shape.shadow) && !shape.extrusion && !shape.line) {
+    const sg: ShadowGeom =
+      shape.fillPathData || shape.pathData
+        ? { kind: 'path', data: (shape.fillPathData ?? shape.pathData)! }
+        : shape.polygonPoints
+          ? { kind: 'polygon', points: shape.polygonPoints }
+          : presetToShapeKind(shape.presetGeometry) === 'ellipse'
+            ? { kind: 'ellipse', w: box.w, h: box.h }
+            : {
+                kind: 'rect',
+                w: box.w,
+                h: box.h,
+                cornerRadius:
+                  presetToShapeKind(shape.presetGeometry) === 'roundRect'
+                    ? (shape.cornerRadiusPx ?? Math.min(box.w, box.h) * 0.167)
+                    : (shape.cornerRadiusPx ?? 0),
+              }
+    const ov = shapeShadowOverlay(shape.shadow, sg, box.w, box.h)
+    if (ov) {
+      const img = (
+        <KImage image={ov.canvas} x={ov.x} y={ov.y} width={ov.w} height={ov.h} listening={false} />
+      )
+      if (ov.under) shapeShadowUnder = img
+      else shapeShadowOver = img
+    }
+  }
+
   return (
     <>
       {/* Text is drawn as individual glyph runs, so line spacing and insets otherwise
           have no hit area. Cover every text-bearing shape (including round/custom
           geometry) so clicks inside its text frame cannot reach a picture underneath. */}
       {needsTextFrameHitArea(shape) && <Rect width={box.w} height={box.h} fill="transparent" />}
+      {shapeShadowUnder}
       {overlayUnder}
       {geom}
       {overlayGeom}
+      {shapeShadowOver}
       {/* PowerPoint flips geometry only: text in a flipped shape stays readable. The
           container Group mirrors everything, so counter-flip the text layer. */}
       <Group
@@ -587,6 +755,10 @@ export const NodeBody = React.memo(function NodeBody({
                 fontFamily={g.fontFamily}
                 fontStyle={g.fontStyle}
                 rotation={g.rotation ?? 0}
+                scaleX={g.scaleX ?? 1}
+                scaleY={g.scaleY ?? 1}
+                offsetX={g.offsetX ?? 0}
+                offsetY={g.offsetY ?? 0}
                 letterSpacing={g.letterSpacing ?? 0}
                 fill={normalizeColor(shadeHex(shape.text!.extrusion!.color, 0.7))}
                 listening={false}
@@ -604,6 +776,10 @@ export const NodeBody = React.memo(function NodeBody({
             fontStyle={g.fontStyle}
             textDecoration={g.textDecoration}
             rotation={g.rotation ?? 0}
+            scaleX={g.scaleX ?? 1}
+            scaleY={g.scaleY ?? 1}
+            offsetX={g.offsetX ?? 0}
+            offsetY={g.offsetY ?? 0}
             letterSpacing={g.letterSpacing ?? 0}
             fill={
               shape.text?.extrusion
@@ -670,6 +846,112 @@ export const NodeBody = React.memo(function NodeBody({
  * The arrowhead always faces the segment direction (angle taken from the tangent at the end point).
  */
 /** Darken a #RRGGBB color by factor (extrusion side layers). */
+/**
+ * Reflection copy: the node's content vertically flipped below it, fading out along
+ * the fade extent. The group is cached onto its own bitmap so the destination-out
+ * gradient (and the optional blur filter) composites against the copy only, never
+ * against the slide underneath.
+ */
+function ReflectionCopy({
+  node,
+  images,
+  refl,
+  w,
+  h,
+  hideText,
+  flipHInherited,
+  flipVInherited,
+}: {
+  node: RenderNode
+  images: Map<string, HTMLImageElement>
+  refl: RenderReflection
+  w: number
+  h: number
+  hideText?: boolean
+  flipHInherited?: boolean
+  flipVInherited?: boolean
+}) {
+  const srcRef = useRef<Konva.Group>(null)
+  const [bitmap, setBitmap] = useState<HTMLCanvasElement | null>(null)
+  const pad = Math.ceil(refl.blurPx) + 2
+  // The hidden group is only a RENDER SOURCE: Konva's cache() draws into the cache
+  // canvas regardless of the top node's visibility (Container.drawScene bypasses the
+  // check while caching), so the group never needs to become visible — which also
+  // means react-konva's prop reconciliation can never fight the visibility state.
+  // Fade + blur composite on our own offscreen canvas (native gaussian blur), so no
+  // destination-out ever touches the live layer.
+  useLayoutEffect(() => {
+    const g = srcRef.current
+    if (!g || w < 1 || h < 1) return
+    try {
+      // Adaptive resolution: a blurred image carries no detail beyond its blur radius
+      const basePr = Math.min(globalThis.devicePixelRatio || 1, 2)
+      const pr = Math.max(basePr / Math.min(Math.max(refl.blurPx / 6, 1), 6), 0.2)
+      g.cache({
+        x: -pad,
+        y: -pad,
+        width: Math.max(w + 2 * pad, 1),
+        height: Math.max(h + 2 * pad, 1),
+        pixelRatio: pr,
+      })
+      const cached = (
+        g as unknown as { _getCanvasCache(): { scene: { canvas: HTMLCanvasElement } } }
+      )._getCanvasCache().scene.canvas
+      const out = document.createElement('canvas')
+      out.width = Math.max(cached.width, 1)
+      out.height = Math.max(cached.height, 1)
+      const ctx = out.getContext('2d')
+      if (!ctx) return
+      if (refl.blurPx) ctx.filter = `blur(${(refl.blurPx * pr) / 2}px)`
+      ctx.drawImage(cached, 0, 0)
+      ctx.filter = 'none'
+      // Fade: fully kept at the touching edge (shape-local y=h), fully erased past the
+      // fade extent. Canvas rows map shape-local y → (y + pad) · pr.
+      ctx.globalCompositeOperation = 'destination-out'
+      const grad = ctx.createLinearGradient(
+        0,
+        (h + pad) * pr,
+        0,
+        (h * (1 - Math.max(refl.endPos, 0.02)) + pad) * pr,
+      )
+      grad.addColorStop(0, 'rgba(0,0,0,0)')
+      grad.addColorStop(1, 'rgba(0,0,0,1)')
+      ctx.fillStyle = grad
+      ctx.fillRect(0, 0, out.width, out.height)
+      g.clearCache()
+      setBitmap(out)
+    } catch {
+      // jsdom / zero-size canvas: the reflection is cosmetic
+      setBitmap(null)
+    }
+  }, [node, images, refl, w, h, pad, hideText])
+  return (
+    <>
+      <Group ref={srcRef} visible={false} listening={false}>
+        <NodeBody
+          node={node}
+          images={images}
+          hideText={hideText}
+          flipHInherited={flipHInherited}
+          flipVInherited={flipVInherited}
+        />
+      </Group>
+      {bitmap && (
+        <KImage
+          image={bitmap}
+          x={-pad}
+          y={2 * h + refl.distPx + pad}
+          scaleY={-1}
+          width={w + 2 * pad}
+          height={h + 2 * pad}
+          opacity={refl.startAlpha}
+          listening={false}
+        />
+      )}
+    </>
+  )
+}
+
 function shadeHex(color: string, f: number): string {
   const m = /^#([0-9a-f]{6})/i.exec(color)
   if (!m) return color

@@ -24,6 +24,7 @@ import {
   showSaveDialogWithMemory,
 } from '@genoffice/electron-utils'
 import { createI18n, getUiLang } from '@genoffice/i18n'
+import { generateImageTool } from '@genoffice/ai-search'
 import { atomicWriteFile } from './atomic-write'
 import {
   copyImageIntoOwnedAssets,
@@ -220,6 +221,18 @@ const tDlg = createI18n({
     btnDontSave: 'Nie zapisuj',
     btnCancel: 'Anuluj',
   },
+  cs: {
+    dlgSaveTitle: 'Uložit dokument Markdown',
+    filterMarkdown: 'Dokumenty Markdown',
+    dlgPickImage: 'Vyberte obrázek',
+    filterImages: 'Obrázky',
+    untitledFile: 'Bez názvu',
+    closeUnsavedMsg: 'Tento dokument má neuložené změny.',
+    closeUnsavedDetail: 'Chcete je před zavřením uložit?',
+    btnSave: 'Uložit',
+    btnDontSave: 'Neukládat',
+    btnCancel: 'Zrušit',
+  },
   nl: {
     dlgSaveTitle: 'Markdown-document opslaan',
     filterMarkdown: 'Markdown-documenten',
@@ -298,12 +311,26 @@ interface RuntimePaths {
   preloadPath: string
   rendererUrl?: string
   rendererFile?: string
+  /** Shell router used to open exported PDFs in a new GenOffice tab. */
+  openGeneratedPath?: (path: string) => boolean
 }
 
 let runtime: RuntimePaths = { preloadPath: '' }
 
 export function configureMarkdownRuntime(paths: RuntimePaths): void {
   runtime = paths
+}
+
+/** After a successful Markdown → PDF export: open the file in a PDF tab (shell)
+ * or reveal it in the folder (standalone). Tab-opening failure must not
+ * report the export itself as failed — the file is already persisted. */
+function openExportedPdf(path: string): void {
+  try {
+    if (runtime.openGeneratedPath?.(path)) return
+  } catch (err) {
+    console.warn('[markdown] Failed to open exported PDF:', err)
+  }
+  shell.showItemInFolder(path)
 }
 
 /** Open path per view, queued at tab creation; the renderer consumes it after mount.
@@ -658,6 +685,17 @@ function registerMarkdownIpc(): void {
     },
   )
 
+  // markdown-owned (like docs:ai-generate-image): the shared ai:* handlers are
+  // shell-registered, but image generation is gated per app
+  ipcMain.handle(
+    MARKDOWN_CHANNELS.aiGenerateImage,
+    (_e, op: { prompt?: unknown; aspectRatio?: unknown }) =>
+      generateImageTool(join(app.getPath('userData'), 'ai-settings.json'), {
+        prompt: String(op?.prompt ?? ''),
+        aspectRatio: op?.aspectRatio ? String(op.aspectRatio) : undefined,
+      }),
+  )
+
   const MIME_BY_EXT: Record<string, ImageData['mime']> = {
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
@@ -766,6 +804,7 @@ function registerMarkdownIpc(): void {
           margins: { top: 0.6, bottom: 0.6, left: 0.6, right: 0.6 },
         })
         await writeFile(picked.filePath, pdf)
+        openExportedPdf(picked.filePath)
         return { ok: true, path: picked.filePath }
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }

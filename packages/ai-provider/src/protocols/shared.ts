@@ -10,25 +10,38 @@ export async function* sseLines(
   let buffer = ''
   const stream = body as ReadableStream<Uint8Array>
   const reader = stream.getReader()
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    onBytes?.()
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) yield line
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      onBytes?.()
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) yield line
+    }
+    if (buffer) yield buffer
+  } finally {
+    // The consumer may abandon this generator mid-stream (an in-band gateway
+    // error thrown inside the for-await loop calls .return()). Without this
+    // cleanup the reader stays locked and the underlying socket is not
+    // returned to the pool until GC nondeterministically finalizes it.
+    await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
   }
-  if (buffer) yield buffer
 }
 
 export interface StreamCallbacks {
   onDelta: (text: string) => void
   onToolCall: (call: AgentToolCall) => void
+  /** raw model reasoning deltas (reasoning_content); stored so interleaved-thinking models get it echoed back */
+  onReasoningDelta?: (text: string) => void
   /** normalized stop reason ('max_tokens' when the output was cut off by the token limit) */
   onStopReason?: (reason: string) => void
   /** bytes arrived on the wire (fires per network chunk, including SSE pings; used for keepalive) */
   onActivity?: () => void
+  /** Stable renderer transport id for providers with native sessions. */
+  sessionId?: string
   signal: AbortSignal
 }
 
@@ -96,7 +109,7 @@ export function sseErrorText(error: unknown, fallback: string): string {
  */
 export async function jsonBodyInsteadOfSse(response: Response): Promise<string | null> {
   const contentType = response.headers.get('content-type') ?? ''
-  return contentType.includes('application/json') ? await response.text() : null
+  return contentType.toLowerCase().includes('application/json') ? await response.text() : null
 }
 
 /**

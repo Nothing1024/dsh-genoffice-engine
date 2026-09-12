@@ -39,7 +39,14 @@ import {
   type PlacedBox,
   type ParentPlacement,
 } from './coords'
-import { resolveFill, resolveStroke, resolveShadow, resolveGlow, type MediaResolver } from './fill'
+import {
+  resolveFill,
+  resolveStroke,
+  resolveShadow,
+  resolveGlow,
+  resolveReflection,
+  type MediaResolver,
+} from './fill'
 import { layoutText } from './text-layout'
 import { HeuristicMetrics, type FontMetricsProvider } from './metrics'
 import {
@@ -53,6 +60,7 @@ import {
 import {
   buildExtrusion,
   inPlaneRotationDeg,
+  flatCameraMirror,
   flattenSvgPath,
   ellipseRing,
   roundRectRing,
@@ -372,7 +380,9 @@ function buildShape(
     fill: resolveFill(el.fill, vp, media),
     ...(el.fillOverlay ? { fillOverlay: resolveFill(el.fillOverlay, vp, media) } : {}),
     ...(el.placeholder ? { placeholder: el.placeholder } : {}),
+    ...(el.txBox ? { txBox: true } : {}),
     ...(el.presetGeometry ? { presetGeometry: el.presetGeometry } : {}),
+    ...(el.softEdge ? { softEdgePx: emuToPx(el.softEdge, vp.scale) } : {}),
   }
   // Raw avLst values ride along for the edit layer (yellow adjust handles)
   if (el.adjust) node.adjust = { ...el.adjust }
@@ -423,6 +433,8 @@ function buildShape(
   if (shadow) node.shadow = shadow
   const glow = resolveGlow(el.glow, vp)
   if (glow) node.glow = glow
+  const reflection = resolveReflection(el.reflection, vp)
+  if (reflection) node.reflection = reflection
   if (el.scene3d) applyScene3D(el, node, vp)
   if (el.text && el.text.paragraphs.length) {
     node.text = layoutText({
@@ -518,7 +530,24 @@ function buildPicture(
   media: MediaResolver | undefined,
 ): PictureRenderNode {
   const dataUrl = el.dataUrl ?? (el.mediaRef ? media?.(el.mediaRef) : undefined)
-  const clip = pictureClip(el.presetGeometry, box, el.adjust)
+  // custGeom picture frame: clip the bitmap to the freeform path (normalized 0..1 → local px)
+  const geomPath = el.customGeometry
+    ? (el.customGeometry.path ?? el.customGeometry.fillPath)
+    : undefined
+  const clip = geomPath
+    ? { pathData: scaleUnitPath(geomPath, box.w, box.h) }
+    : pictureClip(el.presetGeometry, box, el.adjust)
+  // scene3d flat 180° camera: the bitmap content mirrors, so fold it into the container flips
+  if (el.scene3d) {
+    const m = flatCameraMirror(el.scene3d)
+    if (m)
+      box = {
+        ...box,
+        flipH: box.flipH !== m.flipH,
+        flipV: box.flipV !== m.flipV,
+        rotationDeg: box.rotationDeg + m.rotationDeg,
+      }
+  }
   // GDI metafiles play back on an opaque white DC: PowerPoint shows a white panel for
   // an EMF/WMF that never paints its background (PlanS academy banner, measured)
   const isMetafile =
@@ -551,6 +580,8 @@ function buildPicture(
   if (shadow) node.shadow = shadow
   const glow = resolveGlow(el.glow, vp)
   if (glow) node.glow = glow
+  const reflection = resolveReflection(el.reflection, vp)
+  if (reflection) node.reflection = reflection
   return node
 }
 

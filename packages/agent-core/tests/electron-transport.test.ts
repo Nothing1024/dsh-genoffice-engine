@@ -14,6 +14,7 @@ function setup(
   startImpl?: (request: IpcStreamStart<FakeSettings>) => void | Promise<unknown>,
   creditsErrorText?: () => string,
   networkErrorText?: () => string,
+  overloadedErrorText?: () => string,
 ) {
   let listener: ((chunk: IpcStreamChunk) => void) | undefined
   const unsubscribe = vi.fn(() => {
@@ -36,9 +37,11 @@ function setup(
     timeoutErrorText: () => 'timed out',
     ...(creditsErrorText ? { creditsErrorText } : {}),
     ...(networkErrorText ? { networkErrorText } : {}),
+    ...(overloadedErrorText ? { overloadedErrorText } : {}),
   })
   const cb = {
     onDelta: vi.fn(),
+    onReasoning: vi.fn(),
     onToolCall: vi.fn(),
     onStopReason: vi.fn(),
     onDone: vi.fn(),
@@ -63,6 +66,15 @@ describe('createIpcTransport', () => {
     expect(cb.onDelta).toHaveBeenNthCalledWith(1, 'hi')
     expect(cb.onDelta).toHaveBeenNthCalledWith(2, '')
     expect(cb.onToolCall).toHaveBeenCalledWith({ id: 'c1', name: 'read', input: {} })
+  })
+
+  it('forwards reasoning chunks separately from text deltas', () => {
+    const { cb, emit } = setup()
+    emit({ type: 'reasoning', text: 'thinking…' })
+    emit({ type: 'reasoning' }) // payload-less chunk carries nothing
+    expect(cb.onReasoning).toHaveBeenCalledTimes(1)
+    expect(cb.onReasoning).toHaveBeenCalledWith('thinking…')
+    expect(cb.onDelta).not.toHaveBeenCalled()
   })
 
   it('ignores chunks for other requestIds', () => {
@@ -143,6 +155,26 @@ describe('createIpcTransport', () => {
       errorCode: 'credits',
     })
     expect(cb.onError).toHaveBeenCalledWith('Your Genspark credits have been exhausted.')
+  })
+
+  it('maps an overloaded error code to the localized busy message', () => {
+    const { cb, emit } = setup(undefined, undefined, undefined, () => 'service busy')
+    emit({
+      type: 'error',
+      error: 'HTTP 429: {"error":{"type":"engine_overloaded_error"}}',
+      errorCode: 'overloaded',
+    })
+    expect(cb.onError).toHaveBeenCalledWith('service busy')
+  })
+
+  it('an overloaded error code without overloadedErrorText falls back to the carried text', () => {
+    const { cb, emit } = setup()
+    emit({
+      type: 'error',
+      error: 'HTTP 429: engine overloaded',
+      errorCode: 'overloaded',
+    })
+    expect(cb.onError).toHaveBeenCalledWith('HTTP 429: engine overloaded')
   })
 
   it('fails the run after prolonged silence; pings re-arm the watchdog', () => {

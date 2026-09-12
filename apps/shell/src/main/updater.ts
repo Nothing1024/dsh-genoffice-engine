@@ -242,6 +242,21 @@ const tUpd = createI18n({
       'Automatyczna aktualizacja nie powiodła się. Pobierz najnowszą wersję ze strony pobierania i zainstaluj ją ręcznie.',
     updOpenDownload: 'Otwórz stronę pobierania',
   },
+  cs: {
+    updTitle: 'Aktualizace softwaru',
+    updHeadline: 'Je k dispozici nová verze',
+    updDesc:
+      'Tato aktualizace obsahuje vylepšení výkonu a opravy chyb. Doporučujeme aktualizovat hned.',
+    updDownload: 'Aktualizovat nyní',
+    updLater: 'Připomenout později',
+    updInstall: 'Restartovat a nainstalovat',
+    updDownloading: 'Stahování aktualizace…',
+    updFailed: 'Stažení aktualizace se nezdařilo. Zkontrolujte síť a zkuste to znovu.',
+    updRetry: 'Zkusit znovu',
+    updManual:
+      'Automatická aktualizace se nezdařila. Stáhněte si nejnovější verzi ze stránky pro stažení a nainstalujte ji ručně.',
+    updOpenDownload: 'Otevřít stránku pro stažení',
+  },
   nl: {
     updTitle: 'Software-update',
     updHeadline: 'Er is een nieuwe versie beschikbaar',
@@ -351,7 +366,8 @@ function updateFeedBaseUrl(): string | null {
 
 /// Picks the manual-install artifact for this platform/arch from the update
 /// feed's file list: macOS wants the dmg matching process.arch (the zip is
-/// Squirrel-only), Windows the NSIS exe, Linux the AppImage. Served feeds may
+/// Squirrel-only), Windows the NSIS exe matching process.arch (the arm64 one
+/// carries an -arm64 suffix, the x64 one no arch), Linux the AppImage. Served feeds may
 /// carry either feed-relative names or absolute CDN URLs (mac-release-upload
 /// rewrites every url: entry to absolute), but only their basename is used.
 /// The final URL is always rebuilt against the trusted baked feed base.
@@ -374,7 +390,9 @@ function manualDownloadUrlFor(info: UpdateInfo): string | null {
     const x64 = pick((name) => name.endsWith('.dmg') && !/-(arm64|universal)\.dmg$/.test(name))
     chosen = process.arch === 'arm64' ? (arm ?? x64) : (x64 ?? arm)
   } else if (process.platform === 'win32') {
-    chosen = pick((name) => name.endsWith('.exe'))
+    const arm = pick((name) => name.endsWith('-arm64.exe'))
+    const x64 = pick((name) => name.endsWith('.exe') && !name.endsWith('-arm64.exe'))
+    chosen = process.arch === 'arm64' ? (arm ?? x64) : (x64 ?? arm)
   } else {
     chosen = pick((name) => name.endsWith('.AppImage'))
   }

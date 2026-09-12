@@ -10,7 +10,7 @@ import { docLineFactor, docStyleCss, docThemeCss } from '../src/renderer/doc-sty
 describe('docThemeCss', () => {
   it('emits body and heading fonts from the theme font pair', () => {
     const css = docThemeCss({ major: 'Trebuchet MS', minor: 'Trebuchet MS' }, null)
-    expect(css).toContain('.doc-page {')
+    expect(css).toContain('.doc-page, .pv-page {')
     expect(css).toContain('Trebuchet MS')
     expect(css).toContain('.doc-page h1')
   })
@@ -58,6 +58,11 @@ describe('docLineFactor — CJK factor source', () => {
   it('a Latin-only Normal (font === fontAscii) does not override the docDefaults EA font', () => {
     const parsed = parsedWith({ font: 'Calibri', fontAscii: 'Calibri' }, 'SimSun')
     expect(docLineFactor(parsed, true)).toBe(1.3029)
+  })
+
+  it('a same-slot Japanese Normal (Meiryo in every slot) is an EA choice, not Latin-only', () => {
+    const parsed = parsedWith({ font: 'メイリオ', fontAscii: 'メイリオ' }, undefined)
+    expect(docLineFactor(parsed, true)).toBe(1.9429)
   })
 
   it('falls back to the SimSun-class factor without any declared EA font', () => {
@@ -110,12 +115,21 @@ describe('docStyleCss — typed line grid', () => {
     } as unknown as ParsedDocFull
   }
 
-  it('declares --doc-line-grid per element for uniform typed grids', () => {
+  it('declares --doc-line-grid and --doc-line-max per element for uniform typed grids', () => {
     const css = docStyleCss(
       parsedWithSectPr('<w:sectPr><w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>'),
     )
     expect(css).toContain(
-      '.doc-page, .doc-page * { --doc-line-grid:round(up, calc(var(--doc-line-factor,1.2) * 1em - var(--doc-grid-pitch,0.0001px) * 0.001), var(--doc-grid-pitch,0.0001px)) }',
+      '--doc-line-grid:round(up, calc(var(--doc-line-factor,1.2) * 1em - var(--doc-grid-pitch,0.0001px) * 0.004), var(--doc-grid-pitch,0.0001px))',
+    )
+    // Word probe 2026-08-22: mult x pitch, floored at the snapped single
+    expect(css).toContain(
+      '--doc-line-max:max(calc(var(--doc-grid-pitch,0.0001px) * var(--doc-line-mult,1)), round(up',
+    )
+    expect(css).toContain('--doc-grid-single-mult:1')
+    // snapToGrid=0 paragraphs degrade to natural x mult on the paragraph AND its spans
+    expect(css).toContain(
+      '.doc-page :is(.doc-nosnap, .doc-grid-nosnap), .doc-page :is(.doc-nosnap, .doc-grid-nosnap) * { --doc-line-max:calc(var(--doc-line-factor,1.2) * 1em * var(--doc-line-mult,1)) }',
     )
   })
 
@@ -144,10 +158,10 @@ describe('docStyleCss — style indent vs list geometry', () => {
   it('style w:ind skips list items and becomes the --li-left fallback', () => {
     const css = docStyleCss(parsedWithStyle({ indentLeftTwips: 720 }))
     expect(css).toContain(
-      '.doc-page [data-style="ListParagraph"]:not(.doc-li) { margin-inline-start:36.0pt }',
+      '.doc-page [data-style="ListParagraph"]:not(.doc-li, .doc-li-stray) { margin-inline-start:36.0pt }',
     )
     expect(css).toContain(
-      '.doc-page .doc-li[data-style="ListParagraph"] { --style-li-left:36.0pt }',
+      '.doc-page :is(.doc-li, .doc-li-stray)[data-style="ListParagraph"] { --style-li-left:36.0pt }',
     )
     expect(css).not.toContain('margin-left')
   })

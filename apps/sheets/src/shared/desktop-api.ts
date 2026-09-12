@@ -1,6 +1,16 @@
 import { z } from 'zod'
 
-import { MAX_SAVE_EDITS, MAX_SAVE_EDITS_TOTAL, SAVE_EDITS_CHUNK_MAX } from './ipc-channels'
+import {
+  HEADER_FOOTER_PICTURE_POSITION,
+  MAX_CREATE_DOCUMENT_CONTENT_CHARS,
+  MAX_CREATE_DOCUMENT_TITLE_CHARS,
+  MAX_CSV_EXPORT_CHARS,
+  MAX_PDF_TEMPLATE_CHARS,
+  MAX_SAVE_EDITS,
+  MAX_SAVE_EDITS_TOTAL,
+  SAVE_EDITS_CHUNK_JSON_MAX,
+  SAVE_EDITS_CHUNK_MAX,
+} from './ipc-channels'
 import { ADDABLE_SHAPE_TYPES } from './shape-types'
 import type {
   AiChatRequest,
@@ -10,8 +20,9 @@ import type {
   AiStreamRequest,
   GenSparkAccountStatus,
 } from '@genoffice/ai-provider'
+import type { AiPanelPrefs } from '@genoffice/ui'
 
-const MAX_RANGE_CELLS = 20_000
+const MAX_RANGE_CELLS = 100_000
 const cellScalarSchema = z.union([z.string(), z.number().finite(), z.boolean(), z.null()])
 const cellAreaSchema = z
   .object({
@@ -47,7 +58,15 @@ const worksheetMetadataSchema = z
     // "no default"; the engine normalizes it to null, but a stray 0 must not
     // reject the whole workbook — the preload maps it back to null.
     defaultRowHeight: z.number().nonnegative().nullable(),
+    /// sheetFormatPr/@customHeight — the default row height is user-fixed, so
+    /// wrap rows without their own ht are NOT auto-fit on open. Optional for
+    /// compatibility with an older sidecar binary.
+    defaultRowHeightFixed: z.boolean().optional(),
     defaultColumnWidth: z.number().nonnegative().nullable(),
+    /// sheetFormatPr/@baseColWidth — the built-in default column width is
+    /// derived from this (default 8) when defaultColWidth is absent.
+    /// Optional for compatibility with an older sidecar binary.
+    baseColumnWidth: z.number().nonnegative().nullable().optional(),
     freeze: z
       .object({
         frozenColumns: z.number().int().nonnegative(),
@@ -62,6 +81,10 @@ const worksheetMetadataSchema = z
     showFormulas: z.boolean().optional(),
     /// sheetView/@showRowColHeaders — false hides the heading strips.
     showRowColHeaders: z.boolean().optional(),
+    /// sheetView/@rightToLeft — the grid is mirrored (column A at the right).
+    rightToLeft: z.boolean().optional(),
+    /// Saved normal-view zoom percent (10-400); omitted at the 100% default.
+    zoomScale: z.number().int().min(10).max(400).optional(),
     tables: z.array(
       z
         .object({
@@ -69,6 +92,9 @@ const worksheetMetadataSchema = z
           headerRowCount: z.number().int().nonnegative(),
           showRowStripes: z.boolean(),
           showColumnStripes: z.boolean(),
+          /// autoFilter has live criteria: Excel re-ranks row stripes by
+          /// visible order while a filter hides rows.
+          filterActive: z.boolean().optional(),
           /// table/@displayName (falling back to @name) — the structured-reference token.
           name: z.string().optional(),
           /// tableColumn/@name in column order, for the formula engine's titleMap.
@@ -128,14 +154,59 @@ const worksheetMetadataSchema = z
             path: z.string().min(1),
             cachePath: z.string().min(1).nullable(),
             outputRef: z.string().min(1),
-            /// Pivot style band fill (header + grand-total rows).
+            /// Pivot style bands resolved sidecar-side from pivotTableStyleInfo
+            /// (Excel keeps pivot styling out of cell xfs). Each band carries
+            /// fill / font color / bold; an absent value inherits the band
+            /// below it. Precedence, lowest first: wholeTable, row stripes,
+            /// column stripes, firstColumn, subheading / subtotal, header
+            /// (+ firstHeaderCell), totalRow.
             headerFill: z.string().optional(),
             headerFontColor: z.string().optional(),
-            /// Body band fill for solid families (Dark); stripe overlays it.
+            headerBold: z.boolean().optional(),
+            /// Top-left cell of the output area, above the header band.
+            firstHeaderCellFontColor: z.string().optional(),
+            firstHeaderCellBold: z.boolean().optional(),
             wholeTableFill: z.string().optional(),
+            wholeTableFontColor: z.string().optional(),
+            /// Row stripes: even offsets from firstDataRow take stripeFill,
+            /// odd ones secondRowStripeFill (only sent with showRowStripes).
             stripeFill: z.string().optional(),
+            secondRowStripeFill: z.string().optional(),
+            /// Column stripes over the data columns from firstDataCol (only
+            /// sent with showColStripes); they skip the header rows.
+            columnStripeFill: z.string().optional(),
+            secondColumnStripeFill: z.string().optional(),
+            /// Row-label columns left of firstDataCol (Excel "Row Headers").
+            firstColumnFill: z.string().optional(),
+            firstColumnBold: z.boolean().optional(),
+            /// Level-1 row subheadings (rowKinds 's').
+            subheadingFill: z.string().optional(),
+            subheadingFontColor: z.string().optional(),
+            subheadingBold: z.boolean().optional(),
+            /// Deeper row subheadings (rowKinds 'S').
+            subheading2Fill: z.string().optional(),
+            subheading2FontColor: z.string().optional(),
+            subheading2Bold: z.boolean().optional(),
+            /// Subtotal rows (rowKinds 't').
+            subtotalFill: z.string().optional(),
+            subtotalFontColor: z.string().optional(),
+            subtotalBold: z.boolean().optional(),
+            /// Grand-total row (rowKinds 'g').
+            totalRowFill: z.string().optional(),
+            totalRowFontColor: z.string().optional(),
+            totalRowBold: z.boolean().optional(),
+            /// A named pivotTableStyleInfo: band rows bold even with no fills.
+            styled: z.boolean().optional(),
             firstDataRow: z.number().int().nonnegative().optional(),
+            firstDataCol: z.number().int().nonnegative().optional(),
             rowGrandTotals: z.boolean().optional(),
+            /// One char per output row from firstDataRow down: d data, s/S
+            /// subheading level 1/deeper, t subtotal, g grand total, b blank.
+            rowKinds: z
+              .string()
+              .regex(/^[dsStgb]*$/)
+              .max(1_048_576)
+              .optional(),
           })
           .strict(),
       )
@@ -167,6 +238,30 @@ const worksheetMetadataSchema = z
       )
       .max(100)
       .default([]),
+    /// Saved `_xlnm.Print_Area` / `_xlnm.Print_Titles` formulas for this
+    /// sheet, verbatim from workbook.xml.
+    printArea: z.string().min(1).max(2_000).optional(),
+    printTitles: z.string().min(1).max(2_000).optional(),
+    /// Any localSheetId-scoped definedName targets this sheet (hidden and
+    /// _xlnm.* built-ins included); duplication is gated on it up front
+    /// because the save refuses to clone such sheets. Optional for an older
+    /// sidecar binary.
+    hasScopedDefinedNames: z.boolean().optional(),
+    /// In-cell rich-value pictures (Excel "place picture in cell"): the id is
+    /// a media lookup key for readWorkbookMedia, like a visual id.
+    /// Defaulted for stale sidecar binaries, like sparklines.
+    cellImages: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1),
+            row: z.number().int().nonnegative(),
+            column: z.number().int().nonnegative(),
+          })
+          .strict(),
+      )
+      .max(500)
+      .default([]),
   })
   .strict()
 const richRunSchema = z
@@ -179,6 +274,7 @@ const richRunSchema = z
     color: z.string().optional(),
     size: z.number().positive().optional(),
     family: z.string().optional(),
+    vertAlign: z.enum(['subscript', 'superscript']).optional(),
   })
   .strict()
 const conditionalRuleSchema = z
@@ -190,6 +286,8 @@ const conditionalRuleSchema = z
     text: z.string().optional(),
     dxfIndex: z.number().int().nonnegative().optional(),
     priority: z.number().int(),
+    /// cfRule/@stopIfTrue; optional so an older sidecar build stays parseable.
+    stopIfTrue: z.boolean().optional(),
     rank: z.number().int().nonnegative().optional(),
     percent: z.boolean(),
     bottom: z.boolean(),
@@ -212,6 +310,16 @@ const conditionalRuleSchema = z
     negativeSameAsPositive: z.boolean().optional(),
     /// x14:dataBar/@gradient; absent means the ECMA default (gradient fill).
     gradient: z.boolean().optional(),
+    /// x14:dataBar/@axisPosition; absent means automatic (or no x14 twin).
+    axisPosition: z.enum(['automatic', 'middle', 'none']).optional(),
+    /// x14:dataBar/axisColor as #RRGGBB (kept for the save side and future
+    /// renderers; Univer's bar painter has no axis line).
+    axisColor: z.string().optional(),
+    /// Effective bar extents (% of the cell width): 2006 minLength/maxLength
+    /// (defaults 10/90) or the x14 twin's (defaults 0/100). Only dataBar
+    /// rules carry them; an older sidecar omits them.
+    minLength: z.number().int().min(0).max(100).optional(),
+    maxLength: z.number().int().min(0).max(100).optional(),
   })
   .strict()
 const borderEdgeSchema = z
@@ -229,6 +337,8 @@ const cellStyleSchema = z
     underline: z.boolean(),
     strikethrough: z.boolean(),
     wrapText: z.boolean(),
+    /// alignment/@shrinkToFit; omitted by the sidecar when false.
+    shrinkToFit: z.boolean().optional(),
     fontColor: z.string().optional(),
     fillColor: z.string().optional(),
     /// Theme provenance (palette slot + tint) for theme-resolved colors, so
@@ -265,6 +375,11 @@ const drawingAnchorSchema = z
     toColumn: z.number().int().nonnegative(),
     toRowOffset: z.number().int(),
     toColumnOffset: z.number().int(),
+    /// True when the file carried a real `<xdr:to>` marker: its offset
+    /// clamps at the cell edge (Excel behavior for broken writers) instead
+    /// of walking past it like synthesized oneCellAnchor/absoluteAnchor
+    /// encodings.
+    explicitTo: z.boolean().optional(),
   })
   .strict()
 const chartAxisInfoSchema = z
@@ -277,6 +392,8 @@ const chartAxisInfoSchema = z
     majorGridlines: z.boolean(),
     /// c:delete — the axis scales series but is not drawn.
     hidden: z.boolean().default(false),
+    /// c:scaling/c:orientation val="maxMin".
+    reversed: z.boolean().default(false),
   })
   .strict()
 
@@ -284,7 +401,11 @@ const visualObjectSchema = z
   .object({
     id: z.string().min(1),
     sheetId: z.string().min(1),
-    kind: z.enum(['chart', 'image', 'shape']),
+    /// `ole`: a worksheet <oleObject> embed, read-only — rendered from its
+    /// cached preview picture (mediaPath) or as an icon+caption placeholder.
+    /// `slicer`: a slicer/timeline graphicFrame, read-only — drawn as a
+    /// bordered frame with the caption (`text`) in place of the real control.
+    kind: z.enum(['chart', 'image', 'shape', 'ole', 'slicer']),
     anchor: drawingAnchorSchema,
     chart: z
       .object({
@@ -295,8 +416,14 @@ const visualObjectSchema = z
           z
             .object({
               name: z.string(),
+              /// `c:tx` cell reference when the name has no cached text; the
+              /// renderer resolves it from the live cells.
+              nameRef: z.string().optional(),
               categories: z.array(z.string()),
               values: z.array(z.number().finite()),
+              /// Blank value-cache slots (values hold a 0 filler there);
+              /// the chart-level dispBlanksAs decides how they plot.
+              blanks: z.array(z.number().int().nonnegative()).optional(),
               numberFormat: z.string().optional(),
               /// numCache formatCode of the category (or scatter X) data.
               categoryFormat: z.string().optional(),
@@ -330,9 +457,46 @@ const visualObjectSchema = z
                 .optional(),
               /// spPr/a:ln color; "none" for an explicit noFill line.
               lineColor: z.string().optional(),
+              /// spPr/a:ln/@w in CSS px (EMU / 12700 pt · 96/72).
+              lineWidth: z.number().finite().optional(),
               smooth: z.boolean().optional(),
               /// c:marker symbol — "none" hides scatter/line markers.
               marker: z.string().optional(),
+              /// Parent plot group (barChart, lineChart, ...) of the series.
+              plot: z.string().optional(),
+              /// Label mode the series resolves to: its own `c:dLbls`, else
+              /// the plot element's.
+              dataLabels: z
+                .enum(['none', 'value', 'percent', 'category-percent', 'category-value-percent'])
+                .optional(),
+              /// Per-point `c:dLbl`: value shown, plus the manualLayout
+              /// offset from the default anchor (fractions of the chart).
+              pointLabels: z
+                .array(
+                  z
+                    .object({
+                      index: z.number().int().nonnegative(),
+                      /// Absent: the series label mode applies to this point.
+                      showVal: z.boolean().optional(),
+                      offsetX: z.number().finite().optional(),
+                      offsetY: z.number().finite().optional(),
+                    })
+                    .strict(),
+                )
+                .optional(),
+              /// First outer multiLvlStrCache level; start/end index the
+              /// compacted `categories` (end exclusive).
+              categoryGroups: z
+                .array(
+                  z
+                    .object({
+                      label: z.string(),
+                      start: z.number().int().nonnegative(),
+                      end: z.number().int().nonnegative(),
+                    })
+                    .strict(),
+                )
+                .optional(),
             })
             .strict(),
         ),
@@ -346,7 +510,11 @@ const visualObjectSchema = z
           })
           .strict()
           .optional(),
-        dataLabels: z.enum(['none', 'value', 'percent', 'category-percent']).optional(),
+        /// 'category-value-percent' is read-only (parsed from files that show
+        /// all three); edits write the four writable modes.
+        dataLabels: z
+          .enum(['none', 'value', 'percent', 'category-percent', 'category-value-percent'])
+          .optional(),
         /// `c:dLblPos` and `c:numFmt` on the plot-level data labels.
         dataLabelPosition: z.enum(['center', 'inside-end', 'outside-end']).optional(),
         dataLabelFormat: z.string().optional(),
@@ -374,6 +542,10 @@ const visualObjectSchema = z
         secondaryYAxis: chartAxisInfoSchema.optional(),
         /// c:scatterStyle — whether scatter points connect with lines.
         scatterStyle: z.string().optional(),
+        /// Plot-level c:lineChart/c:marker flag; per-series symbols refine it.
+        lineMarkers: z.boolean().optional(),
+        /// `c:dispBlanksAs` — how blank cells plot (OOXML defaults to zero).
+        dispBlanksAs: z.enum(['gap', 'zero', 'span']).optional(),
         /// c:title/c:txPr//a:defRPr shorthand.
         titleStyle: z
           .object({
@@ -389,11 +561,41 @@ const visualObjectSchema = z
     chartPath: z.string().optional(),
     mediaPath: z.string().optional(),
     mediaType: z.string().optional(),
+    /// a:blip/a:alphaModFix amt as 0..1 picture opacity.
+    opacity: z.number().min(0).max(1).optional(),
+    /// a:srcRect as 0..1 fractions cut from each source edge.
+    crop: z
+      .object({
+        left: z.number().min(-1).max(1),
+        top: z.number().min(-1).max(1),
+        right: z.number().min(-1).max(1),
+        bottom: z.number().min(-1).max(1),
+      })
+      .strict()
+      .optional(),
+    /// spPr/a:blipFill on a shape — the image painted clipped to the
+    /// preset geometry.
+    fillMediaPath: z.string().optional(),
+    fillMediaType: z.string().optional(),
     /// Renderer-only: preview bytes for images added this session (not yet in
     /// the package); the sidecar never emits this.
     mediaDataUrl: z.string().optional(),
     name: z.string().optional(),
     shapeType: z.string().optional(),
+    /// a:custGeom pathLst as one SVG path string in its own path coordinate
+    /// space; the renderer scales it into the anchor frame.
+    customPath: z
+      .object({
+        width: z.number().finite().positive(),
+        height: z.number().finite().positive(),
+        d: z.string(),
+        /// Every subpath is stroke-only (a:path fill="none").
+        strokeOnly: z.boolean().optional(),
+        /// Fillable subpaths only; present when subpath fills are mixed.
+        fillD: z.string().optional(),
+      })
+      .strict()
+      .optional(),
     fillColor: z.string().optional(),
     /// xdr:style fillRef resolved against a theme fillStyleLst gradient;
     /// fillColor stays the flat approximation.
@@ -430,6 +632,9 @@ const visualObjectSchema = z
     textColor: z.string().optional(),
     /// a:bodyPr anchor — t | ctr | b.
     textAnchor: z.string().optional(),
+    /// a:bodyPr vertOverflow / horzOverflow — overflow (default) | clip | ellipsis.
+    textVertOverflow: z.string().optional(),
+    textHorzOverflow: z.string().optional(),
     /// txBody paragraphs with per-run styling; `text` stays the flat join.
     paragraphs: z
       .array(
@@ -454,6 +659,8 @@ const visualObjectSchema = z
       .max(200)
       .optional(),
     text: z.string().optional(),
+    /// <oleObject progId> of an `ole` visual (e.g. "Word.Document.12").
+    progId: z.string().optional(),
     rotation: z.number().finite().optional(),
     /// a:xfrm ext in EMU — a rotated shape's true unrotated frame (the
     /// anchor stores rotated bounds, centered on the shape center).
@@ -469,6 +676,17 @@ const visualObjectSchema = z
   })
   .strict()
 
+/// The gateway's per-entry patch cap: only entries it patches must fit in
+/// memory. Large, densely styled worksheets routinely exceed 256 MiB as XML
+/// even when the .xlsx itself is modest (the 88k-row suppliers fixture is
+/// about 307 MiB). 500 MiB keeps those editable while retaining a finite
+/// decompression-bomb / main-process-memory bound — deliberately below V8's
+/// maximum string length (536,870,888 bytes), so an oversized entry fails
+/// with a clear message instead of blowing up mid-stringify. Shared so the
+/// renderer pre-rejects edits on a worksheet whose XML can never be
+/// rewritten, instead of letting Apply succeed and every save fail.
+export const MAX_PATCH_ENTRY_BYTES = 500 * 1024 * 1024
+
 export const workbookFileSchema = z
   .object({
     sessionId: z.string().uuid(),
@@ -477,6 +695,8 @@ export const workbookFileSchema = z
     /// that never touched disk.
     path: z.string().min(1).optional(),
     sha256: z.string().length(64),
+    /// Byte size of the opened snapshot; gates the IronCalc recalc fallback.
+    fileBytes: z.number().int().nonnegative().optional(),
     entryCount: z.number().int().nonnegative(),
     sheets: z.array(worksheetMetadataSchema).min(1),
     /// workbookView/@activeTab — sheet index Excel had active on save.
@@ -496,9 +716,14 @@ export const workbookFileSchema = z
         .strict(),
     ),
     readOnly: z.boolean(),
-    /// Converted import (.xls/.csv): the first save opens a Save As dialog,
+    /// Converted .xls import: the first save opens a Save As dialog,
     /// so background flows (AutoSave) must not trigger mode 'save'.
     needsSaveAs: z.boolean().optional(),
+    /// CSV session: the original .csv on disk. Save keeps the CSV identity —
+    /// the renderer sends csvContent with the save and the main process
+    /// writes it back here. Background flows (AutoSave, crash recovery)
+    /// stand down: silently flattening the file would lose data.
+    csvPath: z.string().min(1).optional(),
     /// Session opened from a restored crash-recovery copy: Save silently
     /// writes back to the original file, and the 30s recovery writer stands
     /// down (it would overwrite the copy the sidecar is streaming from).
@@ -510,7 +735,18 @@ export const workbookFileSchema = z
     /// Theme palette as #RRGGBB in theme index order [lt1, dk1, lt2, dk2,
     /// accent1-6, hlink, folHlink]; absent without a readable theme.
     themeColors: z.array(z.string()).length(12).optional(),
-    themeFonts: z.object({ major: z.string(), minor: z.string() }).strict().optional(),
+    themeFonts: z
+      .object({
+        major: z.string(),
+        minor: z.string(),
+        /// minorFont <a:ea typeface> when non-empty (CJK scheme-font face).
+        minorEa: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    /// Literal cached <name val> of the Normal (cellXfs[0]) font before
+    /// theme-scheme substitution; column-width MDW follows this face.
+    normalFontName: z.string().optional(),
     /// workbook.xml <workbookProtection>; absent when the element is missing.
     workbookProtection: z
       .object({ lockStructure: z.boolean(), hasPassword: z.boolean() })
@@ -563,6 +799,51 @@ const workbookCellRecordSchema = z
   })
   .strict()
 
+/// OOXML customFilter comparison operators; absent means "equal". Wildcard
+/// matching (contains / begins with) is encoded in the value string itself.
+const customFilterOperatorSchema = z.enum([
+  'equal',
+  'notEqual',
+  'greaterThan',
+  'greaterThanOrEqual',
+  'lessThan',
+  'lessThanOrEqual',
+])
+
+/// One filter column's criteria — shared by the save snapshot
+/// (WorkbookFilterState) and the open-time restore (WorkbookRangeResult).
+const filterColumnStateSchema = z
+  .object({
+    /// 0-based offset from the filter range's first column, per OOXML.
+    colId: z.number().int().nonnegative().max(16_383),
+    /// Filter values are cell texts, so they share the cell's 32,767 cap.
+    values: z.array(z.string().max(32_767)).max(10_000).optional(),
+    blank: z.boolean().optional(),
+    customs: z
+      .object({
+        and: z.boolean().optional(),
+        filters: z
+          .array(
+            z
+              .object({
+                val: z.union([z.string().max(32_767), z.number().finite()]),
+                operator: customFilterOperatorSchema.optional(),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(2),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (column) =>
+      column.values !== undefined || column.blank !== undefined || column.customs !== undefined,
+    { message: 'A filter column needs values, a blank flag, or custom criteria.' },
+  )
+
 export const workbookRangeResultSchema = z
   .object({
     cells: z.array(workbookCellRecordSchema).max(MAX_RANGE_CELLS),
@@ -597,6 +878,9 @@ export const workbookRangeResultSchema = z
       .max(MAX_RANGE_CELLS),
     conditionalRules: z.array(conditionalRuleSchema).max(MAX_RANGE_CELLS),
     autoFilter: cellAreaSchema.nullable(),
+    /// The autoFilter's live per-column criteria; sheet-wide, complete-only,
+    /// empty when the filter has none (or the sheet has no filter).
+    autoFilterColumns: z.array(filterColumnStateSchema).max(1_000),
     dataValidations: z
       .array(
         z
@@ -632,6 +916,65 @@ export const workbookRangeResultSchema = z
     /// sheet-wide, complete-only.
     rowBreaks: z.array(z.number().int().nonnegative()).max(1_024),
     colBreaks: z.array(z.number().int().nonnegative()).max(1_024),
+    /// Saved print settings (pageSetup / pageMargins / printOptions /
+    /// headerFooter); sheet-wide, complete-only. Absent/null when the sheet
+    /// declares none (also for stale sidecar binaries).
+    pageSetup: z
+      .object({
+        orientation: z.enum(['portrait', 'landscape']).optional(),
+        paperSize: z.number().int().min(1).max(256).optional(),
+        scale: z.number().int().min(10).max(400).optional(),
+        fitToWidth: z.number().int().min(0).max(32_767).optional(),
+        fitToHeight: z.number().int().min(0).max(32_767).optional(),
+        fitToPage: z.boolean().optional(),
+        /// Inches.
+        margins: z
+          .object({
+            left: z.number().min(0).max(10),
+            right: z.number().min(0).max(10),
+            top: z.number().min(0).max(10),
+            bottom: z.number().min(0).max(10),
+            header: z.number().min(0).max(10),
+            footer: z.number().min(0).max(10),
+          })
+          .strict()
+          .optional(),
+        printGridlines: z.boolean().optional(),
+        printHeadings: z.boolean().optional(),
+        /// Excel-encoded odd header/footer (&L/&C/&R sections, field codes).
+        oddHeader: z.string().min(1).max(500).optional(),
+        oddFooter: z.string().min(1).max(500).optional(),
+        /// headerFooter/@differentOddEven and @differentFirst: even pages
+        /// print the even* texts, page 1 the first* texts.
+        differentOddEven: z.boolean().optional(),
+        differentFirst: z.boolean().optional(),
+        /// headerFooter/@scaleWithDoc="0": the header/footer keeps its size
+        /// instead of following the print scale (Excel's default).
+        headerFooterFixedSize: z.boolean().optional(),
+        evenHeader: z.string().min(1).max(500).optional(),
+        evenFooter: z.string().min(1).max(500).optional(),
+        firstHeader: z.string().min(1).max(500).optional(),
+        firstFooter: z.string().min(1).max(500).optional(),
+        /// `&G` pictures (legacyDrawingHF): `id` is a readWorkbookMedia key,
+        /// `position` the VML slot (L/C/R × H/F, optional EVEN/FIRST suffix).
+        headerFooterPictures: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(64),
+                position: z.string().regex(HEADER_FOOTER_PICTURE_POSITION),
+                widthPt: z.number().positive().max(2_000),
+                heightPt: z.number().positive().max(2_000),
+                mediaType: z.string().regex(/^image\//),
+              })
+              .strict(),
+          )
+          .max(18)
+          .optional(),
+      })
+      .strict()
+      .nullish()
+      .default(null),
     /// Allow-edit ranges (<protectedRanges>); sheet-wide, complete-only.
     protectedRanges: z
       .array(
@@ -889,6 +1232,20 @@ export const workbookStructuralOpSchema = z.union([
   z
     .object({
       sheetId: z.string().min(1),
+      kind: z.literal('set-col-style'),
+      start: z.number().int().nonnegative().max(1_048_575),
+      end: z.number().int().nonnegative().max(1_048_575),
+      /// Column default format (Excel select-all/full-column semantics): new
+      /// cells in the span inherit it, at any row, forever (alpha ledger r124).
+      style: workbookStyleEditSchema,
+    })
+    .strict()
+    .refine((op) => op.end >= op.start && op.end - op.start < 100_000, {
+      message: 'Invalid axis span.',
+    }),
+  z
+    .object({
+      sheetId: z.string().min(1),
       kind: z.enum(['set-rows-hidden', 'set-cols-hidden']),
       start: z.number().int().nonnegative().max(1_048_575),
       end: z.number().int().nonnegative().max(1_048_575),
@@ -983,6 +1340,8 @@ export const workbookPageSetupStateSchema = z
     printGridlines: z.boolean().optional(),
     printHeadings: z.boolean().optional(),
     showGridlines: z.boolean().optional(),
+    /// sheetView/@zoomScale, normal-view zoom percent (alpha r165).
+    zoomScale: z.number().int().min(10).max(400).optional(),
     showFormulas: z.boolean().optional(),
     showHeadings: z.boolean().optional(),
     printArea: z.union([z.string().min(1).max(255), z.null()]).optional(),
@@ -1015,11 +1374,17 @@ export const workbookHyperlinkEditSchema = z
   })
   .strict()
 
+/// Caps for chart strings that carry cell-derived text on the save wire.
+/// The save-request emitters clamp to these, so a long cell can never fail
+/// the whole save with a schema rejection.
+export const CHART_TEXT_WIRE_MAX = 255
+export const CHART_CATEGORY_WIRE_MAX = 1_024
+
 export const workbookChartEditSchema = z
   .object({
     /// Constrained to the charts directory — the renderer chooses the path.
     chartPath: z.string().regex(/^xl\/charts\/[A-Za-z0-9._-]+\.xml$/),
-    title: z.string().max(255).optional(),
+    title: z.string().max(CHART_TEXT_WIRE_MAX).optional(),
     chartType: z.enum(['column', 'bar', 'line', 'area', 'pie', 'doughnut']).optional(),
     seriesColors: z.record(z.string().regex(/^[0-9]{1,3}$/), hexColorSchema).optional(),
     /// 'none' removes the legend; a side re-positions (creating it if needed).
@@ -1033,8 +1398,8 @@ export const workbookChartEditSchema = z
     /// null removes that axis title. Axis-based charts only.
     axisTitles: z
       .object({
-        category: z.string().max(255).nullable().optional(),
-        value: z.string().max(255).nullable().optional(),
+        category: z.string().max(CHART_TEXT_WIRE_MAX).nullable().optional(),
+        value: z.string().max(CHART_TEXT_WIRE_MAX).nullable().optional(),
       })
       .strict()
       .optional(),
@@ -1078,10 +1443,10 @@ export const workbookChartEditSchema = z
       .array(
         z
           .object({
-            name: z.string().max(255),
+            name: z.string().max(CHART_TEXT_WIRE_MAX),
             values: z.array(z.number().finite()).max(1_000),
             valuesRef: z.string().max(512).optional(),
-            categories: z.array(z.string().max(255)).max(1_000).optional(),
+            categories: z.array(z.string().max(CHART_CATEGORY_WIRE_MAX)).max(1_000).optional(),
             categoriesRef: z.string().max(512).optional(),
             color: hexColorSchema.optional(),
           })
@@ -1097,11 +1462,11 @@ export const workbookChartEditSchema = z
         z
           .object({
             index: z.number().int().min(0).max(255),
-            name: z.string().max(255).optional(),
+            name: z.string().max(CHART_TEXT_WIRE_MAX).optional(),
             valuesRef: z.string().max(512).optional(),
             values: z.array(z.number().finite()).max(1_000).optional(),
             categoriesRef: z.string().max(512).optional(),
-            categories: z.array(z.string().max(255)).max(1_000).optional(),
+            categories: z.array(z.string().max(CHART_CATEGORY_WIRE_MAX)).max(1_000).optional(),
           })
           .strict()
           .refine(
@@ -1162,48 +1527,6 @@ export const workbookVisualEditSchema = z
   .refine((edit) => edit.remove === true || edit.anchor !== undefined, {
     message: 'A visual edit needs a removal or a new anchor.',
   })
-
-/// OOXML customFilter comparison operators; absent means "equal". Wildcard
-/// matching (contains / begins with) is encoded in the value string itself.
-const customFilterOperatorSchema = z.enum([
-  'equal',
-  'notEqual',
-  'greaterThan',
-  'greaterThanOrEqual',
-  'lessThan',
-  'lessThanOrEqual',
-])
-
-const filterColumnStateSchema = z
-  .object({
-    /// 0-based offset from the filter range's first column, per OOXML.
-    colId: z.number().int().nonnegative().max(16_383),
-    values: z.array(z.string().max(255)).max(10_000).optional(),
-    blank: z.boolean().optional(),
-    customs: z
-      .object({
-        and: z.boolean().optional(),
-        filters: z
-          .array(
-            z
-              .object({
-                val: z.union([z.string().max(255), z.number().finite()]),
-                operator: customFilterOperatorSchema.optional(),
-              })
-              .strict(),
-          )
-          .min(1)
-          .max(2),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict()
-  .refine(
-    (column) =>
-      column.values !== undefined || column.blank !== undefined || column.customs !== undefined,
-    { message: 'A filter column needs values, a blank flag, or custom criteria.' },
-  )
 
 /// Declarative per-sheet filter snapshot taken at save time. `filter: null`
 /// removes the sheet's autoFilter; `visibilityRange` rows not listed in
@@ -1292,13 +1615,13 @@ export const workbookVisualAddSchema = z
           'doughnut',
           'combo',
         ]),
-        title: z.string().max(255),
+        title: z.string().max(CHART_TEXT_WIRE_MAX),
         series: z
           .array(
             z
               .object({
-                name: z.string().max(255),
-                categories: z.array(z.string().max(255)).max(1_000),
+                name: z.string().max(CHART_TEXT_WIRE_MAX),
+                categories: z.array(z.string().max(CHART_CATEGORY_WIRE_MAX)).max(1_000),
                 values: z.array(z.number().finite()).max(1_000),
                 valuesRef: z.string().max(512).optional(),
                 categoriesRef: z.string().max(512).optional(),
@@ -1320,8 +1643,8 @@ export const workbookVisualAddSchema = z
         dataLabelFormat: z.string().max(64).optional(),
         axisTitles: z
           .object({
-            category: z.string().max(255).optional(),
-            value: z.string().max(255).optional(),
+            category: z.string().max(CHART_TEXT_WIRE_MAX).optional(),
+            value: z.string().max(CHART_TEXT_WIRE_MAX).optional(),
           })
           .strict()
           .optional(),
@@ -1587,9 +1910,19 @@ export const workbookSaveEditsChunkSchema = z
     transferId: z.string().uuid(),
     /// 0-based slice index; chunks must arrive in order.
     seq: z.number().int().nonnegative(),
-    edits: z.array(workbookCellEditSchema).min(1).max(SAVE_EDITS_CHUNK_MAX),
+    /// JSON-serialized WorkbookCellEdit[] — a flat string crosses the context
+    /// bridge and the IPC hop in milliseconds where a live array of the same
+    /// edits costs seconds; the main process parses and validates it against
+    /// saveEditsChunkArraySchema before storing.
+    editsJson: z.string().min(2).max(SAVE_EDITS_CHUNK_JSON_MAX),
   })
   .strict()
+
+/// Validates a chunk's parsed editsJson in the main process.
+export const saveEditsChunkArraySchema = z
+  .array(workbookCellEditSchema)
+  .min(1)
+  .max(SAVE_EDITS_CHUNK_MAX)
 
 /// Renderer-initiated cleanup when an upload or its save fails: frees the
 /// accumulated edits immediately instead of waiting for the idle expiry.
@@ -1608,6 +1941,9 @@ export const workbookSaveRequestSchema = z
     /// change is the workbook bytes themselves, so the request is valid with
     /// an otherwise empty payload (like an explicit Save As).
     restoreWriteBack: z.boolean().optional(),
+    /// CSV session in-place save: the active sheet serialized as CSV text.
+    /// Written back to the session's original .csv after the xlsx save.
+    csvContent: z.string().max(MAX_CSV_EXPORT_CHARS).optional(),
     edits: z.array(workbookCellEditSchema).max(MAX_SAVE_EDITS),
     /// Edit sets above MAX_SAVE_EDITS arrive through the chunked transfer
     /// (saveEditsBegin/saveEditsChunk) instead of inline: the request then
@@ -1800,7 +2136,15 @@ export const workbookSaveRequestSchema = z
   })
 
 export const workbookSaveResultSchema = z.union([
-  z.object({ canceled: z.literal(true) }).strict(),
+  z
+    .object({
+      canceled: z.literal(true),
+      /// The user picked the CSV format in the Save As dialog: no xlsx was
+      /// written; the renderer serializes the active sheet to this path via
+      /// the CSV export channel instead.
+      csvSaveAsPath: z.string().min(1).optional(),
+    })
+    .strict(),
   z
     .object({
       canceled: z.literal(false),
@@ -2036,6 +2380,8 @@ export type WorkbookRangeRequest = z.infer<typeof workbookRangeRequestSchema>
 export type WorkbookFormulaCellsRequest = z.infer<typeof workbookFormulaCellsRequestSchema>
 export type WorkbookFormulaCellsResult = z.infer<typeof workbookFormulaCellsResultSchema>
 export type WorkbookRangeResult = z.infer<typeof workbookRangeResultSchema>
+/// The sheet's saved print settings as parsed from the file.
+export type WorkbookPagePrintSettings = NonNullable<WorkbookRangeResult['pageSetup']>
 export type WorkbookRecalcRequest = z.infer<typeof workbookRecalcRequestSchema>
 export type WorkbookRecalcResult = z.infer<typeof workbookRecalcResultSchema>
 export type WorkbookMediaRequest = z.infer<typeof workbookMediaRequestSchema>
@@ -2058,7 +2404,7 @@ export type WorkbookConditionalRule = z.infer<typeof conditionalRuleSchema>
 // ---- AI settings + chat/stream: canonical types live in @genoffice/ai-provider,
 // shared with apps/docs. Validated here like every other renderer→main request in
 // this file; the validated shape is cast to AiSettings at the main-process call
-// site, which always has exactly the 5 known provider keys once merged through
+// site, which has every known provider key once merged through
 // resolveAiSettings/defaultAiSettings. ----
 
 const aiProviderConfigSchema = z
@@ -2066,6 +2412,16 @@ const aiProviderConfigSchema = z
     apiKey: z.string(),
     model: z.string(),
     baseUrl: z.string().optional(),
+    cliPath: z.string().optional(),
+  })
+  .strict()
+
+const aiMediaProviderConfigSchema = z
+  .object({
+    apiKey: z.string(),
+    baseUrl: z.string().optional(),
+    imageModel: z.string(),
+    analysisModel: z.string(),
   })
   .strict()
 
@@ -2074,6 +2430,28 @@ export const aiSettingsInputSchema = z
     provider: z.string().min(1),
     providers: z.record(z.string(), aiProviderConfigSchema),
     gskToolsEnabled: z.boolean().optional(),
+    media: z
+      .object({
+        imageProvider: z.string().min(1).optional(),
+        analysisProvider: z.string().min(1).optional(),
+        videoAnalysisProvider: z.string().min(1).optional(),
+        // pre-catalog single choice, still accepted on read
+        provider: z.string().min(1).optional(),
+        providers: z.record(z.string(), aiMediaProviderConfigSchema),
+      })
+      .strict()
+      .optional(),
+    search: z
+      .object({
+        provider: z.string().min(1),
+        providers: z.record(z.string(), z.object({ apiKey: z.string() }).strict()),
+      })
+      .strict()
+      .optional(),
+    // bounds are enforced by clampMaxOutputTokens on read; the schema only
+    // rejects nonsense (this object is .strict(), so an omitted key here would
+    // make the whole settings save fail)
+    maxOutputTokens: z.number().int().positive().optional(),
   })
   .strict()
 
@@ -2115,6 +2493,8 @@ const agentMessageSchema = z.union([
       role: z.literal('assistant'),
       text: z.string(),
       toolCalls: z.array(agentToolCallSchema).optional(),
+      // captured model thinking, echoed back for interleaved-thinking models
+      reasoning: z.string().optional(),
     })
     .strict(),
   z.object({ role: z.literal('tool'), results: z.array(agentToolResultSchema) }).strict(),
@@ -2142,6 +2522,7 @@ export const aiChatRequestSchema = z
 export const aiStreamRequestSchema = z
   .object({
     requestId: z.string().min(1),
+    sessionId: z.string().uuid().optional(),
     settings: aiSettingsInputSchema,
     system: z.string(),
     messages: z.array(agentMessageSchema).max(MAX_AI_MESSAGES),
@@ -2153,6 +2534,13 @@ export const aiStreamRequestSchema = z
 export type AiSettingsInput = z.infer<typeof aiSettingsInputSchema>
 export type AiChatRequestInput = z.infer<typeof aiChatRequestSchema>
 export type AiStreamRequestInput = z.infer<typeof aiStreamRequestSchema>
+
+const pdfPageVariantSchema = z
+  .object({
+    headerTemplate: z.string().min(1).max(MAX_PDF_TEMPLATE_CHARS).optional(),
+    footerTemplate: z.string().min(1).max(MAX_PDF_TEMPLATE_CHARS).optional(),
+  })
+  .strict()
 
 /// A rendered print job: the renderer lays the sheet out as HTML, the main
 /// process turns it into a PDF via a hidden window.
@@ -2181,6 +2569,17 @@ export const workbookExportPdfRequestSchema = z
       })
       .strict(),
     scale: z.number().min(0.1).max(2),
+    /// Chromium print header/footer templates (rendered in the margin
+    /// boxes; `pageNumber`/`totalPages` spans resolve per page). These are
+    /// the odd-page (default) templates.
+    headerTemplate: z.string().min(1).max(MAX_PDF_TEMPLATE_CHARS).optional(),
+    footerTemplate: z.string().min(1).max(MAX_PDF_TEMPLATE_CHARS).optional(),
+    /// Excel's differentFirst / differentOddEven variants. Presence means
+    /// the variant is active (an empty object prints page 1 / even pages
+    /// with no header or footer); the main process renders them in extra
+    /// printToPDF passes and stitches the pages together.
+    firstPage: pdfPageVariantSchema.optional(),
+    evenPages: pdfPageVariantSchema.optional(),
   })
   .strict()
 
@@ -2191,6 +2590,82 @@ export const workbookExportPdfResultSchema = z.union([
 
 export type WorkbookExportPdfRequest = z.infer<typeof workbookExportPdfRequestSchema>
 export type WorkbookExportPdfResult = z.infer<typeof workbookExportPdfResultSchema>
+
+/// CSV export of the active sheet: the renderer serializes display values,
+/// the main process runs the loss warning + save dialog and writes the bytes.
+export const workbookExportCsvRequestSchema = z
+  .object({
+    fileName: z.string().min(1).max(255),
+    content: z.string().max(MAX_CSV_EXPORT_CHARS),
+    /// The exported sheet carries formulas — CSV keeps their values only, so
+    /// the main process offers Save As .xlsx first (Excel's warning flow).
+    hasFormulas: z.boolean(),
+    /// Set when the workbook has more sheets than the exported one.
+    activeSheetName: z.string().max(255).optional(),
+    /// Write straight to this path (from the Save As dialog's CSV pick)
+    /// instead of opening another save dialog.
+    targetPath: z.string().min(1).optional(),
+  })
+  .strict()
+
+export const workbookExportCsvResultSchema = z.union([
+  z
+    .object({
+      canceled: z.literal(true),
+      /// The user chose "Save as .xlsx" in the formula-loss warning; the
+      /// renderer routes into the regular Save As flow instead.
+      saveAsXlsxInstead: z.boolean().optional(),
+    })
+    .strict(),
+  z.object({ canceled: z.literal(false), path: z.string().min(1) }).strict(),
+])
+
+export type WorkbookExportCsvRequest = z.infer<typeof workbookExportCsvRequestSchema>
+export type WorkbookExportCsvResult = z.infer<typeof workbookExportCsvResultSchema>
+
+/// AI create_document: a new standalone file written into the default save
+/// folder (no dialog) under a unique sanitized name and opened in a new tab.
+/// xlsx/csv carry one worksheet's serialized CSV in content (the renderer
+/// reads the grid, mirroring the manual CSV export); docx/pdf/md carry
+/// AI-authored HTML/Markdown, routed by the shell into the docs-owned
+/// creation flow (#960).
+export const workbookCreateDocumentRequestSchema = z
+  .object({
+    type: z.enum(['xlsx', 'csv', 'docx', 'pdf', 'md', 'html']),
+    title: z.string().min(1).max(MAX_CREATE_DOCUMENT_TITLE_CHARS),
+    content: z.string().min(1).max(MAX_CSV_EXPORT_CHARS),
+    /// xlsx only: the worksheet name inside the created workbook (the source
+    /// sheet's name, so it already satisfies Excel's naming rules).
+    sheetName: z.string().min(1).max(31).optional(),
+  })
+  .strict()
+  .superRefine((request, ctx) => {
+    if (
+      request.type !== 'xlsx' &&
+      request.type !== 'csv' &&
+      request.content.length > MAX_CREATE_DOCUMENT_CONTENT_CHARS
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['content'],
+        message: `content must not exceed ${MAX_CREATE_DOCUMENT_CONTENT_CHARS} characters for docx/pdf/md`,
+      })
+    }
+  })
+
+/// Loose result shape (ok: boolean, not a literal union) so the shell can
+/// wire the docs-owned creator in directly — its CreateDocumentResult is
+/// structurally identical.
+export const workbookCreateDocumentResultSchema = z
+  .object({
+    ok: z.boolean(),
+    path: z.string().min(1).optional(),
+    error: z.string().optional(),
+  })
+  .strict()
+
+export type WorkbookCreateDocumentRequest = z.infer<typeof workbookCreateDocumentRequestSchema>
+export type WorkbookCreateDocumentResult = z.infer<typeof workbookCreateDocumentResultSchema>
 
 // ---- Chat attachments (local files fed to the agent via tools; same structure
 // as apps/docs and apps/slides) ----
@@ -2236,6 +2711,12 @@ export interface AttachmentImageResult {
 
 export type UiTheme = 'light' | 'dark' | 'system'
 
+/** shell-wide AutoSave default; updatedAt is 0 until the user has ever set it */
+export interface AutoSaveDefault {
+  on: boolean
+  updatedAt: number
+}
+
 /** Autosave-recovery prompt raised by main during workbook open (strings pre-localized). */
 export interface RecoveryPromptPayload {
   title: string
@@ -2261,6 +2742,12 @@ export interface DesktopApi {
   getTheme(): Promise<UiTheme>
   /** theme switched from the shell home page */
   onThemeChanged(handler: (theme: UiTheme) => void): () => void
+  /** shell-wide AutoSave default (see useAutoSavePref) */
+  getAutoSaveDefault(): Promise<AutoSaveDefault>
+  onAutoSaveDefaultChanged(handler: (value: AutoSaveDefault) => void): () => void
+  /** AI panel text size + chat-input spellcheck (Settings → General in the shell) */
+  getAiPanelPrefs(): Promise<AiPanelPrefs>
+  onAiPanelPrefsChanged(handler: (prefs: AiPanelPrefs) => void): () => void
   /**
    * the user pressed the shell chrome (tab strip) or started dragging the
    * window — no DOM event or blur reaches this view, so the shell relays the
@@ -2268,6 +2755,10 @@ export interface DesktopApi {
    */
   onChromePressed(handler: () => void): () => void
   selectWorkbook(): Promise<WorkbookFile | null>
+  /** multi-select xlsx picker; each file opens a secondary sidecar session for merge reads */
+  selectWorkbooksForMerge(): Promise<WorkbookFile[] | null>
+  /** open explicit spreadsheet paths (chat attachments) as merge-source sessions */
+  openWorkbooksForMerge(paths: string[]): Promise<WorkbookFile[] | null>
   readWorkbookRange(request: WorkbookRangeRequest): Promise<WorkbookRangeResult>
   readWorkbookFormulas(request: WorkbookFormulaCellsRequest): Promise<WorkbookFormulaCellsResult>
   recalcWorkbook(request: WorkbookRecalcRequest): Promise<WorkbookRecalcResult>
@@ -2296,6 +2787,12 @@ export interface DesktopApi {
     baseName: string,
   ): Promise<{ renamed: boolean; name?: string }>
   exportPdf(request: WorkbookExportPdfRequest): Promise<WorkbookExportPdfResult>
+  exportCsv(request: WorkbookExportCsvRequest): Promise<WorkbookExportCsvResult>
+  /// First Save of a CSV session: native "keep this format?" dialog.
+  confirmCsvSave(): Promise<'csv' | 'xlsx' | 'cancel'>
+  /// AI create_document: write a new standalone file into the default save
+  /// folder (no dialog) and open it in a new tab.
+  createDocument(request: WorkbookCreateDocumentRequest): Promise<WorkbookCreateDocumentResult>
   closeWorkbook(sessionId: string): Promise<void>
   openExternal(url: string): Promise<void>
   /// Application-menu File commands (Open/Save/Save As); returns unsubscribe.
@@ -2355,7 +2852,7 @@ export interface DesktopApi {
   getPathForFile(file: File): string
 }
 
-export type MenuAction = 'open' | 'save' | 'save-as' | 'export-pdf' | 'undo' | 'redo'
+export type MenuAction = 'open' | 'save' | 'save-as' | 'export-pdf' | 'export-csv' | 'undo' | 'redo'
 
 export interface WebSearchResult {
   results: Array<{ title: string; url: string; snippet: string }>

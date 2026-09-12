@@ -1,4 +1,6 @@
 export * from './types'
+export { deobfuscateOdttf, isSfnt, parseFontTable, readEmbeddedFonts } from './font-table'
+export { decodeEntities } from './parse-xml-text'
 export { parseDocx, styleRunFormat, type ParseExtras } from './parse'
 export {
   saveDocx,
@@ -41,11 +43,13 @@ export {
   buildLineParagraphXml,
   LINE_KINDS,
   type TextboxSizePatch,
+  type CellParaPatch,
   type CellTextsPatch,
   type FieldTextPatch,
   type GenerateContext,
   type ImagePatch,
   type TextboxParaPatch,
+  type TextboxParasPatchSet,
   type TableGenOptions,
   type TocEntry,
 } from './generate'
@@ -55,6 +59,7 @@ export {
   patchChartWorkbookXlsxBase64,
   parseChartPartXml,
   patchChartPartXml,
+  lumHex,
   CHART_WORKBOOK_REL_TYPE,
   type ChartPatch,
   type ChartSeriesPatch,

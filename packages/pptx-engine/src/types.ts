@@ -51,6 +51,8 @@ export type Fill =
       type: 'gradient'
       stops: Array<{ pos: number; color: ResolvedColor }>
       angle?: number
+      /** <a:lin scaled="1">: the angle stretches with the fill box aspect (45° runs corner-to-corner) */
+      scaled?: boolean
       /** <a:path path>: circle/rect/shape = radial/path gradient (linear by default) */
       path?: 'circle' | 'rect' | 'shape'
       /** <a:fillToRect> insets as fractions (may exceed 0..1); defines the gradient focus */
@@ -110,7 +112,19 @@ export interface GlowEffect {
   radius: number
 }
 
-/** Outer shadow <a:outerShdw> (the most common effectLst entry) */
+/** Reflection <a:reflection>: flipped fading copy below the shape */
+export interface ReflectionEffect {
+  /** Blur radius (EMU) */
+  blurRad: number
+  /** Opacity at the touching edge (0..1, <a:reflection stA>) */
+  startA: number
+  /** Fade extent as a fraction of the shape (0..1, <a:reflection endPos>) */
+  endPos: number
+  /** Offset distance (EMU) */
+  dist: number
+}
+
+/** Outer or inner shadow (<a:outerShdw> / <a:innerShdw>; the most common effectLst entries) */
 export interface ShadowEffect {
   color: ResolvedColor
   /** Blur radius (EMU) */
@@ -119,6 +133,16 @@ export interface ShadowEffect {
   dist: number
   /** Direction (degrees, clockwise, 0 = right) */
   dirDeg: number
+  /** <a:innerShdw> (shadow cast inside the shape edges) instead of <a:outerShdw> */
+  inner?: boolean
+  /** Perspective outerShdw silhouette scale (1 = 100%; sy may be negative = flipped) */
+  sx?: number
+  sy?: number
+  /** Perspective outerShdw silhouette skew (degrees) */
+  kxDeg?: number
+  kyDeg?: number
+  /** Shadow alignment anchor (<a:outerShdw algn>, e.g. 'b', 'bl', 'br') */
+  algn?: string
 }
 
 // ── Text ───────────────────────────────────────────────────────────────
@@ -127,21 +151,49 @@ export interface ShadowEffect {
 export interface TextRun {
   text: string
   bold?: boolean
+  /** Run has no explicit b (bold resolved from inheritance); rebuild/patch omits b to keep the master/layout linkage */
+  boldImplicit?: boolean
   italic?: boolean
+  /** Run has no explicit i (see boldImplicit) */
+  italicImplicit?: boolean
   underline?: boolean
   /** Original underline style (sng/dbl/wavy…); underline is the display boolean, write-back restores from this */
   underlineStyle?: string
   strike?: boolean
   /** Original strikethrough style (sngStrike/dblStrike); strike is the display boolean, write-back restores from this */
   strikeStyle?: string
+  /** Original rPr carried an explicit u="none" — an override of inherited underline the rebuild path must re-emit */
+  underlineExplicitNone?: boolean
+  /** Original rPr carried strike="noStrike" (see underlineExplicitNone) */
+  strikeExplicitNone?: boolean
+  /** Explicit cap attribute verbatim (incl. "none"); `cap` below holds the resolved display value, which may be inherited */
+  capExplicit?: string
+  /** Verbatim color node of the run's explicit solidFill when it is not a plain srgbClr
+   * (schemeClr/prstClr/sysClr/… or srgbClr with modifiers). The rebuild path re-emits it
+   * instead of baking the resolved display value in; cleared when the user changes the color. */
+  colorNodeXml?: string
   /** Font size (pt) */
   fontSize?: number
   /** Run has no explicit sz (inherits); rebuild/injected rPr omits sz to avoid baking in the master font size */
   fontSizeImplicit?: boolean
   /** Letter spacing <a:rPr spc> (pt, may be negative; PowerPoint stores 1/100pt) */
   letterSpacing?: number
+  /** Kerning threshold <a:rPr kern> (pt): kern pairs apply only at fontSize ≥ this; 0 = never.
+   *  Absent = PowerPoint's 12 pt default (probe-measured: 18 pt kerns, 10 pt does not). */
+  kern?: number
   /** Font family (final font name after theme inheritance, for render/editor display) */
   fontFamily?: string
+  /** Resolved a:latin family when fontFamily came from the ea/cs bucket: PowerPoint draws the
+   *  run's Latin characters with it (prod_026: "ISO 45001" inside Hangul runs sets in Calibri) */
+  latinFamily?: string
+  /**
+   * CJK script hint for substituting fontFamily when it is missing, mirroring
+   * PowerPoint: the run's altLang/lang CJK tag wins (prod_043: KR font declared
+   * charset=134 but altLang="ko-KR" → Malgun), else the @charset declared on the
+   * picked rPr font bucket (prod_079: JP-named font, no altLang, charset=134
+   * GB2312 → Microsoft YaHei). Name classification is only the last resort.
+   */
+  fontScriptHint?: 'ja' | 'ko' | 'sc' | 'tc'
   /**
    * Original <a:latin>/<a:ea> typeface text (incl. +mj-lt/+mn-ea theme refs).
    * Present = the user has not changed the font: patches keep the original bytes
@@ -155,6 +207,8 @@ export interface TextRun {
   csFont?: string
   /** Run has no explicit font declaration (inherits/theme); patches don't inject latin/ea when the font is unchanged */
   fontImplicit?: boolean
+  /** Textless marker synthesized from <a:endParaRPr> (empty paragraph): its props belong to the paragraph mark and are never written back as run props */
+  paraMark?: boolean
   /**
    * Effective character casing ('all' | 'small', explicit rPr cap or inherited from
    * placeholder styles). Display-only: the render layer uppercases; never written back.
@@ -187,7 +241,11 @@ export interface TextRun {
   /** Run-level outer shadow (<a:rPr>/defRPr <a:effectLst><a:outerShdw>) */
   shadow?: ShadowEffect
   /** WordArt gradient text fill (<a:rPr><a:gradFill>); color keeps a mid-stop fallback */
-  gradient?: { stops: Array<{ pos: number; color: ResolvedColor }>; angle?: number }
+  gradient?: {
+    stops: Array<{ pos: number; color: ResolvedColor }>
+    angle?: number
+    scaled?: boolean
+  }
   /** Run-level glow (<a:rPr><a:effectLst><a:glow>) */
   glow?: GlowEffect
   /** Run-level reflection (<a:rPr><a:effectLst><a:reflection>), rendered as a faded mirror */
@@ -196,10 +254,31 @@ export interface TextRun {
 
 export type TextAlign = 'left' | 'center' | 'right' | 'justify'
 
+/**
+ * Modeled subset of <a:pPr><a:defRPr> (see Paragraph.defRPr). Typefaces keep the raw
+ * attribute (incl. +mn-lt/+mj-ea theme references); the color is resolved for display
+ * and materialized as srgbClr on rebuild, like run colors.
+ */
+export interface ParagraphDefaultRunProps {
+  /** sz (pt) */
+  fontSize?: number
+  bold?: boolean
+  italic?: boolean
+  /** cap: 'all' | 'small' | 'none' */
+  cap?: string
+  color?: ResolvedColor
+  /** Raw <a:solidFill> child (schemeClr/prstClr/srgbClr+mods) captured verbatim so a rebuild
+   *  re-emits the theme link and modifiers instead of baking the computed srgbClr. */
+  colorNodeXml?: string
+  latinFont?: string
+  eaFont?: string
+  csFont?: string
+}
+
 export interface Paragraph {
   runs: TextRun[]
   align?: TextAlign
-  /** right-to-left paragraph (a:pPr rtl="1"); generated content only (pdf2pptx) */
+  /** Paragraph base direction (a:pPr rtl): true = RTL base, false = explicit LTR base, absent = inferred from the first strong character */
   rtl?: boolean
   /** Indent level (bullet level) */
   level?: number
@@ -215,6 +294,9 @@ export interface Paragraph {
     type: 'none' | 'char' | 'number'
     char?: string
     color?: ResolvedColor
+    /** Raw <a:buClr> child captured verbatim (schemeClr/prstClr/srgbClr+mods) so a rebuild
+     *  keeps the theme link instead of baking the computed srgbClr. */
+    colorNodeXml?: string
     /** <a:buFont> typeface (symbol fonts like Wingdings) */
     font?: string
     /** <a:buSzPct> (%, 100 = same size as text) */
@@ -226,8 +308,22 @@ export interface Paragraph {
   }
   /** Paragraph left indent marL (EMU) */
   marL?: number
+  /** Paragraph right indent marR (EMU) */
+  marR?: number
   /** First-line indent (EMU, negative = hanging indent, common with bullets) */
   indent?: number
+  /** <a:tabLst> custom tab stops (EMU from the text-frame left inset; laid out as left stops) */
+  tabStops?: Array<{ pos: number; algn?: string }>
+  /** <a:pPr defTabSz>: default tab grid (EMU, PowerPoint default 914400 = 1") */
+  defTabSz?: number
+  /**
+   * Paragraph-level default run properties <a:pPr><a:defRPr>. PowerPoint resolves a
+   * run attribute as run rPr → this node → lstStyle/placeholder/master chain, so
+   * runs missing sz/b/fill take them from here (python-pptx `paragraph.font`, WPS
+   * exports). Parsed for display inheritance and written back by the rebuild path
+   * so the runs keep their look after a structural edit.
+   */
+  defRPr?: ParagraphDefaultRunProps
   /**
    * Which paragraph properties come from an explicit <a:pPr> (rather than display
    * values inherited from lstStyle/placeholder/master). The rebuild path writes
@@ -242,7 +338,10 @@ export interface Paragraph {
     spcAft?: boolean
     bullet?: boolean
     marL?: boolean
+    marR?: boolean
     indent?: boolean
+    tabLst?: boolean
+    defTabSz?: boolean
   }
 }
 
@@ -251,6 +350,8 @@ export interface TextBody {
   paragraphs: Paragraph[]
   /** Vertical alignment */
   anchor?: 'top' | 'middle' | 'bottom'
+  /** <a:bodyPr anchorCtr="1">: center the text block's bounding box horizontally */
+  anchorCtr?: boolean
   /** Insets (EMU): left/top/right/bottom */
   insets?: { l: number; t: number; r: number; b: number }
   /** Autofit: none | shrink font to fit | resize box */
@@ -268,6 +369,8 @@ export interface TextBody {
   spcCol?: number
   /** <a:bodyPr><a:scene3d>+<a:sp3d>: WordArt text extrusion (camera angles in degrees) */
   extrusion3d?: { color: ResolvedColor; depthEmu: number; latDeg: number; lonDeg: number }
+  /** <a:bodyPr><a:prstTxWarp>: WordArt envelope warp (display only; saved via original bytes) */
+  txWarp?: { prst: string; adj?: Record<string, number> }
 }
 
 // ── Elements ───────────────────────────────────────────────────────────
@@ -302,6 +405,8 @@ export interface PPrDirty {
   spcBef?: boolean
   spcAft?: boolean
   align?: boolean
+  /** Paragraph base direction rtl attribute */
+  rtl?: boolean
   /** marL + indent as a pair (bullet indent linkage) */
   indents?: boolean
   /** Restrict the patch to these paragraph indices; absent = all paragraphs */
@@ -327,6 +432,8 @@ interface ElementBase {
   dirtyPPr?: PPrDirty
   /** Placeholder type (title/body/…), located via layout/master inheritance */
   placeholder?: string
+  /** <p:cNvSpPr txBox="1">: an Insert > Text Box, which stays top-left where an autoshape centers */
+  txBox?: boolean
   name?: string
   /**
    * <p:cNvPr descr="…">: editor-owned metadata payload (e.g. vector points of
@@ -404,7 +511,10 @@ export interface TextElement extends ElementBase {
   stroke?: Stroke
   shadow?: ShadowEffect
   glow?: GlowEffect
+  reflection?: ReflectionEffect
   scene3d?: Scene3D
+  /** Soft edges <a:softEdge rad> (EMU feather radius) */
+  softEdge?: number
   text?: TextBody
 }
 
@@ -428,6 +538,10 @@ export interface PictureElement extends ElementBase {
   /** Picture outline geometry <a:prstGeom> (ellipse avatars/rounded-corner frames etc. from picture styles; rect omitted) */
   presetGeometry?: string
   adjust?: Record<string, number>
+  /** Picture outline <a:custGeom> (the image is clipped to the custom path; mutually exclusive with presetGeometry) */
+  customGeometry?: CustomGeometry
+  /** <a:scene3d> on the pic: a flat 180° camera rotation mirrors the bitmap */
+  scene3d?: Scene3D
   /** Shape fill from the pic's own spPr, drawn as a backdrop behind the image */
   fill?: Fill
   /** <a:blip><a:duotone> on the picture blip */
@@ -439,6 +553,7 @@ export interface PictureElement extends ElementBase {
   stroke?: Stroke
   shadow?: ShadowEffect
   glow?: GlowEffect
+  reflection?: ReflectionEffect
 }
 
 export interface GroupElement extends ElementBase {

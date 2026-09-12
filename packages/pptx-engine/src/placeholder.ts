@@ -17,7 +17,7 @@
  */
 import { XMLParser } from 'fast-xml-parser'
 import type { Transform, TextAlign } from './types'
-import { type Theme, resolveFontRef } from './theme'
+import { type EaScript, type Theme, eaScriptOfLang, resolveFontRef } from './theme'
 import { resolveColorNode } from './color'
 import { asXmlNode, xmlArray, type XmlNode } from './xml-utils'
 
@@ -41,6 +41,8 @@ export interface LevelTextStyle {
   latinFont?: string
   eaFont?: string
   csFont?: string
+  /** East Asian script of the level's defRPr lang/altLang (steers empty-ea theme refs on runs without a lang of their own) */
+  eaScript?: EaScript
   align?: TextAlign
   /** Bullet default (master bodyStyle levels commonly use buChar '•') */
   bullet?: {
@@ -89,8 +91,14 @@ export interface PlaceholderGeom {
   textStyle?: TextStyleLevels
   /** Vertical anchor from this placeholder's <a:bodyPr anchor=""> */
   anchor?: 'top' | 'middle' | 'bottom'
+  /** <a:bodyPr anchorCtr> (explicit 0 recorded too: it overrides an inherited 1) */
+  anchorCtr?: boolean
+  /** Explicit bodyPr inset attrs (EMU); slide bodyPr attrs missing these inherit per-attribute */
+  insets?: { l?: number; t?: number; r?: number; b?: number }
   /** Raw spPr node when it carries an explicit fill (parse.ts resolves it with the part's rels) */
   fillSpPr?: unknown
+  /** Non-rect <a:prstGeom>: placeholder pictures inherit it as their clip shape */
+  presetGeom?: { prst: string; avLstRaw?: unknown }
 }
 
 /** Placeholder geometry table for one layer (layout or master). */
@@ -157,17 +165,42 @@ export function parsePlaceholderMap(layoutOrMasterXml: string, theme?: Theme): P
     const spPr = asXmlNode(sp['p:spPr'])
     const transform = parseXfrmNode(spPr['a:xfrm'])
     const textStyle = parseLstStyleLevels(asXmlNode(sp['p:txBody'])['a:lstStyle'], theme)
-    const anchorAttr = asXmlNode(asXmlNode(sp['p:txBody'])['a:bodyPr'])['@_anchor']
-    const anchor = ANCHOR_MAP[String(anchorAttr ?? '')]
+    const bodyPrNode = asXmlNode(asXmlNode(sp['p:txBody'])['a:bodyPr'])
+    const anchor = ANCHOR_MAP[String(bodyPrNode['@_anchor'] ?? '')]
+    const anchorCtrRaw = bodyPrNode['@_anchorCtr']
+    const anchorCtr =
+      anchorCtrRaw != null ? String(anchorCtrRaw) === '1' || anchorCtrRaw === 'true' : undefined
+    const insEntries = (['l', 't', 'r', 'b'] as const).flatMap((k) => {
+      const v = bodyPrNode[`@_${k}Ins`]
+      const n = v != null ? parseInt(String(v), 10) : NaN
+      return Number.isFinite(n) ? [[k, n] as const] : []
+    })
+    const insets = insEntries.length ? Object.fromEntries(insEntries) : undefined
     const hasFill = FILL_TAGS.some((tag) => tag in spPr)
-    if (!transform && !textStyle && !anchor && !hasFill) continue
+    const prstGeomNode = asXmlNode(spPr['a:prstGeom'])
+    const prst = prstGeomNode['@_prst'] != null ? String(prstGeomNode['@_prst']) : undefined
+    const presetGeom =
+      prst && prst !== 'rect' ? { prst, avLstRaw: prstGeomNode['a:avLst'] } : undefined
+    if (
+      !transform &&
+      !textStyle &&
+      !anchor &&
+      anchorCtr === undefined &&
+      !insets &&
+      !hasFill &&
+      !presetGeom
+    )
+      continue
     entries.push({
       type,
       idx,
       transform,
       ...(textStyle ? { textStyle } : {}),
       ...(anchor ? { anchor } : {}),
+      ...(anchorCtr !== undefined ? { anchorCtr } : {}),
+      ...(insets ? { insets } : {}),
       ...(hasFill ? { fillSpPr: spPr } : {}),
+      ...(presetGeom ? { presetGeom } : {}),
     })
   }
   return { entries }
@@ -252,36 +285,51 @@ function parseLvlPPr(pPrRaw: unknown, theme?: Theme): LevelTextStyle | undefined
     const v = parseInt(String(pPr['@_indent']), 10)
     if (!Number.isNaN(v)) out.indent = v
   }
-  const defRPrRaw = pPr['a:defRPr']
-  if (defRPrRaw && typeof defRPrRaw === 'object') {
-    const defRPr = asXmlNode(defRPrRaw)
-    if (defRPr['@_sz']) out.fontSize = parseInt(String(defRPr['@_sz']), 10) / 100
-    if (defRPr['@_b'] != null) out.bold = defRPr['@_b'] === '1' || defRPr['@_b'] === 'true'
-    if (defRPr['@_i'] != null) out.italic = defRPr['@_i'] === '1' || defRPr['@_i'] === 'true'
-    if (defRPr['@_cap'] != null) out.cap = String(defRPr['@_cap'])
-    const color = resolveColorNode(defRPr['a:solidFill'], theme)
-    if (color) out.color = color
-    const shdw = asXmlNode(asXmlNode(defRPr['a:effectLst'])['a:outerShdw'])
-    const shdwColor = resolveColorNode(shdw, theme)
-    if (shdwColor) {
-      const num = (k: string) => {
-        const v = parseInt(String(shdw[k] ?? ''), 10)
-        return Number.isFinite(v) ? v : 0
-      }
-      out.shadow = {
-        color: shdwColor,
-        blurRad: num('@_blurRad'),
-        dist: num('@_dist'),
-        dirDeg: num('@_dir') / 60000,
-      }
+  Object.assign(out, parseDefRPrStyle(pPr['a:defRPr'], theme))
+  return Object.keys(out).length ? out : undefined
+}
+
+/**
+ * <a:defRPr> (default run properties of a lstStyle level or of a paragraph's own
+ * <a:pPr>) → the run-level subset of LevelTextStyle. Colors and theme font
+ * references are resolved for display; undefined when the node is absent or empty.
+ */
+export function parseDefRPrStyle(
+  defRPrRaw: unknown,
+  theme?: Theme,
+  phClr?: string,
+): LevelTextStyle | undefined {
+  if (!defRPrRaw || typeof defRPrRaw !== 'object') return undefined
+  const defRPr = asXmlNode(defRPrRaw)
+  const out: LevelTextStyle = {}
+  if (defRPr['@_sz']) out.fontSize = parseInt(String(defRPr['@_sz']), 10) / 100
+  if (defRPr['@_b'] != null) out.bold = defRPr['@_b'] === '1' || defRPr['@_b'] === 'true'
+  if (defRPr['@_i'] != null) out.italic = defRPr['@_i'] === '1' || defRPr['@_i'] === 'true'
+  if (defRPr['@_cap'] != null) out.cap = String(defRPr['@_cap'])
+  const color = resolveColorNode(defRPr['a:solidFill'], theme, phClr)
+  if (color) out.color = color
+  const shdw = asXmlNode(asXmlNode(defRPr['a:effectLst'])['a:outerShdw'])
+  const shdwColor = resolveColorNode(shdw, theme, phClr)
+  if (shdwColor) {
+    const num = (k: string) => {
+      const v = parseInt(String(shdw[k] ?? ''), 10)
+      return Number.isFinite(v) ? v : 0
     }
-    const latin = resolveFontRef(typefaceAttr(defRPr['a:latin']), theme)
-    if (latin) out.latinFont = latin
-    const ea = resolveFontRef(typefaceAttr(defRPr['a:ea']), theme)
-    if (ea) out.eaFont = ea
-    const cs = resolveFontRef(typefaceAttr(defRPr['a:cs']), theme)
-    if (cs) out.csFont = cs
+    out.shadow = {
+      color: shdwColor,
+      blurRad: num('@_blurRad'),
+      dist: num('@_dist'),
+      dirDeg: num('@_dir') / 60000,
+    }
   }
+  const eaScript = eaScriptOfLang(defRPr['@_altLang']) ?? eaScriptOfLang(defRPr['@_lang'])
+  if (eaScript) out.eaScript = eaScript
+  const latin = resolveFontRef(typefaceAttr(defRPr['a:latin']), theme, eaScript)
+  if (latin) out.latinFont = latin
+  const ea = resolveFontRef(typefaceAttr(defRPr['a:ea']), theme, eaScript)
+  if (ea) out.eaFont = ea
+  const cs = resolveFontRef(typefaceAttr(defRPr['a:cs']), theme, eaScript)
+  if (cs) out.csFont = cs
   return Object.keys(out).length ? out : undefined
 }
 
@@ -369,6 +417,40 @@ function findAnchorInMap(
   return hit?.anchor
 }
 
+/** Same matching as findAnchorInMap for bodyPr insets (no idx-only step, see above). */
+function findInsetsInMap(
+  map: PlaceholderMap | undefined,
+  type: string | undefined,
+  idx: string | undefined,
+): PlaceholderGeom['insets'] {
+  if (!map || map.entries.length === 0) return undefined
+  const t = type ?? 'body'
+  const i = idx ?? ''
+  const carriers = map.entries.filter((e) => e.insets)
+  let hit = carriers.find((e) => e.type === t && e.idx === i)
+  if (!hit) hit = carriers.find((e) => e.type === t)
+  if (!hit && TITLE_TYPES.has(t)) hit = carriers.find((e) => TITLE_TYPES.has(e.type))
+  if (!hit && BODY_TYPES.has(t)) hit = carriers.find((e) => BODY_TYPES.has(e.type))
+  return hit?.insets
+}
+
+/**
+ * Resolve a placeholder's inherited bodyPr insets, merged per-attribute (layout wins
+ * over master). PowerPoint inherits each unspecified inset attr along the ph chain —
+ * a master body with lIns=0 reaches slides whose layout bodyPr only sets numCol.
+ */
+export function resolvePlaceholderInsets(
+  layout: PlaceholderMap | undefined,
+  master: PlaceholderMap | undefined,
+  type: string | undefined,
+  idx: string | undefined,
+): PlaceholderGeom['insets'] {
+  const fromLayout = findInsetsInMap(layout, type, idx)
+  const fromMaster = findInsetsInMap(master, type, idx)
+  if (!fromLayout || !fromMaster) return fromLayout ?? fromMaster
+  return { ...fromMaster, ...fromLayout }
+}
+
 /** Resolve a placeholder's inherited vertical anchor: layout first, master as fallback. */
 export function resolvePlaceholderAnchor(
   layout: PlaceholderMap | undefined,
@@ -377,6 +459,33 @@ export function resolvePlaceholderAnchor(
   idx: string | undefined,
 ): PlaceholderGeom['anchor'] {
   return findAnchorInMap(layout, type, idx) ?? findAnchorInMap(master, type, idx)
+}
+
+/** Same matching as findAnchorInMap for anchorCtr (an explicit 0 in the layout wins over a master 1). */
+function findAnchorCtrInMap(
+  map: PlaceholderMap | undefined,
+  type: string | undefined,
+  idx: string | undefined,
+): boolean | undefined {
+  if (!map || map.entries.length === 0) return undefined
+  const t = type ?? 'body'
+  const i = idx ?? ''
+  const marked = map.entries.filter((e) => e.anchorCtr !== undefined)
+  let hit = marked.find((e) => e.type === t && e.idx === i)
+  if (!hit) hit = marked.find((e) => e.type === t)
+  if (!hit && TITLE_TYPES.has(t)) hit = marked.find((e) => TITLE_TYPES.has(e.type))
+  if (!hit && BODY_TYPES.has(t)) hit = marked.find((e) => BODY_TYPES.has(e.type))
+  return hit?.anchorCtr
+}
+
+/** Resolve a placeholder's inherited anchorCtr: layout first, master as fallback. */
+export function resolvePlaceholderAnchorCtr(
+  layout: PlaceholderMap | undefined,
+  master: PlaceholderMap | undefined,
+  type: string | undefined,
+  idx: string | undefined,
+): boolean | undefined {
+  return findAnchorCtrInMap(layout, type, idx) ?? findAnchorCtrInMap(master, type, idx)
 }
 
 /**
@@ -431,6 +540,7 @@ export function mergeTextStyleChain(
     if (out.latinFont == null && lvl.latinFont != null) out.latinFont = lvl.latinFont
     if (out.eaFont == null && lvl.eaFont != null) out.eaFont = lvl.eaFont
     if (out.csFont == null && lvl.csFont != null) out.csFont = lvl.csFont
+    if (out.eaScript == null && lvl.eaScript != null) out.eaScript = lvl.eaScript
     if (out.align == null && lvl.align != null) out.align = lvl.align
     if (out.bullet == null && lvl.bullet != null) out.bullet = lvl.bullet
     if (out.marL == null && lvl.marL != null) out.marL = lvl.marL
@@ -544,4 +654,32 @@ export function resolvePlaceholderTransform(
   idx: string | undefined,
 ): Transform | undefined {
   return findInMap(layout, type, idx) ?? findInMap(master, type, idx)
+}
+
+/**
+ * Placeholder preset-geometry inheritance (layout first, master as fallback).
+ * Matches the placeholder first (same order as fill inheritance) so an unrelated
+ * sibling never donates its shape.
+ */
+export function resolvePlaceholderPresetGeom(
+  layout: PlaceholderMap | undefined,
+  master: PlaceholderMap | undefined,
+  type: string | undefined,
+  idx: string | undefined,
+): PlaceholderGeom['presetGeom'] | undefined {
+  const t = type ?? 'body'
+  const i = idx ?? ''
+  for (const map of [layout, master]) {
+    if (!map) continue
+    const entries = map.entries
+    const hit =
+      entries.find((e) => e.type === t && e.idx === i) ??
+      (i !== '' ? entries.find((e) => e.idx === i) : undefined) ??
+      entries.find((e) => e.type === t) ??
+      (TITLE_TYPES.has(t) ? entries.find((e) => TITLE_TYPES.has(e.type)) : undefined) ??
+      (BODY_TYPES.has(t) ? entries.find((e) => BODY_TYPES.has(e.type)) : undefined)
+    if (hit?.presetGeom) return hit.presetGeom
+    if (hit) return undefined
+  }
+  return undefined
 }

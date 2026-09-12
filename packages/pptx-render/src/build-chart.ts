@@ -144,12 +144,13 @@ export function buildChartNode(
   const titleH = titleSizePx * 1.4 * titleLines.length + titleSizePx * 0.3
   // A manual plot layout already positions the plot in full-frame fractions (title space
   // included), so the content must not shrink or shift — but only the cartesian builder
-  // consumes plotLayout; pie/scatter/radar/hbar still lay out from the (shrunk) frame
+  // consumes plotLayout; pie/scatter/radar still lay out from the (shrunk) frame
   const manual =
     (!!model.plotLayout &&
       (model.kind === 'line' ||
         model.kind === 'area' ||
-        (model.kind === 'bar' && model.barDir !== 'bar'))) ||
+        model.kind === 'bar' ||
+        model.kind === 'pie')) ||
     // <c:overlay val="1"/>: the title floats over the plot without reserving space
     !!model.titleOverlay
   const node = buildChartNodeInner(
@@ -501,7 +502,10 @@ function buildChartNodeInner(
   // Category label mode: an explicit txPr rotation wins; otherwise crowded labels wrap
   // to ≤3 horizontal lines when the words fit the slot, and rotate ~45° as a last resort
   // (PowerPoint thins labels only after that)
-  const heuristicSlotW = Math.max(plotR - plotX, 10) / nCats
+  // Explicit c:tickLblSkip thins the labels: crowding decisions (wrap/rotate/reserve)
+  // size against the labeled slot, not the raw per-category slot
+  const lblSkip = model.catAxis?.tickLblSkip ?? 1
+  const heuristicSlotW = (Math.max(plotR - plotX, 10) / nCats) * lblSkip
   const catRotDeg = model.catAxis?.labelRotDeg
   const catWrapLines = (slotW: number): string[][] | null => {
     if (model.categories.length < 2 || maxCatW <= slotW * 1.05) return null
@@ -799,7 +803,10 @@ function buildChartNodeInner(
       ? Math.max(emuToPx(model.catAxis.minorGridWidthEmu, vp.scale), 0.75)
       : undefined
     const gy = plot.y - depth3d
-    for (let i = 0; i <= n; i++) {
+    // c:tickMarkSkip: ticks (and their gridlines) land every Nth slot boundary only —
+    // dense axes (1400+ samples) otherwise flood the plot with one hairline per category
+    const markSkip = model.catAxis?.tickMarkSkip ?? 1
+    for (let i = 0; i <= n; i += markSkip) {
       const gx = plot.x + depth3d * 0.5 + i * slotW
       if (catGrid && i > 0) {
         node.gridLines.push({
@@ -827,11 +834,15 @@ function buildChartNodeInner(
     }
   }
   const catBold = model.catAxis?.labelBold ? { bold: true as const } : {}
-  // Re-derive the mode from the final plot width (a manual plot layout can differ from the heuristic frame)
-  const drawWrap = catRotDeg == null ? catWrapLines(slotW) : null
+  // Re-derive the mode from the final plot width (a manual plot layout can differ from the
+  // heuristic frame); the labeled slot spans lblSkip raw slots
+  const drawWrap = catRotDeg == null ? catWrapLines(slotW * lblSkip) : null
   const drawRotate =
     (catRotDeg != null && catRotDeg !== 0) ||
-    (catRotDeg == null && !drawWrap && model.categories.length > 1 && maxCatW > slotW * rotFactor)
+    (catRotDeg == null &&
+      !drawWrap &&
+      model.categories.length > 1 &&
+      maxCatW > slotW * lblSkip * rotFactor)
   const rotCos = Math.cos((Math.abs(catRotUsed) * Math.PI) / 180)
   const rotSin = Math.sin((Math.abs(catRotUsed) * Math.PI) / 180)
   // Labels hang off the category axis (the zero line when the range spans it, the plot
@@ -839,6 +850,7 @@ function buildChartNodeInner(
   const catLabelBase = catAtZero ? crossY : plot.y + plot.h
   if (!catLabelsOff)
     model.categories.forEach((cat, i) => {
+      if (i % lblSkip) return
       const cx = plot.x + (catSlot(i) + 0.5) * slotW
       if (drawRotate) {
         // Rotation is about the text's origin (left end). Negative angles slant up-right:
@@ -1241,13 +1253,36 @@ function buildPieNode(
   const sliceColor = (i: number) =>
     ser.pointColors?.[i] ??
     (model.varyColors === false ? (ser.color ?? palette[0]!) : palette[i % palette.length]!)
+  // Outline-only wedge (dPt noFill): the legend swatch takes the outline color
+  const swatchColor = (i: number) =>
+    ser.pointNoFill?.[i] ? (ser.pointLines?.[i]?.color ?? sliceColor(i)) : sliceColor(i)
+  const wedgeStroke = (i: number): { stroke?: string; strokeWidthPx?: number } => {
+    const ln = ser.pointLines?.[i]
+    if (!ln) return {}
+    if (ln.color === null) return { strokeWidthPx: 0 }
+    return {
+      stroke: ln.color,
+      ...(ln.widthPt != null ? { strokeWidthPx: ptToPx(ln.widthPt, vp.scale) } : {}),
+    }
+  }
+  // Pseudo-3D top faces: same fill/outline semantics as 2D wedges, resolved to path props
+  const faceProps = (i: number): { fill: string; stroke?: string; strokeWidthPx?: number } => {
+    const st = wedgeStroke(i)
+    const fill = ser.pointNoFill?.[i] ? 'transparent' : sliceColor(i)
+    if (st.strokeWidthPx === 0) return { fill }
+    return {
+      fill,
+      stroke: st.stroke ?? '#ffffff',
+      ...(st.strokeWidthPx != null ? { strokeWidthPx: st.strokeWidthPx } : {}),
+    }
+  }
   const pad = Math.max(6, Math.min(box.w, box.h) * 0.03)
 
   // Legend space (without a legend, the whole box goes to the pie)
   const legendPos = model.legendPos
   const legendItems = model.categories.map((cat, i) => ({
     label: cat,
-    color: sliceColor(i),
+    color: swatchColor(i),
   }))
   const legendRowH = labelSizePx * 1.5
   let plotW = box.w - pad * 2
@@ -1269,13 +1304,36 @@ function buildPieNode(
     plotY += legendRowH
     plotH -= legendRowH
   } else if (legendPos === 'b') plotH -= legendRowH
+  // The deck-authored inner plot rect wins over all the legend-reservation
+  // heuristics (same contract as the bar/line builders); the legend then
+  // places itself from its own manual layout
+  const L = model.plotLayout
+  if (L) {
+    plotX = L.x * box.w
+    plotY = L.y * box.h
+    plotW = Math.max(L.w * box.w, 10)
+    plotH = Math.max(L.h * box.h, 10)
+  }
 
   // Explosion: slice offset = (explosion/100)·diameter along its mid-angle; the radius
   // shrinks so the exploded footprint stays ≈ the unexploded one (PowerPoint keeps bounds)
   const explAt = (i: number) =>
     Math.max(ser.pointExplosionPct?.[i] ?? ser.explosionPct ?? 0, 0) / 100
   const maxExpl = vals.reduce((m, v, i) => (v > 0 ? Math.max(m, explAt(i)) : m), 0)
-  const outerR = Math.max(Math.min(plotW, plotH) / 2, 5) / (1 + 2 * maxExpl)
+  // PowerPoint reserves a constant 4mm ring around the pie regardless of chart size
+  // (probe: frames 0.9"–4.5", margin 0.152–0.160" in every case, labels on or off).
+  // The ring is frame-relative (pad added back); frame-edge legends keep the clearance
+  // by construction, but 'l'/'t' legends sit pad inside the frame — cap so the pie
+  // keeps the same gap to their inner edge on large charts (pad > reserve).
+  const pieReservePx = emuToPx(144000, vp.scale)
+  let pieHalfPx = Math.min(plotW, plotH) / 2 + pad
+  if (legendPos === 'l') pieHalfPx = Math.min(pieHalfPx, plotW / 2)
+  if (legendPos === 't') pieHalfPx = Math.min(pieHalfPx, plotH / 2)
+  // A deck-authored inner rect already IS the pie's bounding area — the frame-
+  // relative 4mm ring and pad correction don't apply on top of it
+  const outerR = L
+    ? Math.max(Math.min(plotW, plotH) / 2, 5) / (1 + 2 * maxExpl)
+    : Math.max(pieHalfPx - pieReservePx, 5) / (1 + 2 * maxExpl)
   const cx = plotX + plotW / 2
   let cy = plotY + plotH / 2
   const innerR = (outerR * Math.min(Math.max(model.holePct ?? 0, 0), 90)) / 100
@@ -1314,6 +1372,11 @@ function buildPieNode(
       if (v <= 0) return
       const sweep = (v / total) * 360
       const { dx, dy } = explOffset(a, sweep, i)
+      // Outline-only points have no rim (nothing to extrude)
+      if (ser.pointNoFill?.[i]) {
+        a += sweep
+        return
+      }
       // normalize wedge interval into [-180, 180) then clamp to the front range [0, 180]
       for (const off of [-360, 0, 360]) {
         const b1 = Math.max(a + off, 0)
@@ -1348,16 +1411,14 @@ function buildPieNode(
           d:
             `M ${p1.x} ${p1.y} A ${rx} ${ry} 0 1 1 ${pm.x} ${pm.y} ` +
             `A ${rx} ${ry} 0 1 1 ${p1.x} ${p1.y} Z`,
-          fill: sliceColor(i),
-          stroke: '#ffffff',
+          ...faceProps(i),
         })
       } else {
         const p2 = ptAt(angle + sweep, dx, dy)
         const large = sweep > 180 ? 1 : 0
         node.paths!.push({
           d: `M ${cx + dx} ${cy + dy} L ${p1.x} ${p1.y} A ${rx} ${ry} 0 ${large} 1 ${p2.x} ${p2.y} Z`,
-          fill: sliceColor(i),
-          stroke: '#ffffff',
+          ...faceProps(i),
         })
       }
     } else {
@@ -1369,6 +1430,8 @@ function buildPieNode(
         startDeg: angle,
         sweepDeg: sweep,
         color: sliceColor(i),
+        ...(ser.pointNoFill?.[i] ? { noFill: true } : {}),
+        ...wedgeStroke(i),
       })
     }
     if (model.series[0]?.dataLabels ?? model.dataLabels) {
@@ -1395,28 +1458,67 @@ function buildPieNode(
   // Legend
   if (legendPos) {
     const sw = labelSizePx * 0.5
-    if (legendPos === 't' || legendPos === 'b') {
-      const itemWs = legendItems.map((it) => sw + 4 + measure(it.label) + labelSizePx * 0.5)
-      const totalW = itemWs.reduce((a, b) => a + b, 0)
-      let x = Math.max((box.w - totalW) / 2, pad)
-      const y = legendPos === 't' ? pad * 0.5 : box.h - pad * 0.5 - labelSizePx * 1.2
-      legendItems.forEach((it, i) => {
-        node.swatches.push({
-          x,
-          y: y + labelSizePx * 0.25,
-          w: sw,
-          h: labelSizePx * 0.5,
-          color: it.color,
-        })
-        node.labels.push({
-          text: it.label,
-          x: x + sw + 4,
-          y,
-          fontSizePx: labelSizePx,
-          color: labelColor,
-        })
-        x += itemWs[i]!
+    const lay = model.legendLayout
+    const rtl = !!model.legendRtl
+    const entry = (
+      x: number,
+      y: number,
+      it: { label: string; color: string },
+      itemW: number,
+      textW: number,
+    ) => {
+      // RTL entries mirror: swatch at the right edge, text tight against it —
+      // itemW's trailing 0.5em stays as the inter-item gap on the left side
+      const swX = rtl ? x + itemW - sw : x
+      const txX = rtl ? x + itemW - sw - 4 - textW : x + sw + 4
+      node.swatches.push({
+        x: swX,
+        y: y + labelSizePx * 0.25,
+        w: sw,
+        h: labelSizePx * 0.5,
+        color: it.color,
       })
+      node.labels.push({ text: it.label, x: txX, y, fontSizePx: labelSizePx, color: labelColor })
+    }
+    if (legendPos === 't' || legendPos === 'b') {
+      const textWs = legendItems.map((it) => measure(it.label))
+      const itemWs = textWs.map((w) => sw + 4 + w + labelSizePx * 0.5)
+      const totalW = itemWs.reduce((a, b) => a + b, 0)
+      const rect =
+        lay?.w !== undefined && lay.x !== undefined && lay.xMode === 'edge'
+          ? {
+              x: lay.x * box.w,
+              y: (lay.y ?? (legendPos === 't' ? 0 : 0.85)) * box.h,
+              w: lay.w * box.w,
+            }
+          : null
+      if (rect && totalW > rect.w) {
+        // The authored rect cannot fit one row: flow one entry per row, aligned
+        // to the reading direction (PowerPoint wraps inside the legend frame)
+        const rowH = labelSizePx * 1.5
+        legendItems.forEach((it, i) => {
+          const w = itemWs[i]!
+          // over-wide entries clamp to the rect's left edge instead of spilling out
+          const x = rtl ? Math.max(rect.x + rect.w - w, rect.x) : rect.x
+          entry(x, rect.y + i * rowH, it, w, textWs[i]!)
+        })
+      } else {
+        let x = rect
+          ? rtl
+            ? rect.x + rect.w - totalW
+            : rect.x
+          : Math.max((box.w - totalW) / 2, pad)
+        const y = rect
+          ? rect.y
+          : legendPos === 't'
+            ? pad * 0.5
+            : box.h - pad * 0.5 - labelSizePx * 1.2
+        const ordered = rtl ? [...legendItems.keys()].reverse() : [...legendItems.keys()]
+        for (const i of ordered) {
+          entry(x, y, legendItems[i]!, itemWs[i]!, textWs[i]!)
+          x += itemWs[i]!
+        }
+      }
     } else {
       const x = legendPos === 'l' ? pad : box.w - sideLegendW
       let y = Math.max(cy - (legendItems.length * legendRowH) / 2, pad)
@@ -2076,12 +2178,22 @@ function buildHBarNode(
   const plotR = box.w - pad - labelSizePx * 0.7 - legendW
   // Bottom row = 0.75em tick gap + one label line (PPT-measured ≈2em at 18pt)
   const plotB = box.h - pad - labelSizePx * 2.0 - (legendPos === 'b' ? legendH : 0)
-  const plot = {
-    x: plotX,
-    y: plotY,
-    w: Math.max(plotR - plotX, 10),
-    h: Math.max(plotB - plotY, 10),
-  }
+  // An explicit inner plot rect wins over the heuristics — decks position hbar
+  // frames partly off-slide and rely on the manual layout for what stays visible
+  const L = model.plotLayout
+  const plot = L
+    ? {
+        x: L.x * box.w,
+        y: L.y * box.h,
+        w: Math.max(L.w * box.w, 10),
+        h: Math.max(L.h * box.h, 10),
+      }
+    : {
+        x: plotX,
+        y: plotY,
+        w: Math.max(plotR - plotX, 10),
+        h: Math.max(plotB - plotY, 10),
+      }
 
   // c:orientation maxMin flips the mapping (max at the left)
   const rev = !!model.valAxis?.reversed

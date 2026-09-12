@@ -23,6 +23,7 @@ import { fontFamiliesFor, isEastAsianFontName } from '../font-list'
 import { useSystemFontFamilies } from '../system-fonts'
 import { cssFontFamily } from '../line-metrics'
 import { setParaAttrs, activeParaAttrs } from './ribbon-tabs'
+import { wordRangeAtCaret } from '../editor/comments'
 import { setSelectionAlign } from '../editor/direction'
 import { IconSparkle } from './icons'
 import { useModalKeys } from './modal-keys'
@@ -85,6 +86,7 @@ export function EditorContextMenu({
 
   const { from, to } = editor.state.selection
   const hasSelection = from !== to
+  const canComment = hasSelection || wordRangeAtCaret(editor) !== null
   const canEdit = editor.isEditable
   const selectedText = hasSelection ? editor.state.doc.textBetween(from, to, ' ').trim() : ''
   // Synonyms targets a word / short phrase, not long selections
@@ -185,8 +187,17 @@ export function EditorContextMenu({
     isImage ||
     (Array.isArray(protAttrs?.textboxes) && (protAttrs.textboxes as unknown[]).length > 0)
   const currentWrap = (protAttrs?.imageWrap as string | null) ?? null
-  const setWrap = (wrap: string | null) =>
-    editor.chain().focus().updateAttributes('docProtected', { imageWrap: wrap }).run()
+  const setWrap = (wrap: string | null) => {
+    const clearedPosition =
+      wrap === null
+        ? { imagePosH: null, imagePosV: null, imageOffsetXEmu: null, imageOffsetYEmu: null }
+        : {}
+    editor
+      .chain()
+      .focus()
+      .updateAttributes('docProtected', { imageWrap: wrap, ...clearedPosition })
+      .run()
+  }
   // Stacking order among overlapping floating pictures. z-order only has a
   // visible effect on floating (front/behind) images, so the menu enables it
   // there; a bring-forward on an inline image also floats it (Word parity).
@@ -491,7 +502,7 @@ export function EditorContextMenu({
       )}
       <div className="ctx-sep" />
       {item(t('appHyperlinkMenu'), { key: '⌘K', onClick: run(onLink) })}
-      {item(t('appNewComment'), { disabled: !hasSelection, onClick: run(onNewComment) })}
+      {item(t('appNewComment'), { disabled: !canComment, onClick: run(onNewComment) })}
     </div>
   )
 }

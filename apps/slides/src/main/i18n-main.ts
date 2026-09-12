@@ -4,6 +4,7 @@ import { createI18n, getUiLang } from '@genoffice/i18n'
 export const tMain = createI18n({
   zh: {
     dlgInsertImage: '插入图片',
+    dlgReplacePicture: '替换图片',
     freezeTitle: '页面失去响应',
     freezeBody:
       '演示文稿页面已停止响应。可以继续等待，或强制重新加载（从当前会话恢复，最多丢失最近 30 秒的改动）。诊断信息已记录。',
@@ -89,6 +90,7 @@ export const tMain = createI18n({
     errTplMissing: '模板"{name}"不存在',
     errTplNoSkill: '模板"{name}"无有效 Style Skill',
     menuFile: '文件',
+    menuOpenNewWindow: '在新窗口中打开',
     menuOpen: '打开…',
     menuSave: '保存',
     menuSaveAs: '另存为…',
@@ -110,6 +112,7 @@ export const tMain = createI18n({
   },
   en: {
     dlgInsertImage: 'Insert Image',
+    dlgReplacePicture: 'Replace Picture',
     freezeTitle: 'Page Unresponsive',
     freezeBody:
       'The presentation page has stopped responding. You can keep waiting, or force a reload (restores from the current session; at most the last 30 seconds of changes are lost). Diagnostics have been recorded.',
@@ -197,6 +200,7 @@ export const tMain = createI18n({
     errTplMissing: 'Template "{name}" does not exist',
     errTplNoSkill: 'Template "{name}" has no valid Style Skill',
     menuFile: 'File',
+    menuOpenNewWindow: 'Open in New Window',
     menuOpen: 'Open…',
     menuSave: 'Save',
     menuSaveAs: 'Save As…',
@@ -218,6 +222,7 @@ export const tMain = createI18n({
   },
   ja: {
     dlgInsertImage: '画像の挿入',
+    dlgReplacePicture: '図の変更',
     freezeTitle: 'ページが応答しません',
     freezeBody:
       'プレゼンテーションのページが応答しなくなりました。待機を続けるか、強制再読み込みできます（現在のセッションから復元。失われるのは直近 30 秒の変更まで）。診断情報は記録済みです。',
@@ -309,6 +314,7 @@ export const tMain = createI18n({
     errTplMissing: 'テンプレート「{name}」は存在しません',
     errTplNoSkill: 'テンプレート「{name}」に有効な Style Skill がありません',
     menuFile: 'ファイル',
+    menuOpenNewWindow: '新しいウィンドウで開く',
     menuOpen: '開く…',
     menuSave: '保存',
     menuSaveAs: '名前を付けて保存…',
@@ -330,6 +336,7 @@ export const tMain = createI18n({
   },
   ko: {
     dlgInsertImage: '그림 삽입',
+    dlgReplacePicture: '그림 바꾸기',
     freezeTitle: '페이지가 응답하지 않음',
     freezeBody:
       '프레젠테이션 페이지가 응답을 멈췄습니다. 계속 기다리거나 강제로 다시 로드할 수 있습니다(현재 세션에서 복원되며 최대 최근 30초의 변경만 손실됩니다). 진단 정보가 기록되었습니다.',
@@ -419,6 +426,7 @@ export const tMain = createI18n({
     errTplMissing: '템플릿 "{name}"이(가) 존재하지 않습니다',
     errTplNoSkill: '템플릿 "{name}"에 유효한 Style Skill이 없습니다',
     menuFile: '파일',
+    menuOpenNewWindow: '새 창에서 열기',
     menuOpen: '열기…',
     menuSave: '저장',
     menuSaveAs: '다른 이름으로 저장…',
@@ -440,6 +448,7 @@ export const tMain = createI18n({
   },
   fr: {
     dlgInsertImage: 'Insérer une image',
+    dlgReplacePicture: "Remplacer l'image",
     freezeTitle: 'Page bloquée',
     freezeBody:
       'La page de la présentation ne répond plus. Vous pouvez patienter ou forcer un rechargement (restauration depuis la session en cours ; au plus les 30 dernières secondes de modifications sont perdues). Les diagnostics ont été enregistrés.',
@@ -534,6 +543,7 @@ export const tMain = createI18n({
     errTplMissing: "Le modèle « {name} » n'existe pas",
     errTplNoSkill: "Le modèle « {name} » n'a pas de Style Skill valide",
     menuFile: 'Fichier',
+    menuOpenNewWindow: 'Ouvrir dans une nouvelle fenêtre',
     menuOpen: 'Ouvrir…',
     menuSave: 'Enregistrer',
     menuSaveAs: 'Enregistrer sous…',
@@ -555,6 +565,7 @@ export const tMain = createI18n({
   },
   de: {
     dlgInsertImage: 'Bild einfügen',
+    dlgReplacePicture: 'Bild ersetzen',
     freezeTitle: 'Seite reagiert nicht',
     freezeBody:
       'Die Präsentationsseite reagiert nicht mehr. Sie können weiter warten oder ein Neuladen erzwingen (Wiederherstellung aus der aktuellen Sitzung; höchstens die letzten 30 Sekunden an Änderungen gehen verloren). Diagnosedaten wurden aufgezeichnet.',
@@ -648,6 +659,7 @@ export const tMain = createI18n({
     errTplMissing: 'Vorlage „{name}“ existiert nicht',
     errTplNoSkill: 'Vorlage „{name}“ hat keinen gültigen Style Skill',
     menuFile: 'Datei',
+    menuOpenNewWindow: 'In neuem Fenster öffnen',
     menuOpen: 'Öffnen…',
     menuSave: 'Speichern',
     menuSaveAs: 'Speichern unter…',
@@ -669,6 +681,7 @@ export const tMain = createI18n({
   },
   es: {
     dlgInsertImage: 'Insertar imagen',
+    dlgReplacePicture: 'Reemplazar imagen',
     freezeTitle: 'La página no responde',
     freezeBody:
       'La página de la presentación ha dejado de responder. Puede seguir esperando o forzar una recarga (se restaura desde la sesión actual; como máximo se pierden los últimos 30 segundos de cambios). Se han registrado los diagnósticos.',
@@ -762,6 +775,7 @@ export const tMain = createI18n({
     errTplMissing: 'La plantilla "{name}" no existe',
     errTplNoSkill: 'La plantilla "{name}" no tiene un Style Skill válido',
     menuFile: 'Archivo',
+    menuOpenNewWindow: 'Abrir en una ventana nueva',
     menuOpen: 'Abrir…',
     menuSave: 'Guardar',
     menuSaveAs: 'Guardar como…',
@@ -783,6 +797,7 @@ export const tMain = createI18n({
   },
   th: {
     dlgInsertImage: 'แทรกรูปภาพ',
+    dlgReplacePicture: 'แทนที่รูปภาพ',
     freezeTitle: 'หน้าไม่ตอบสนอง',
     freezeBody:
       'หน้างานนำเสนอหยุดตอบสนอง คุณสามารถรอต่อไปหรือบังคับโหลดใหม่ (กู้คืนจากเซสชันปัจจุบัน สูญเสียการแก้ไขไม่เกิน 30 วินาทีล่าสุด) บันทึกข้อมูลวินิจฉัยแล้ว',
@@ -870,6 +885,7 @@ export const tMain = createI18n({
     errTplMissing: 'ไม่มีเทมเพลต "{name}"',
     errTplNoSkill: 'เทมเพลต "{name}" ไม่มี Style Skill ที่ใช้ได้',
     menuFile: 'ไฟล์',
+    menuOpenNewWindow: 'เปิดในหน้าต่างใหม่',
     menuOpen: 'เปิด…',
     menuSave: 'บันทึก',
     menuSaveAs: 'บันทึกเป็น…',
@@ -891,6 +907,7 @@ export const tMain = createI18n({
   },
   id: {
     dlgInsertImage: 'Sisipkan Gambar',
+    dlgReplacePicture: 'Ganti Gambar',
     freezeTitle: 'Halaman Tidak Merespons',
     freezeBody:
       'Halaman presentasi berhenti merespons. Anda dapat terus menunggu atau memaksa muat ulang (dipulihkan dari sesi saat ini; paling banyak 30 detik perubahan terakhir yang hilang). Diagnostik telah dicatat.',
@@ -982,6 +999,7 @@ export const tMain = createI18n({
     errTplMissing: 'Templat "{name}" tidak ada',
     errTplNoSkill: 'Templat "{name}" tidak memiliki Style Skill yang valid',
     menuFile: 'File',
+    menuOpenNewWindow: 'Buka di Jendela Baru',
     menuOpen: 'Buka…',
     menuSave: 'Simpan',
     menuSaveAs: 'Simpan Sebagai…',
@@ -1003,6 +1021,7 @@ export const tMain = createI18n({
   },
   ru: {
     dlgInsertImage: 'Вставка рисунка',
+    dlgReplacePicture: 'Заменить рисунок',
     freezeTitle: 'Страница не отвечает',
     freezeBody:
       'Страница презентации перестала отвечать. Можно подождать или принудительно перезагрузить (восстановление из текущего сеанса; будет потеряно не более последних 30 секунд изменений). Диагностика записана.',
@@ -1095,6 +1114,7 @@ export const tMain = createI18n({
     errTplMissing: 'Шаблон «{name}» не существует',
     errTplNoSkill: 'У шаблона «{name}» нет допустимого Style Skill',
     menuFile: 'Файл',
+    menuOpenNewWindow: 'Открыть в новом окне',
     menuOpen: 'Открыть…',
     menuSave: 'Сохранить',
     menuSaveAs: 'Сохранить как…',
@@ -1116,6 +1136,7 @@ export const tMain = createI18n({
   },
   ar: {
     dlgInsertImage: 'إدراج صورة',
+    dlgReplacePicture: 'استبدال الصورة',
     freezeTitle: 'الصفحة لا تستجيب',
     freezeBody:
       'توقفت صفحة العرض التقديمي عن الاستجابة. يمكنك مواصلة الانتظار أو فرض إعادة التحميل (تُستعاد من الجلسة الحالية؛ ولن يُفقد سوى آخر 30 ثانية من التغييرات كحد أقصى). تم تسجيل بيانات التشخيص.',
@@ -1204,6 +1225,7 @@ export const tMain = createI18n({
     errTplMissing: 'القالب "{name}" غير موجود',
     errTplNoSkill: 'القالب "{name}" لا يحتوي على Style Skill صالح',
     menuFile: 'ملف',
+    menuOpenNewWindow: 'فتح في نافذة جديدة',
     menuOpen: 'فتح…',
     menuSave: 'حفظ',
     menuSaveAs: 'حفظ باسم…',
@@ -1225,6 +1247,7 @@ export const tMain = createI18n({
   },
   pt: {
     dlgInsertImage: 'Inserir Imagem',
+    dlgReplacePicture: 'Substituir Imagem',
     freezeTitle: 'Página sem resposta',
     freezeBody:
       'A página da apresentação parou de responder. Você pode continuar aguardando ou forçar um recarregamento (restaura da sessão atual; no máximo os últimos 30 segundos de alterações são perdidos). Os diagnósticos foram registrados.',
@@ -1317,6 +1340,7 @@ export const tMain = createI18n({
     errTplMissing: 'O modelo "{name}" não existe',
     errTplNoSkill: 'O modelo "{name}" não tem um Style Skill válido',
     menuFile: 'Arquivo',
+    menuOpenNewWindow: 'Abrir em nova janela',
     menuOpen: 'Abrir…',
     menuSave: 'Salvar',
     menuSaveAs: 'Salvar Como…',
@@ -1338,6 +1362,7 @@ export const tMain = createI18n({
   },
   it: {
     dlgInsertImage: 'Inserisci immagine',
+    dlgReplacePicture: 'Sostituisci immagine',
     freezeTitle: 'Pagina non risponde',
     freezeBody:
       'La pagina della presentazione ha smesso di rispondere. Puoi continuare ad attendere o forzare un ricaricamento (ripristino dalla sessione corrente; al massimo vanno persi gli ultimi 30 secondi di modifiche). La diagnostica è stata registrata.',
@@ -1432,6 +1457,7 @@ export const tMain = createI18n({
     errTplMissing: 'Il modello "{name}" non esiste',
     errTplNoSkill: 'Il modello "{name}" non ha uno Style Skill valido',
     menuFile: 'File',
+    menuOpenNewWindow: 'Apri in una nuova finestra',
     menuOpen: 'Apri…',
     menuSave: 'Salva',
     menuSaveAs: 'Salva con nome…',
@@ -1453,6 +1479,7 @@ export const tMain = createI18n({
   },
   pl: {
     dlgInsertImage: 'Wstaw obraz',
+    dlgReplacePicture: 'Zamień obraz',
     freezeTitle: 'Strona nie odpowiada',
     freezeBody:
       'Strona prezentacji przestała odpowiadać. Możesz czekać dalej lub wymusić ponowne wczytanie (przywracanie z bieżącej sesji; utracone zostanie co najwyżej ostatnie 30 sekund zmian). Diagnostyka została zapisana.',
@@ -1545,6 +1572,7 @@ export const tMain = createI18n({
     errTplMissing: 'Szablon „{name}" nie istnieje',
     errTplNoSkill: 'Szablon „{name}" nie ma prawidłowego Style Skill',
     menuFile: 'Plik',
+    menuOpenNewWindow: 'Otwórz w nowym oknie',
     menuOpen: 'Otwórz…',
     menuSave: 'Zapisz',
     menuSaveAs: 'Zapisz jako…',
@@ -1564,8 +1592,122 @@ export const tMain = createI18n({
     menuZoomOut: 'Pomniejsz',
     menuActualSize: 'Rzeczywisty rozmiar',
   },
+  cs: {
+    dlgInsertImage: 'Vložit obrázek',
+    dlgReplacePicture: 'Nahradit obrázek',
+    freezeTitle: 'Stránka neodpovídá',
+    freezeBody:
+      'Stránka prezentace přestala odpovídat. Můžete dál čekat nebo vynutit znovunačtení (obnoví se z aktuální relace; ztratí se nejvýše posledních 30 sekund změn). Diagnostika byla zaznamenána.',
+    freezeWait: 'Čekat',
+    freezeReload: 'Vynutit znovunačtení',
+    filterImages: 'Obrázky',
+    dlgInsertVideo: 'Vložit video',
+    dlgInsertAudio: 'Vložit zvuk',
+    filterVideo: 'Video',
+    filterAudio: 'Zvuk',
+    dlgInsert3d: 'Vložit 3D model',
+    filter3d: '3D modely',
+    dlgPickExportDir: 'Zvolte složku pro export',
+    btnExport: 'Exportovat',
+    dlgExportPdf: 'Exportovat jako PDF',
+    dlgAddAttachment: 'Přidat přílohy',
+    filterSupported: 'Podporované soubory',
+    filterAll: 'Všechny soubory',
+    untitledDeck: 'Prezentace bez názvu',
+    autosaveFoundTitle: 'Nalezena obnovená verze',
+    autosaveFoundBody:
+      'Z poslední relace existují neuložené změny. Obnovit automaticky uloženou verzi?',
+    autosaveRestore: 'Obnovit',
+    autosaveDiscard: 'Zahodit',
+    closeUnsavedMsg: 'Tato prezentace obsahuje neuložené změny.',
+    closeUnsavedDetail: 'Chcete je před zavřením uložit?',
+    btnDontSave: 'Neukládat',
+    btnCancel: 'Zrušit',
+    mediaUnsupportedTitle: 'Toto video se v aplikaci možná nepřehraje',
+    mediaNoAudioBody:
+      'Zvukový kodek videa ({codec}) není vestavěným přehrávačem podporován, takže přehrávání v aplikaci bude bez zvuku. Soubor je vložen beze změny a po exportu se v PowerPointu přehrává normálně.',
+    mediaAviBody:
+      'Formát AVI není vestavěným přehrávačem podporován, takže ho v aplikaci nelze přehrát. Soubor je vložen beze změny a po exportu se v PowerPointu stále přehrává.',
+    legacyPptTitle: 'Nelze otevřít starší formát .ppt',
+    legacyPptBody:
+      'Toto je binární soubor PowerPoint 97-2003 (.ppt). Podporován je pouze formát .pptx. Otevřete ho v PowerPointu/WPS/Keynote, použijte „Uložit jako .pptx“ a zkuste to znovu.',
+    legacyPptOk: 'OK',
+    encryptedPptxTitle: 'Nelze otevřít soubor chráněný heslem',
+    encryptedPptxBody:
+      'Tento soubor je šifrovaný dokument Office. Soubory chráněné heslem zatím nejsou podporovány. Otevřete ho v PowerPointu, odstraňte heslo (Soubor → Informace → Zamknout prezentaci), uložte a zkuste to znovu.',
+    chartSimplifyTitle: 'Úprava tento graf zjednoduší',
+    chartSimplifyBody:
+      'Tento graf pochází z externího souboru. Úprava ho znovu sestaví podle modelu této aplikace; podrobné formátování, jako jsou formáty čísel, spojnice trendu, chybové úsečky a styly jednotlivých bodů, bude ztraceno.',
+    chartSimplifyOk: 'Přesto upravit',
+    untitledDraft: 'Prezentace bez názvu',
+    labelTextBox: 'Textové pole',
+    labelShape: 'Obrazec',
+    labelPicture: 'Obrázek',
+    labelGroup: 'Skupina',
+    labelTable: 'Tabulka',
+    labelChart: 'Graf',
+    labelObject: 'Objekt',
+    schemeThemeDefault: 'Výchozí motivu',
+    schemeColorful: 'Barevné',
+    schemeColorful2: 'Barevné 2',
+    schemeMono: 'Jednobarevné {n}',
+    errUnsupportedExt: 'soubory .{ext} nejsou podporovány',
+    errNotFile: 'není soubor',
+    errTooLarge: 'překračuje limit {mb} MB',
+    errImageTooLarge: 'obrázek překračuje limit 5 MB',
+    errUnreadable: 'nelze přečíst',
+    errFileTooLarge: 'Soubor překračuje limit velikosti',
+    errParseFailed: 'Soubor se nepodařilo zpracovat',
+    errImageNoText:
+      'Obrázkové přílohy neobsahují text; obrázek je odeslán spolu se zprávou uživatele',
+    errNotImage: 'nepodporovaný typ obrázku',
+    errGskNotLoggedIn:
+      'Nejste přihlášeni ke Genspark: klikněte níže na „Přihlásit se ke Genspark“, přihlaste se a zkuste to znovu',
+    errNoApiKey: 'Pro {provider} není nakonfigurován žádný klíč API',
+    errNoModel: 'Není nakonfigurován název modelu',
+    errGskCli: 'gsk není přihlášen: nejprve spusťte gsk login a přihlaste se k účtu Genspark',
+    errNoDeckAppend:
+      'Není k čemu přidávat (chybí relace). Vygenerujte první stránku s mode:"replace" nebo přidejte stránky nativními nástroji.',
+    errAppendFailed: 'Přidání se nezdařilo: {reason}',
+    errPartialAppend: 'Některé stránky se nepodařilo přidat: {reason}',
+    errMergeFailed:
+      'Sloučení snímku se nezdařilo (zdrojový jednostránkový pptx neobsahuje platný snímek)',
+    errNoDeckReplace: 'Není otevřena žádná prezentace (chybí relace); stránku nelze přepracovat.',
+    errNoDeckInsert: 'Není otevřena žádná prezentace (chybí relace); stránku nelze vložit.',
+    errIndexRange: 'atIndex mimo rozsah (0-{max})',
+    errReplaceNeedsOne: 'režim replace_at vyžaduje přesně jednu stránku HTML',
+    errInsertNeedsOne: 'režim insert_at vyžaduje přesně jednu stránku HTML',
+    errReplaceFailed:
+      'Nahrazení stránky na místě se nezdařilo (chyba při přesunu/odstranění staré stránky)',
+    errInsertFailed: 'Vložení stránky se nezdařilo (chyba při přesunu nové stránky)',
+    errUnknown: 'neznámá chyba',
+    errTplNameInvalid: 'Neplatný název šablony',
+    errTplMissing: 'Šablona „{name}“ neexistuje',
+    errTplNoSkill: 'Šablona „{name}“ nemá platný Style Skill',
+    menuFile: 'Soubor',
+    menuOpenNewWindow: 'Otevřít v novém okně',
+    menuOpen: 'Otevřít…',
+    menuSave: 'Uložit',
+    menuSaveAs: 'Uložit jako…',
+    menuExportPdf: 'Exportovat jako PDF…',
+    menuExportImages: 'Exportovat jako obrázky…',
+    menuPrint: 'Tisk…',
+    menuClose: 'Zavřít',
+    menuQuit: 'Ukončit',
+    menuEdit: 'Úpravy',
+    menuUndo: 'Zpět',
+    menuRedo: 'Znovu',
+    menuCut: 'Vyjmout',
+    menuCopy: 'Kopírovat',
+    menuPaste: 'Vložit',
+    menuView: 'Zobrazení',
+    menuZoomIn: 'Přiblížit',
+    menuZoomOut: 'Oddálit',
+    menuActualSize: 'Skutečná velikost',
+  },
   nl: {
     dlgInsertImage: 'Afbeelding invoegen',
+    dlgReplacePicture: 'Afbeelding vervangen',
     freezeTitle: 'Pagina reageert niet',
     freezeBody:
       'De presentatiepagina reageert niet meer. U kunt blijven wachten of opnieuw laden forceren (hersteld vanuit de huidige sessie; hoogstens de laatste 30 seconden aan wijzigingen gaan verloren). Diagnostiek is vastgelegd.',
@@ -1658,6 +1800,7 @@ export const tMain = createI18n({
     errTplMissing: 'Sjabloon "{name}" bestaat niet',
     errTplNoSkill: 'Sjabloon "{name}" heeft geen geldige Style Skill',
     menuFile: 'Bestand',
+    menuOpenNewWindow: 'Openen in nieuw venster',
     menuOpen: 'Openen…',
     menuSave: 'Opslaan',
     menuSaveAs: 'Opslaan als…',
@@ -1679,6 +1822,7 @@ export const tMain = createI18n({
   },
   ms: {
     dlgInsertImage: 'Sisipkan Imej',
+    dlgReplacePicture: 'Ganti Gambar',
     freezeTitle: 'Halaman Tidak Bertindak Balas',
     freezeBody:
       'Halaman persembahan berhenti bertindak balas. Anda boleh terus menunggu atau paksa muat semula (dipulihkan daripada sesi semasa; paling banyak 30 saat perubahan terakhir hilang). Diagnostik telah direkodkan.',
@@ -1770,6 +1914,7 @@ export const tMain = createI18n({
     errTplMissing: 'Templat "{name}" tidak wujud',
     errTplNoSkill: 'Templat "{name}" tiada Style Skill yang sah',
     menuFile: 'Fail',
+    menuOpenNewWindow: 'Buka dalam Tetingkap Baharu',
     menuOpen: 'Buka…',
     menuSave: 'Simpan',
     menuSaveAs: 'Simpan Sebagai…',
@@ -1791,6 +1936,7 @@ export const tMain = createI18n({
   },
   he: {
     dlgInsertImage: 'הוספת תמונה',
+    dlgReplacePicture: 'החלפת תמונה',
     freezeTitle: 'הדף אינו מגיב',
     freezeBody:
       'דף המצגת הפסיק להגיב. אפשר להמשיך להמתין או לכפות טעינה מחדש (שחזור מהסשן הנוכחי; לכל היותר יאבדו 30 השניות האחרונות של שינויים). נתוני אבחון נרשמו.',
@@ -1876,6 +2022,7 @@ export const tMain = createI18n({
     errTplMissing: 'התבנית "{name}" אינה קיימת',
     errTplNoSkill: 'לתבנית "{name}" אין Style Skill תקין',
     menuFile: 'קובץ',
+    menuOpenNewWindow: 'פתח בחלון חדש',
     menuOpen: 'פתיחה…',
     menuSave: 'שמירה',
     menuSaveAs: 'שמירה בשם…',
@@ -1897,6 +2044,7 @@ export const tMain = createI18n({
   },
   hi: {
     dlgInsertImage: 'छवि सम्मिलित करें',
+    dlgReplacePicture: 'चित्र बदलें',
     freezeTitle: 'पृष्ठ प्रतिक्रिया नहीं दे रहा',
     freezeBody:
       'प्रस्तुति पृष्ठ ने प्रतिक्रिया देना बंद कर दिया है। आप प्रतीक्षा जारी रख सकते हैं या पुनः लोड बाध्य कर सकते हैं (वर्तमान सत्र से पुनर्स्थापित; अधिकतम पिछले 30 सेकंड के परिवर्तन खोएँगे)। निदान दर्ज कर लिया गया है।',
@@ -1987,6 +2135,7 @@ export const tMain = createI18n({
     errTplMissing: 'टेम्पलेट "{name}" मौजूद नहीं है',
     errTplNoSkill: 'टेम्पलेट "{name}" में कोई मान्य Style Skill नहीं है',
     menuFile: 'फ़ाइल',
+    menuOpenNewWindow: 'नई विंडो में खोलें',
     menuOpen: 'खोलें…',
     menuSave: 'सहेजें',
     menuSaveAs: 'इस रूप में सहेजें…',
@@ -2008,6 +2157,7 @@ export const tMain = createI18n({
   },
   'zh-TW': {
     dlgInsertImage: '插入圖片',
+    dlgReplacePicture: '取代圖片',
     freezeTitle: '頁面失去回應',
     freezeBody:
       '簡報頁面已停止回應。可以繼續等待，或強制重新載入（從目前工作階段還原，最多遺失最近 30 秒的變更）。診斷資訊已記錄。',
@@ -2093,6 +2243,7 @@ export const tMain = createI18n({
     errTplMissing: '範本"{name}"不存在',
     errTplNoSkill: '範本"{name}"無有效 Style Skill',
     menuFile: '檔案',
+    menuOpenNewWindow: '在新視窗中開啟',
     menuOpen: '開啟…',
     menuSave: '儲存',
     menuSaveAs: '另存新檔…',

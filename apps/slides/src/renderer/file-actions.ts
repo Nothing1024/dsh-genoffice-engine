@@ -39,44 +39,91 @@ export function adoptSavedSlides(ctx: ActionCtx, next: RenderSlide[]): void {
   ctx.setSlides(next)
 }
 
-export async function save(ctx: ActionCtx, quiet = false): Promise<boolean> {
-  await flushActiveEdit(ctx)
-  await ctx.flushNotes()
-  const r = await window.slidesApi.save()
-  if (r.ok) {
-    if (r.slides) adoptSavedSlides(ctx, r.slides)
-    if (r.path) ctx.setPath(r.path)
-    ctx.setDirty(false)
-    const saved = t('appStatusSaved')
-    ctx.setStatus(saved)
-    if (!quiet) showToast(saved)
-  } else {
-    const failed = t('appStatusSaveFailed', { error: r.error ?? t('appErrorCanceled') })
-    ctx.setStatus(failed)
-    if (!quiet) showToast(failed, 'error')
-  }
-  return r.ok
+/**
+ * Serializes save passes: a call that arrives while a save is in flight waits
+ * for it instead of running concurrently. Two overlapping saves write the
+ * same file with two `createWriteStream` pipes — interleaved zip streams,
+ * truncated pptx, or EPERM/EBUSY on Windows. The queue is a simple promise
+ * chain: each caller awaits the previous tail, then runs its own pass.
+ */
+let saveTail: Promise<unknown> | null = null
+
+/**
+ * Runs `pass` after the in-flight save (if any) finishes, and becomes the
+ * tail subsequent saves wait on. A pass that throws still releases the
+ * queue; the error propagates to its own caller only.
+ */
+async function runSerialized<T>(pass: () => Promise<T>): Promise<T> {
+  const prior = saveTail
+  const current = (async (): Promise<T> => {
+    if (prior) await prior.catch(() => undefined)
+    return pass()
+  })()
+  const tail = current.then(
+    () => undefined,
+    () => undefined,
+  )
+  saveTail = tail
+  void current.then(
+    () => {
+      if (saveTail === tail) saveTail = null
+    },
+    () => {
+      if (saveTail === tail) saveTail = null
+    },
+  )
+  return current
 }
 
-export async function saveAs(ctx: ActionCtx): Promise<void> {
-  await flushActiveEdit(ctx)
-  await ctx.flushNotes()
-  const name = ctx.path?.split('/').pop() ?? 'presentation.pptx'
-  const r = await window.slidesApi.saveAs(name)
-  if (r.ok) {
-    if (r.slides) adoptSavedSlides(ctx, r.slides)
-    ctx.setPath(r.path ?? ctx.path)
-    ctx.setDirty(false)
-    const saved = t('appStatusSavedAs')
-    ctx.setStatus(saved)
-    showToast(saved)
-  } else if (r.error) {
-    // a canceled dialog returns ok:false without error — only real write
-    // failures surface, matching the docs/sheets save-as feedback
-    const failed = t('appStatusSaveFailed', { error: r.error })
-    ctx.setStatus(failed)
-    showToast(failed, 'error')
-  }
+export async function save(getCtx: () => ActionCtx, quiet = false): Promise<boolean> {
+  return runSerialized(async () => {
+    // resolved only now: a queued pass must remap selection against the tree the prior save adopted
+    const ctx = getCtx()
+    await flushActiveEdit(ctx)
+    await ctx.flushNotes()
+    const r = await window.slidesApi.save()
+    if (r.ok) {
+      if (r.slides) adoptSavedSlides(ctx, r.slides)
+      if (r.path) ctx.setPath(r.path)
+      ctx.setDirty(false)
+      const saved = t('appStatusSaved')
+      ctx.setStatus(saved)
+      if (!quiet) showToast(saved)
+    } else {
+      const failed = t('appStatusSaveFailed', { error: r.error ?? t('appErrorCanceled') })
+      ctx.setStatus(failed)
+      // quiet suppresses the success toast only — a failed save (incl. the 30s
+      // auto-save) must surface, or edits silently stop reaching disk
+      showToast(failed, 'error')
+    }
+    return r.ok
+  })
+}
+
+export async function saveAs(getCtx: () => ActionCtx): Promise<void> {
+  // Same queue as save(): Save + Save As (or double Save As) write through
+  // the same main-process pipe and would interleave without it.
+  await runSerialized(async () => {
+    const ctx = getCtx()
+    await flushActiveEdit(ctx)
+    await ctx.flushNotes()
+    const name = ctx.path?.split('/').pop() ?? 'presentation.pptx'
+    const r = await window.slidesApi.saveAs(name)
+    if (r.ok) {
+      if (r.slides) adoptSavedSlides(ctx, r.slides)
+      ctx.setPath(r.path ?? ctx.path)
+      ctx.setDirty(false)
+      const saved = t('appStatusSavedAs')
+      ctx.setStatus(saved)
+      showToast(saved)
+    } else if (r.error) {
+      // a canceled dialog returns ok:false without error — only real write
+      // failures surface, matching the docs/sheets save-as feedback
+      const failed = t('appStatusSaveFailed', { error: r.error })
+      ctx.setStatus(failed)
+      showToast(failed, 'error')
+    }
+  })
 }
 
 /** Export base name: file name without the .pptx extension */

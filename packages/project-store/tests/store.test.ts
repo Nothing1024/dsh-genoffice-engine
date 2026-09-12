@@ -157,6 +157,25 @@ describe('appendChatMessage + loadChat', () => {
     const msgs = store.loadChat('default', 'chat1')
     expect(msgs[0].text).toBe('')
   })
+
+  it('a runaway reply is truncated instead of stored whole', () => {
+    // A model stuck in a repetition loop; stored whole it would also be replayed
+    // into the model context when the file reopens
+    store.appendChatMessage('default', 'chatHuge', {
+      role: 'assistant',
+      text: 'shame '.repeat(20_000),
+    })
+    const msgs = store.loadChat('default', 'chatHuge')
+    expect(msgs[0].text.length).toBeLessThan(33_000)
+    expect(msgs[0].text.endsWith('[truncated]')).toBe(true)
+  })
+
+  it('text just under the cap is stored verbatim', () => {
+    const text = 'x'.repeat(31_999)
+    store.appendChatMessage('default', 'chatUnder', { role: 'assistant', text })
+    const msgs = store.loadChat('default', 'chatUnder')
+    expect(msgs[0].text).toBe(text)
+  })
 })
 
 // ────────────────────────────────────────────────────────────
@@ -462,6 +481,19 @@ describe('appendChatMessage opening buffer', () => {
     expect(msgs[1].tools?.[0].input).toHaveLength(16_000)
     expect(msgs[1].tools?.[0].output).toHaveLength(16_000)
     expect(msgs[1].tools?.[0].summary).toBe('read page 1')
+  })
+
+  it('scope survives the round trip; its excerpt is capped at 400 chars', () => {
+    store.appendChatMessage('default', 'scope-chat', {
+      role: 'user',
+      text: 'polish this',
+      scope: { label: 'Selected: 158 words', text: 'y'.repeat(1_000) },
+    })
+    store.appendChatMessage('default', 'scope-chat', { role: 'assistant', text: 'done' })
+    const msgs = store.loadChat('default', 'scope-chat')
+    expect(msgs[0].scope?.label).toBe('Selected: 158 words')
+    expect(msgs[0].scope?.text).toHaveLength(400)
+    expect(msgs[1].scope).toBeUndefined()
   })
 
   it('user messages appended to a chat with an existing file are written directly, not buffered', () => {

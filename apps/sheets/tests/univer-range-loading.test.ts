@@ -16,6 +16,10 @@ const undoStub = {
   __getInjector: () => ({ get: () => ({ clearUndoRedo: () => undefined }) }),
 }
 
+/// Shape the eviction path writes per cell (clearContent/clearFormat would
+/// run selection-based command interceptors — see patchWorksheetRangeInner).
+const EVICTED_CELL = { v: null, f: null, si: null, p: null, s: null, t: null, custom: null }
+
 describe('normalizeVisibleRange', () => {
   it('uses the initial viewport when Univer has no scroll range yet', () => {
     expect(normalizeVisibleRange(null, 14_516, 16)).toEqual({
@@ -155,6 +159,65 @@ describe('loadWorkbookSkeleton', () => {
       columnCount: 26,
     })
   })
+
+  it('maps an unfrozen axis to the -1 sentinel on open', () => {
+    const openWithFreeze = (freeze: { frozenRows: number; frozenColumns: number } | null) => {
+      const created: Array<{ sheets: Record<string, { freeze?: unknown }> }> = []
+      const runtime = {
+        univer: undoStub,
+        univerAPI: {
+          getActiveWorkbook: () => null,
+          disposeUnit: () => undefined,
+          createWorkbook: (config: (typeof created)[number]) => {
+            created.push(config)
+            return { getSheetBySheetId: () => null, setActiveSheet: () => undefined }
+          },
+        },
+      }
+      const file = {
+        sha256: 'frozen',
+        name: 'Frozen.xlsx',
+        visuals: [],
+        sheets: [
+          {
+            id: 'sheet-1',
+            name: 'Sheet1',
+            rowCount: 10,
+            columnCount: 5,
+            hidden: false,
+            showGridLines: true,
+            tabColor: null,
+            defaultRowHeight: null,
+            defaultColumnWidth: null,
+            freeze,
+            columnWidths: [],
+          },
+        ],
+      }
+      loadWorkbookSkeleton(runtime as never, file as never)
+      return created[0]?.sheets['sheet-1'] as { freeze?: unknown }
+    }
+
+    expect(openWithFreeze({ frozenRows: 1, frozenColumns: 0 }).freeze).toEqual({
+      xSplit: 0,
+      ySplit: 1,
+      startRow: 1,
+      startColumn: -1,
+    })
+    expect(openWithFreeze({ frozenRows: 0, frozenColumns: 1 }).freeze).toEqual({
+      xSplit: 1,
+      ySplit: 0,
+      startRow: -1,
+      startColumn: 1,
+    })
+    expect(openWithFreeze({ frozenRows: 2, frozenColumns: 3 }).freeze).toEqual({
+      xSplit: 3,
+      ySplit: 2,
+      startRow: 2,
+      startColumn: 3,
+    })
+    expect(openWithFreeze(null)).not.toHaveProperty('freeze')
+  })
 })
 
 interface Range {
@@ -191,6 +254,8 @@ function streamedState(options: {
     loadingKeys: new Map(),
     retryTimers: new Map(),
     decorationsPendingSheets: new Set(),
+    hiddenFileRows: new Map(),
+    hiddenRowsCoveredThrough: new Map(),
     editJournal: {
       structuralOps: new Map(options.ops ? [['sheet-1', options.ops]] : []),
       cells: new Map(
@@ -362,8 +427,11 @@ describe('ensureLazyRangeLoaded', () => {
       ),
     ).resolves.toBe(true)
     expect(written).toEqual([
-      // Evict the old streaming window before installing the journal-owned one.
-      { row: 100, column: 0, data: null },
+      // Evict the old streaming window before installing the journal-owned
+      // one — a raw null-cell write, NOT clearContent/clearFormat commands
+      // (their interceptors would strip conditional formatting from the
+      // current selection).
+      { row: 100, column: 0, data: EVICTED_CELL },
       { row: 0, column: 5, data: {} },
       { row: 0, column: 5, data: { v: 'Owner' } },
       { row: 1, column: 5, data: { v: 'merrick' } },
@@ -559,7 +627,7 @@ describe('applyRangeInLoadedChunks', () => {
   it('evicts each prior journal-owned chunk during a whole-column fill', async () => {
     const requests = stubSidecar(0)
     const state = streamedState({
-      rows: 50_000,
+      rows: 250_000,
       loaded: { startRow: 0, endRow: 79, startColumn: 0, endColumn: 4 },
       ops: [{ kind: 'insert-cols', index: 5, count: 1 }],
     })
@@ -568,14 +636,19 @@ describe('applyRangeInLoadedChunks', () => {
       getSheetId: () => 'sheet-1',
       getSheet: () => ({ getRowManager: () => ({ getRow: () => undefined }) }),
       getRange: (row: number, column: number, rows: number, columns: number) => ({
-        setValues: () => undefined,
-        clearContent: () =>
-          cleared.push({
-            startRow: row,
-            endRow: row + rows - 1,
-            startColumn: column,
-            endColumn: column + columns - 1,
-          }),
+        setValues: (values: unknown[][]) => {
+          // Evictions arrive as null-cell writes; installs write {} or values.
+          const first = values[0]?.[0] as Record<string, unknown> | undefined
+          if (first && first.v === null && first.s === null) {
+            cleared.push({
+              startRow: row,
+              endRow: row + rows - 1,
+              startColumn: column,
+              endColumn: column + columns - 1,
+            })
+          }
+        },
+        clearContent: () => undefined,
         clearFormat: () => undefined,
       }),
     }
@@ -584,7 +657,7 @@ describe('applyRangeInLoadedChunks', () => {
       runtime as never,
       { current: state },
       evictingWorksheet as never,
-      { startRow: 0, endRow: 49_999, startColumn: 5, endColumn: 5 },
+      { startRow: 0, endRow: 249_999, startColumn: 5, endColumn: 5 },
       (chunk) => chunks.push(chunk),
       () => undefined,
       { neighborColumns: false },
@@ -593,12 +666,12 @@ describe('applyRangeInLoadedChunks', () => {
     expect(chunks).toHaveLength(3)
     expect(cleared).toEqual([
       { startRow: 0, endRow: 79, startColumn: 0, endColumn: 4 },
-      { startRow: 0, endRow: 19_999, startColumn: 5, endColumn: 5 },
-      { startRow: 20_000, endRow: 39_999, startColumn: 5, endColumn: 5 },
+      { startRow: 0, endRow: 99_999, startColumn: 5, endColumn: 5 },
+      { startRow: 100_000, endRow: 199_999, startColumn: 5, endColumn: 5 },
     ])
     expect(state.loadedRanges.get('sheet-1')).toEqual({
-      startRow: 40_000,
-      endRow: 49_999,
+      startRow: 200_000,
+      endRow: 249_999,
       startColumn: 5,
       endColumn: 5,
     })

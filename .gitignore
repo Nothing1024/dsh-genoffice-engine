@@ -39,3 +39,10 @@ web-dist/
 
 # DSH plugin dev worktree (from test-Nothing1024)
 .dsh-plugin-dev/
+# Local fidelity-run scratch space: production repro documents and pack caches.
+# Never committable — a stray `git add -A` would push user files public.
+/working_dir/
+
+# One-off verification tests kept while chasing a fix; promote to a real test
+# file (or delete) instead of committing them under this name.
+_scratch-*

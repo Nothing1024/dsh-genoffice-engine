@@ -5,8 +5,13 @@
  * helpers (univer-sync.ts).
  */
 import { BorderType, LocalUndoRedoService, type IRange } from '@univerjs/core'
+import { SheetInterceptorService } from '@univerjs/sheets'
 
-import type { WorkbookFile, WorkbookPivotDefinition } from '../shared/desktop-api'
+import type {
+  WorkbookFile,
+  WorkbookPagePrintSettings,
+  WorkbookPivotDefinition,
+} from '../shared/desktop-api'
 import type { createUniver } from './create-univer'
 import type { EditJournal } from './edit-journal'
 import { netAxisDelta } from './view-transform'
@@ -25,6 +30,18 @@ export interface LazyWorkbookState {
   readonly retryTimers: Map<string, ReturnType<typeof setTimeout>>
   readonly appliedMerges: Map<string, Set<string>>
   readonly appliedRowKeys: Map<string, Set<string>>
+  /// Per-sheet rows already run through the load-time wrap auto-fit measure.
+  /// Streamed windows re-patch constantly (indexing growth, evict/reload) and
+  /// a re-measure of an unchanged row still emits row-height mutations —
+  /// find-replace re-searches on every mutation and re-scrolls to its match,
+  /// so an unmemoized measure keeps the grid oscillating for as long as the
+  /// stream runs (alpha r167).
+  readonly measuredWrapRows: Map<string, Set<number>>
+  /// Per-sheet union of IStyleData keys carried by <row s= customFormat> and
+  /// <col style=> defaults. Univer composes row/col styles into every cell
+  /// per-property, but an OOXML cell xf is complete: styled cells null these
+  /// keys out so nothing bleeds through (Excel semantics).
+  readonly rowColStyleKeys: Map<string, Set<string>>
   readonly appliedCfSheets: Set<string>
   readonly appliedFilterSheets: Set<string>
   readonly appliedDvSheets: Set<string>
@@ -37,6 +54,9 @@ export interface LazyWorkbookState {
   /// File-side manual page breaks (0-based index of the row/column after the
   /// break, file coordinates), known once a sheet finishes indexing.
   readonly sheetPageBreaks: Map<string, { rowBreaks: number[]; colBreaks: number[] }>
+  /// File-side saved print settings (pageSetup / margins / headerFooter),
+  /// known once a sheet finishes indexing.
+  readonly sheetFilePageSetups: Map<string, WorkbookPagePrintSettings>
   /// File-side allow-edit ranges, known once a sheet finishes indexing.
   readonly sheetProtectedRanges: Map<
     string,
@@ -51,6 +71,10 @@ export interface LazyWorkbookState {
   /// autoFilter (saveable) or a table part (whose filter lives in the table
   /// XML — editing it is blocked).
   readonly filterOrigins: Map<string, { origin: 'worksheet' | 'table'; range: IRange }>
+  /// Data-row span of a filter whose file criteria were restored at install:
+  /// the filter model owns row visibility there, so streamed hidden="1" rows
+  /// feed its filtered-out cache instead of becoming manual row hides.
+  readonly restoredFilterSpans: Map<string, { startRow: number; endRow: number }>
   /// Sheets whose view shows formulas instead of values
   /// (sheetView/@showFormulas): seeded from the file, flipped by the
   /// Formulas-tab toggle, applied
@@ -60,7 +84,9 @@ export interface LazyWorkbookState {
   /// for live recalculation; large ones stream cached values only.
   readonly formulaMode: boolean
   readonly editJournal: EditJournal
-  readonly flags: { preloadComplete: boolean }
+  /// preloadRunning: preloadEntireWorkbook is filling the model — viewport
+  /// loads must not evict installed rows or shrink loadedRanges meanwhile.
+  readonly flags: { preloadComplete: boolean; preloadRunning: boolean }
   /// Closure mode: on streamed workbooks whose formula dependency closure is
   /// small, the closure cells are installed once and pinned (re-applied after
   /// viewport eviction) so the engine recalculates them live.
@@ -79,6 +105,13 @@ export interface LazyWorkbookState {
   /// Parsed pivot definitions keyed by part path, loaded eagerly at open so
   /// pivot refresh stays synchronous.
   readonly pivotDefinitions: Map<string, WorkbookPivotDefinition>
+  /// File-declared hidden rows per sheet, recorded as row properties stream
+  /// in — lets the viewport loader budget its window by VISIBLE rows.
+  readonly hiddenFileRows: Map<string, Set<number>>
+  /// Row-property stream coverage per sheet, contiguous from row 0. Beyond
+  /// this row the hidden set is incomplete, so consumers ranking by VISIBLE
+  /// order (filtered-table stripes) must fall back to physical parity.
+  readonly hiddenRowsCoveredThrough: Map<string, number>
   /// Known row/column outline levels per sheet (file reads + this session's
   /// group edits). Rows outside loaded ranges default to level 0.
   readonly outline: Map<
@@ -96,8 +129,22 @@ export interface LazyWorkbookState {
     generation: number
     /// consecutive engine failures; a success resets it
     failures: number
+    /// a sheet's formula list came back truncated (>100k formulas): a cold
+    /// IronCalc import of such a workbook grinds for minutes and gigabytes,
+    /// so the engine fallback is off for the session — cached values stand
+    engineOverBudget: boolean
     readonly formulaCells: Map<string, ReadonlySet<number>>
     readonly overlay: Map<string, Map<string, PinnedClosureCell>>
+    /// per-sheet: viewport row the last SUCCESSFUL overlay window was
+    /// anchored at and whether it covered every formula band; a partial
+    /// window re-anchors when the user scrolls far from it (alpha ledger
+    /// r141). Written only after the sidecar run succeeds — early writes
+    /// latched stale flags on failure (bugbot).
+    readonly follow: Map<string, { anchorRow: number; complete: boolean }>
+    /// re-anchor throttle: no new run while one is in flight, and at most
+    /// one every few seconds — each run reads thousands of sidecar cells
+    running: boolean
+    lastRunAt: number
   }
 }
 
@@ -133,6 +180,39 @@ export const CLOSURE_MAX_CELLS = 50_000
 /// Shared mutable state between App.tsx and univer-sync.ts.
 export const journalSuppression = { active: false }
 
+/// An AI batch whose applied payload exceeds this many cells keeps no undo
+/// entry: the stack retains the full mutation matrices both ways (five
+/// 200k-cell copies held ~336MB), and entries accumulate across proposals.
+/// The apply path surfaces a "too large to undo" notice instead.
+export const AI_UNDO_CELL_BUDGET = 100_000
+
+/// Raised around an AI plan apply. Batching merges each command's small item
+/// into the stack-top entry, so the budget must be tracked cumulatively over
+/// the activation; `dropped` reports the batch entry was discarded.
+export const aiBulkUndoGate = { active: false, dropped: false, cells: 0, pushed: 0 }
+
+export interface UndoRedoItemLike {
+  readonly unitID: string
+  readonly redoMutations?: readonly { params?: unknown }[]
+}
+
+/// Bounded: stops counting past `cap` (the budget check needs no exact total).
+export function undoPayloadCells(item: UndoRedoItemLike, cap: number): number {
+  let cells = 0
+  for (const mutation of item.redoMutations ?? []) {
+    const cellValue = (mutation.params as { cellValue?: Record<string, object> } | undefined)
+      ?.cellValue
+    if (!cellValue || typeof cellValue !== 'object') continue
+    for (const rowKey in cellValue) {
+      const row = cellValue[rowKey]
+      if (!row || typeof row !== 'object') continue
+      cells += Object.keys(row).length
+      if (cells > cap) return cells
+    }
+  }
+  return cells
+}
+
 let undoFilterInstalled = false
 
 /// Drops undo-stack entries pushed while journalSuppression is active.
@@ -145,11 +225,70 @@ export function installJournalSuppressionUndoFilter(): void {
   if (undoFilterInstalled) return
   undoFilterInstalled = true
   const proto = LocalUndoRedoService.prototype as unknown as {
-    pushUndoRedo(item: { unitID: string }): void
+    pushUndoRedo(item: UndoRedoItemLike): void
   }
   const originalPush = proto.pushUndoRedo
-  proto.pushUndoRedo = function (this: unknown, item: { unitID: string }) {
-    if (!journalSuppression.active) originalPush.call(this, item)
+  proto.pushUndoRedo = function (this: unknown, item: UndoRedoItemLike) {
+    if (journalSuppression.active) return
+    if (aiBulkUndoGate.active) {
+      if (aiBulkUndoGate.dropped) return
+      aiBulkUndoGate.cells += undoPayloadCells(item, AI_UNDO_CELL_BUDGET + 1)
+      if (aiBulkUndoGate.cells > AI_UNDO_CELL_BUDGET) {
+        aiBulkUndoGate.dropped = true
+        // Chunks already merged into the stack-top batch entry must go too —
+        // keeping them would make undo revert only part of the operation.
+        const service = this as {
+          _getUndoStack?: (unitId: string) => unknown[] | undefined
+          _getRedoStack?: (unitId: string) => unknown[] | undefined
+          _updateStatus?: () => void
+        }
+        if (aiBulkUndoGate.pushed > 0) {
+          const stack = service._getUndoStack?.(item.unitID)
+          if (Array.isArray(stack) && stack.length > 0) stack.pop()
+        }
+        // The original push clears redo on entry; a batch dropped on its
+        // first item must not leave a stale redo replayable over the change.
+        const redoStack = service._getRedoStack?.(item.unitID)
+        if (Array.isArray(redoStack)) redoStack.length = 0
+        service._updateStatus?.()
+        return
+      }
+      aiBulkUndoGate.pushed += 1
+    }
+    originalPush.call(this, item)
+  }
+}
+
+/// Excel never re-measures row heights when opening a file: a row shows its
+/// stored ht (or the sheet default) and wrapped/tall content is clipped.
+/// Univer's AutoHeightController re-measures every auto (ia≠0) row touched by
+/// SetRangeValues-style commands, so streaming file content into the grid
+/// ballooned wrapped rows. While this flag is up, the auto-height interceptor
+/// yields nothing; rows keep ia=1 so later USER edits still auto-fit.
+export const loadAutoHeightSuppression = { active: false }
+
+let autoHeightGateInstalled = false
+
+/// Same prototype-patch shape as the undo filter above: command handlers
+/// resolve the real service, so wrapping the resolved instance is not enough.
+export function installLoadAutoHeightGate(): void {
+  if (autoHeightGateInstalled) return
+  autoHeightGateInstalled = true
+  type AutoHeightMutations = {
+    preUndos: unknown[]
+    undos: unknown[]
+    preRedos: unknown[]
+    redos: unknown[]
+  }
+  const proto = SheetInterceptorService.prototype as unknown as {
+    generateMutationsOfAutoHeight(ctx: unknown): AutoHeightMutations
+  }
+  const original = proto.generateMutationsOfAutoHeight
+  proto.generateMutationsOfAutoHeight = function (this: unknown, ctx: unknown) {
+    if (loadAutoHeightSuppression.active) {
+      return { preUndos: [], undos: [], preRedos: [], redos: [] }
+    }
+    return original.call(this, ctx)
   }
 }
 

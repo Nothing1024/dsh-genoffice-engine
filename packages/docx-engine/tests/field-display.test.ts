@@ -24,6 +24,19 @@ const TOC_ENTRY_PARAGRAPH =
 const FIELD_END_PAGEBREAK_PARAGRAPH =
   '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:br w:type="page"/></w:r></w:p>'
 
+// paste artifact from Word web copy: an INCLUDEPICTURE field with a dead local
+// path sandwiched between styled text runs (public issue #118 demo.docx shape)
+const RPR =
+  '<w:rPr><w:rFonts w:ascii="\u5b8b\u4f53" w:eastAsia="\u5b8b\u4f53"/><w:sz w:val="24"/></w:rPr>'
+const INCLUDEPICTURE_PARAGRAPH =
+  `<w:p><w:pPr><w:jc w:val="left"/>${RPR}</w:pPr>` +
+  `<w:r>${RPR}<w:t>\u9636\u8d70\u5230\u6cb3</w:t></w:r>` +
+  `<w:r>${RPR}<w:t xml:space="preserve">     </w:t></w:r>` +
+  `<w:r>${RPR}<w:fldChar w:fldCharType="begin"/></w:r>` +
+  `<w:r>${RPR}<w:instrText xml:space="preserve"> INCLUDEPICTURE "/tmp/x.jpeg" \\* MERGEFORMATINET </w:instrText></w:r>` +
+  `<w:r>${RPR}<w:fldChar w:fldCharType="end"/></w:r>` +
+  `<w:r>${RPR}<w:t>\u5cb8\u8fb9</w:t></w:r></w:p>`
+
 const PAGE_FIELD_PARAGRAPH =
   '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
   '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>' +
@@ -45,6 +58,43 @@ describe('field paragraph display model', () => {
     })
   })
 
+  it('a TOC entry carries the leading result run face and weight (Word draws the entry with its runs)', async () => {
+    const entry = (rPr: string) =>
+      '<w:p><w:pPr><w:pStyle w:val="TOC2"/><w:tabs><w:tab w:val="right" w:pos="8786"/></w:tabs>' +
+      '<w:rPr><w:sz w:val="24"/></w:rPr></w:pPr>' +
+      '<w:hyperlink w:anchor="_Toc1">' +
+      `<w:r>${rPr}<w:t>Annexe 1-1 : Classification</w:t></w:r>` +
+      '<w:r><w:tab/></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 \\h </w:instrText></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+      '<w:r><w:t>6</w:t></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+      '</w:hyperlink></w:p>'
+    const styled = entry(
+      '<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="MS Gothic" w:hAnsi="Times New Roman"/><w:b/></w:rPr>',
+    )
+    const doc = await parseDocx(await buildDocx({ bodyXml: styled + entry('') }))
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      kind: 'tocLine',
+      left: 'Annexe 1-1 : Classification',
+      right: '6',
+      fontFamily: 'Times New Roman',
+      bold: true,
+    })
+    // the paragraph mark's sz is not the entry's text size
+    expect(doc.blocks[0].fieldDisplay?.szHalfPoints).toBeUndefined()
+    expect(doc.blocks[1].fieldDisplay?.fontFamily).toBeUndefined()
+    expect(doc.blocks[1].fieldDisplay?.bold).toBeUndefined()
+    // a wholly deleted CJK entry still resolves the East Asian face
+    const deleted =
+      '<w:p><w:pPr><w:pStyle w:val="TOC2"/></w:pPr><w:del w:id="1" w:author="a" w:date="2024-01-01T00:00:00Z">' +
+      '<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun"/></w:rPr><w:delText>\u7b2c\u4e00\u7ae0</w:delText></w:r>' +
+      '</w:del></w:p>'
+    const del = await parseDocx(await buildDocx({ bodyXml: deleted }))
+    expect(del.blocks[0].fieldDisplay).toMatchObject({ deleted: true, fontFamily: 'SimSun' })
+  })
+
   it('field-end + page break paragraph shows as a pageBreak marker', async () => {
     const doc = await parseDocx(await buildDocx({ bodyXml: FIELD_END_PAGEBREAK_PARAGRAPH }))
     expect(doc.blocks[0].fieldDisplay).toEqual({ kind: 'pageBreak' })
@@ -56,9 +106,103 @@ describe('field paragraph display model', () => {
     expect(doc.blocks[0].runs?.[0]).toMatchObject({ text: '- 8 -', instrField: 'PAGE' })
   })
 
+  it('a resultless INCLUDEPICTURE text field keeps spaces and run metrics (public issue #118)', async () => {
+    const doc = await parseDocx(await buildDocx({ bodyXml: INCLUDEPICTURE_PARAGRAPH }))
+    const block = doc.blocks[0]
+    expect(block.type).toBe('passthrough')
+    expect(block.fieldDisplay).toMatchObject({
+      kind: 'text',
+      left: '\u9636\u8d70\u5230\u6cb3     \u5cb8\u8fb9',
+      szHalfPoints: 24,
+      fontFamily: '\u5b8b\u4f53',
+      align: 'left',
+    })
+  })
+
+  it('a text field with an explicit line multiple carries the spacing', async () => {
+    const xml = INCLUDEPICTURE_PARAGRAPH.replace(
+      '<w:pPr><w:jc w:val="left"/>',
+      '<w:pPr><w:spacing w:line="360" w:lineRule="auto"/><w:jc w:val="left"/>',
+    )
+    const doc = await parseDocx(await buildDocx({ bodyXml: xml }))
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      kind: 'text',
+      lineRule: 'auto',
+      lineRawTwips: 360,
+      lineSpacing: 1.5,
+    })
+  })
+
   it('TOC entry carries its hyperlink anchor for click-to-jump', async () => {
     const doc = await parseDocx(await buildDocx({ bodyXml: TOC_ENTRY_PARAGRAPH }))
     expect(doc.blocks[0].fieldDisplay?.anchor).toBe('_Toc1')
+  })
+
+  it('page number follows the LAST tab; a leading outline number becomes the num cell', async () => {
+    const xml =
+      '<w:p><w:pPr><w:pStyle w:val="TOC2"/></w:pPr>' +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+      '<w:r><w:t>1.1.</w:t></w:r><w:r><w:tab/></w:r>' +
+      '<w:r><w:t>Latar Belakang Masalah</w:t></w:r><w:r><w:tab/></w:r>' +
+      '<w:r><w:t>7</w:t></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    const doc = await parseDocx(await buildDocx({ bodyXml: xml }))
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      kind: 'tocLine',
+      num: '1.1.',
+      left: 'Latar Belakang Masalah',
+      right: '7',
+      level: 2,
+    })
+  })
+
+  it('a long first segment stays part of the title, not the num cell', async () => {
+    const xml =
+      '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>' +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:instrText xml:space="preserve"> TOC </w:instrText></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+      '<w:r><w:t>BAB I</w:t></w:r><w:r><w:tab/></w:r>' +
+      '<w:r><w:t>PENDAHULUAN</w:t></w:r><w:r><w:tab/></w:r>' +
+      '<w:r><w:t>1</w:t></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    const doc = await parseDocx(await buildDocx({ bodyXml: xml }))
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      kind: 'tocLine',
+      left: 'BAB I PENDAHULUAN',
+      right: '1',
+    })
+    expect(doc.blocks[0].fieldDisplay?.num).toBeUndefined()
+  })
+
+  it('entry font size comes from visible result runs, not field-machinery runs', async () => {
+    const xml =
+      '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>' +
+      '<w:r><w:rPr><w:sz w:val="32"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:rPr><w:sz w:val="32"/></w:rPr><w:instrText xml:space="preserve"> TOC \\o "1-2" </w:instrText></w:r>' +
+      '<w:r><w:rPr><w:sz w:val="32"/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>' +
+      '<w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>Chapter One</w:t></w:r>' +
+      '<w:r><w:tab/></w:r><w:r><w:t>3</w:t></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    const doc = await parseDocx(await buildDocx({ bodyXml: xml }))
+    expect(doc.blocks[0].fieldDisplay?.szHalfPoints).toBe(21)
+  })
+
+  it('TableofFigures entries render as level-1 toc lines (dot leader + protection)', async () => {
+    const xml =
+      '<w:p><w:pPr><w:pStyle w:val="TableofFigures"/></w:pPr>' +
+      '<w:r><w:t>Tabel 2. 1 Sintaks model pembelajaran</w:t></w:r>' +
+      '<w:r><w:tab/></w:r><w:r><w:t>11</w:t></w:r></w:p>'
+    const doc = await parseDocx(await buildDocx({ bodyXml: xml }))
+    expect(doc.blocks[0].type).toBe('passthrough')
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      kind: 'tocLine',
+      left: 'Tabel 2. 1 Sintaks model pembelajaran',
+      right: '11',
+      level: 1,
+    })
   })
 })
 
@@ -150,6 +294,24 @@ describe('HYPERLINK field folding', () => {
     const doc = await parseDocx(await buildDocx({ bodyXml: para }))
     expect(doc.blocks[0].type).toBe('passthrough')
   })
+
+  it('a non-convertible HYPERLINK inside a textbox keeps its cached text visible', async () => {
+    // production resumes carry file:///C:\... HYPERLINK fields (backslashes)
+    // inside header textboxes; the cached email text must not vanish
+    const field = hyperlinkField(
+      'HYPERLINK "file:///C:\\Users\\u\\INetCache\\ph.hussam@gmail.com"',
+    ).replace('creativets.org', 'ph.hussam@gmail.com')
+    const para =
+      '<w:p><w:r><w:drawing><wp:anchor behindDoc="0"><wp:extent cx="914400" cy="914400"/>' +
+      '<a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent>' +
+      `<w:p>${field}</w:p>` +
+      '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic>' +
+      '</wp:anchor></w:drawing></w:r></w:p>'
+    const doc = await parseDocx(await buildDocx({ bodyXml: para }))
+    const box = doc.blocks[0].textboxes?.[0]
+    const text = box?.paras.map((p) => p.runs.map((r) => r.text).join('')).join('\n')
+    expect(text).toContain('ph.hussam@gmail.com')
+  })
 })
 
 // Legacy FORMCHECKBOX form field as Word writes it (POI checkboxes.docx):
@@ -168,6 +330,24 @@ describe('FORMCHECKBOX form fields', () => {
     )
     expect(doc.blocks[0].type).toBe('paragraph')
     expect(doc.blocks[0].runs?.map((r) => r.text)).toEqual(['item: ', '☐'])
+  })
+
+  it('sizes the glyph by the begin run rPr like a sizeAuto box', async () => {
+    const doc = await parseDocx(
+      await buildDocx({
+        bodyXml: checkboxParagraph('<w:default w:val="0"/>').replace(
+          '<w:r><w:fldChar w:fldCharType="begin">',
+          '<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="16"/></w:rPr><w:fldChar w:fldCharType="begin">',
+        ),
+      }),
+    )
+    expect(doc.blocks[0].runs?.[1]).toMatchObject({
+      text: '☐',
+      instrField: 'FORMCHECKBOX',
+      sizeHalfPoints: 16,
+      font: 'Calibri',
+    })
+    expect(doc.blocks[0].runs?.[1].fldBeginXml).toContain('<w:sz w:val="16"/>')
   })
 
   it('checked state comes from w:checked (wins over w:default)', async () => {
@@ -254,5 +434,127 @@ describe('FORMCHECKBOX form fields', () => {
       '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
     const doc = await parseDocx(await buildDocx({ bodyXml }))
     expect(doc.blocks[0].type).toBe('passthrough')
+  })
+})
+
+// Mail-merge label/business-card layout: the visible text lives entirely in
+// field results inside table cells (complex MERGEFIELD runs and fldSimple).
+const MERGE_CELL_PARAGRAPH =
+  '<w:p>' +
+  '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+  '<w:r><w:instrText xml:space="preserve"> MERGEFIELD Vorname </w:instrText></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+  '<w:r><w:rPr><w:noProof/></w:rPr><w:t>Erika</w:t></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+  '<w:r><w:t xml:space="preserve"> </w:t></w:r>' +
+  '<w:fldSimple w:instr=" MERGEFIELD Nachname ">' +
+  '<w:r><w:rPr><w:noProof/></w:rPr><w:t>Mustermann</w:t></w:r>' +
+  '</w:fldSimple>' +
+  '</w:p>'
+
+const NEXT_FIELD_PARAGRAPH =
+  '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+  '<w:r><w:instrText xml:space="preserve"> NEXT </w:instrText></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+
+function cellTable(content: string): string {
+  return (
+    '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>' +
+    '<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
+    '<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' +
+    content +
+    '</w:tc></w:tr></w:tbl>'
+  )
+}
+
+describe('field cached results in table cells', () => {
+  it('complex MERGEFIELD and fldSimple results stay visible as cell runs', async () => {
+    const doc = await parseDocx(await buildDocx({ bodyXml: cellTable(MERGE_CELL_PARAGRAPH) }))
+    const cell = doc.blocks[0].table!.rows[0][0]
+    const text = (cell.richParas?.[0]?.runs ?? []).map((r) => r.text).join('')
+    expect(text).toBe('Erika Mustermann')
+    // instruction text must not leak into the visible runs
+    expect(text).not.toContain('MERGEFIELD')
+  })
+
+  it('a resultless field (NEXT) contributes no text', async () => {
+    const doc = await parseDocx(await buildDocx({ bodyXml: cellTable(NEXT_FIELD_PARAGRAPH) }))
+    const cell = doc.blocks[0].table!.rows[0][0]
+    const text = (cell.richParas?.[0]?.runs ?? []).map((r) => r.text).join('')
+    expect(text).toBe('')
+  })
+})
+
+describe('mixed-size text fields (manual drop cap)', () => {
+  const DROPCAP_FIELD_PARAGRAPH =
+    '<w:p>' +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    '<w:r><w:instrText xml:space="preserve"> INCLUDEPICTURE "/tmp/x.jpeg" \\* MERGEFORMATINET </w:instrText></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+    '<w:r><w:rPr><w:sz w:val="96"/></w:rPr><w:t>L</w:t></w:r>' +
+    '<w:r><w:t>ight. Living give. Rule grass light.</w:t></w:r></w:p>'
+
+  it('one oversized letter does not set the whole field size; runs carry per-run sizes', async () => {
+    const doc = await parseDocx(await buildDocx({ bodyXml: DROPCAP_FIELD_PARAGRAPH }))
+    const field = doc.blocks[0].fieldDisplay!
+    expect(field.kind).toBe('text')
+    // dominant size = the inherited default (body text outweighs the cap letter)
+    expect(field.szHalfPoints).toBeUndefined()
+    expect(field.runs).toEqual([
+      { text: 'L', sizeHalfPoints: 96 },
+      { text: 'ight. Living give. Rule grass light.' },
+    ])
+  })
+
+  it('a uniform explicit size keeps the dominant size on the wrapper', async () => {
+    const xml =
+      '<w:p>' +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:instrText xml:space="preserve"> INCLUDEPICTURE "/tmp/x.jpeg" \\* MERGEFORMATINET </w:instrText></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+      '<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>uniform text</w:t></w:r></w:p>'
+    const doc = await parseDocx(await buildDocx({ bodyXml: xml }))
+    const field = doc.blocks[0].fieldDisplay!
+    expect(field.szHalfPoints).toBe(24)
+    expect(field.runs).toEqual([{ text: 'uniform text', sizeHalfPoints: 24 }])
+  })
+})
+
+describe('citation text fields (ADDIN ZOTERO_ITEM in a justified body paragraph)', () => {
+  const CITATION_PARAGRAPH =
+    '<w:p><w:pPr><w:jc w:val="both"/></w:pPr>' +
+    '<w:r><w:t xml:space="preserve">Published in </w:t></w:r>' +
+    '<w:r><w:rPr><w:i/></w:rPr><w:t>European Radiology</w:t></w:r>' +
+    '<w:r><w:t xml:space="preserve">, this study </w:t></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION {"citationID":"x"} </w:instrText></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+    '<w:r><w:rPr><w:i/></w:rPr><w:t>(21)</w:t></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+    '<w:r><w:t xml:space="preserve">. </w:t></w:r></w:p>'
+
+  it('keeps the result runs formatted and the paragraph justified', async () => {
+    const doc = await parseDocx(await buildDocx({ bodyXml: CITATION_PARAGRAPH }))
+    const block = doc.blocks[0]
+    expect(block.type).toBe('passthrough')
+    const field = block.fieldDisplay!
+    expect(field.kind).toBe('text')
+    expect(field.align).toBe('justify')
+    expect(field.left).toBe('Published in European Radiology, this study (21).')
+    expect(field.runs).toEqual([
+      { text: 'Published in ' },
+      { text: 'European Radiology', italic: true },
+      { text: ', this study ' },
+      { text: '(21)', italic: true },
+      { text: '.' },
+    ])
+  })
+
+  it('falls back to the plain string when tabs keep the runs from reproducing it', async () => {
+    const xml = CITATION_PARAGRAPH.replace('<w:t>(21)</w:t>', '<w:tab/><w:t>(21)</w:t>')
+    const doc = await parseDocx(await buildDocx({ bodyXml: xml }))
+    const field = doc.blocks[0].fieldDisplay!
+    expect(field.runs).toBeUndefined()
+    expect(field.left).toBe('Published in European Radiology, this study (21).')
   })
 })

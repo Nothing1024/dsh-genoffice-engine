@@ -1,53 +1,54 @@
 /* Bundled metric substitutes for fonts most decks assume but macOS/Linux lack:
  * Carlito ↔ Calibri (document content rendering — the canvas font chains in
- * konva-adapter.ts list Carlito right after Calibri). The files' internal family
- * name is "Carlito GO" (docs' Vietnamese-diacritics rebuild), which is what the
- * main-process metrics report as the draw family — declare both names. */
+ * konva-adapter.ts list Carlito right after Calibri). The files are the suite's
+ * shared copy (@genoffice/ui/fonts); their internal family name is "Carlito GO"
+ * (docs' Vietnamese-diacritics rebuild), which is what the main-process metrics
+ * report as the draw family — declare both names. */
 @font-face {
   font-family: 'Carlito';
-  src: url('./fonts/Carlito-Regular.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-Regular.ttf');
   font-weight: normal;
   font-style: normal;
 }
 @font-face {
   font-family: 'Carlito';
-  src: url('./fonts/Carlito-Bold.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-Bold.ttf');
   font-weight: bold;
   font-style: normal;
 }
 @font-face {
   font-family: 'Carlito';
-  src: url('./fonts/Carlito-Italic.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-Italic.ttf');
   font-weight: normal;
   font-style: italic;
 }
 @font-face {
   font-family: 'Carlito';
-  src: url('./fonts/Carlito-BoldItalic.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-BoldItalic.ttf');
   font-weight: bold;
   font-style: italic;
 }
 @font-face {
   font-family: 'Carlito GO';
-  src: url('./fonts/Carlito-Regular.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-Regular.ttf');
   font-weight: normal;
   font-style: normal;
 }
 @font-face {
   font-family: 'Carlito GO';
-  src: url('./fonts/Carlito-Bold.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-Bold.ttf');
   font-weight: bold;
   font-style: normal;
 }
 @font-face {
   font-family: 'Carlito GO';
-  src: url('./fonts/Carlito-Italic.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-Italic.ttf');
   font-weight: normal;
   font-style: italic;
 }
 @font-face {
   font-family: 'Carlito GO';
-  src: url('./fonts/Carlito-BoldItalic.ttf');
+  src: url('@genoffice/ui/fonts/Carlito-BoldItalic.ttf');
   font-weight: bold;
   font-style: italic;
 }
@@ -2753,6 +2754,353 @@ body.vib .slide-list {
   color: var(--slides-ai-error);
 }
 
+/* ── AI element edit queue ─────────────────────────────────────────────── */
+
+/* Anchored annotation popover: fixed-size, mounted at the app root so the
+ * canvas zoom transform never scales it */
+.ai-ask-trigger {
+  position: fixed;
+  z-index: 59;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--color-ai-action);
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: var(--slides-shadow-popup);
+  cursor: pointer;
+}
+
+.ai-ask-trigger:hover {
+  background: var(--hover);
+}
+
+.ai-ask-pop {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-12);
+  background: var(--surface);
+  box-shadow: var(--slides-shadow-popup);
+}
+
+.ai-ask-pop-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ai-ask-pop-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.ai-ask-pop-title {
+  padding-right: 24px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ai-ask-pop-sub {
+  margin-top: -4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-ask-pop-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-8);
+  background: var(--color-bg-page);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.ai-ask-pop-input:focus {
+  border-color: var(--accent);
+}
+
+.ai-ask-pop-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-ask-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ai-ask-chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.ai-ask-pop-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-ask-cancel,
+.ai-ask-confirm {
+  padding: 5px 12px;
+  border-radius: var(--radius-6);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ai-ask-cancel {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.ai-ask-cancel:hover {
+  background: var(--hover);
+}
+
+.ai-ask-confirm {
+  border: 1px solid transparent;
+  background: var(--color-ai-action);
+  color: var(--color-ai-action-text);
+}
+
+.ai-ask-confirm:hover:not(:disabled) {
+  background: var(--color-ai-action-hover);
+}
+
+.ai-ask-confirm:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Queue card above the composer */
+.ai-queue {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-12);
+  background: var(--surface-subtle);
+  overflow: hidden;
+}
+
+.ai-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.ai-queue-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ai-queue-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ai-queue-fold {
+  margin-left: auto;
+  display: inline-flex;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.ai-queue-fold.folded {
+  transform: rotate(-90deg);
+}
+
+.ai-queue-hint {
+  padding: 0 10px 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ai-queue-list {
+  margin: 0;
+  padding: 0 6px 4px;
+  list-style: none;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.ai-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 6px;
+  border-radius: var(--radius-6);
+  font-size: 12px;
+  color: var(--text);
+  cursor: default;
+}
+
+.ai-queue-row:hover {
+  background: var(--hover);
+}
+
+.ai-queue-row.stale {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.ai-queue-ord {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.ai-queue-page {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--active-bg);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+.ai-queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-queue-target {
+  margin-right: 5px;
+  color: var(--text-muted);
+}
+
+.ai-queue-target::after {
+  content: ' ·';
+}
+
+.ai-queue-edit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-6);
+  background: var(--color-bg-page);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.ai-queue-row-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.ai-queue-row:hover .ai-queue-row-actions {
+  opacity: 1;
+}
+
+.ai-queue-row-btn {
+  display: inline-flex;
+  padding: 2px;
+  border: none;
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.ai-queue-row-btn:hover {
+  background: var(--active-bg);
+  color: var(--text);
+}
+
+.ai-queue-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 8px;
+}
+
+.ai-queue-confirm {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ai-queue-discard {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ai-queue-discard:hover {
+  background: var(--hover);
+}
+
+.ai-queue-send {
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-6);
+  background: var(--accent);
+  color: var(--slides-on-accent);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ai-queue-send:disabled,
+.ai-queue-discard:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* whole-panel drop target highlight */
 .ai-panel-dragover {
   outline: 2px dashed var(--accent);
@@ -3137,6 +3485,33 @@ body.vib .slide-list {
   gap: 6px;
 }
 
+/* PPT-style checkbox option row (锁定纵横比 / 相对于图片原始尺寸 …); one per line,
+   unlike the inline .fp-check used by the background pane */
+.fp-checkrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.fp-checkrow input {
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.fp-checkrow:has(input:disabled) {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.fp-checkrow input:disabled {
+  cursor: default;
+}
+
 /* 预设渐变 tiles (gradients themselves are document fill previews, painted inline) */
 .fp-gpreset {
   width: 26px;
@@ -3407,6 +3782,8 @@ body.vib .slide-list {
   border-radius: 2px;
   transform: translateX(-50%);
   cursor: pointer;
+  /* draggable along the bar: keep pointermove events, don't let the browser pan */
+  touch-action: none;
 }
 
 .fp-gstop.sel {
@@ -3458,6 +3835,156 @@ body.vib .slide-list {
 .fp-prow .gs-dd {
   width: 120px;
   flex-shrink: 0;
+}
+
+/* position "From" pickers: same width as the value spinners above them (fp-unitstep) */
+.fp-prow .gs-dd.fp-dd-narrow {
+  width: 74px;
+}
+
+/* PPT-style shadow preset gallery: thumbnail trigger + grouped grid of live shadow tiles */
+.fp-shadowgal {
+  position: relative;
+  display: inline-flex;
+  anchor-name: --fp-shadowgal;
+  anchor-scope: --fp-shadowgal;
+}
+
+.fp-shadowgal-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 5px 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.fp-shadowgal-btn:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* fixed + anchored (same technique as gs-dd-pop) so pane scroll overflow never clips it;
+ * right-aligned to the trigger because the pane hugs the window's right edge */
+.fp-shadowgal-pop {
+  position: fixed;
+  position-anchor: --fp-shadowgal;
+  top: calc(anchor(bottom) + 2px);
+  right: anchor(right);
+  position-try-fallbacks: flip-block;
+  position-visibility: anchors-visible;
+  z-index: 80;
+  box-sizing: border-box;
+  width: 176px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  box-shadow: var(--shadow-menu);
+}
+
+.fp-shadowgal-group {
+  margin: 4px 2px 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.fp-shadowgal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.fp-galopt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+}
+
+.fp-galopt:hover {
+  background: var(--hover);
+}
+
+.fp-galopt.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* tile face: a miniature preview of the document effect, deliberately theme-static */
+.fp-galtile {
+  --fp-gal-face: #f4f4f4;
+  --fp-gal-edge: #b9b9b9;
+  --fp-gal-shadow: rgba(0, 0, 0, 0.45);
+  display: block;
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  background: var(--fp-gal-face);
+  border: 1px solid var(--fp-gal-edge);
+}
+
+.fp-galtile-cur {
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  /* fixed "shadow" glyph (PPT-style): a white tile casting a small bottom-right shadow */
+  --fp-gal-face: #ffffff;
+  box-shadow: 1.5px 1.5px 2.5px var(--fp-gal-shadow);
+}
+
+/* reflection tiles: face + a fading mirrored bar below it */
+.fp-refltile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.fp-refltile .fp-refltile-face {
+  width: 22px;
+  height: 16px;
+}
+
+.fp-refltile-fade {
+  /* preview of a document effect, deliberately theme-static */
+  --fp-refl-fade-from: rgba(0, 0, 0, 0.35);
+  display: block;
+  width: 22px;
+  border-radius: 2px;
+  background: linear-gradient(var(--fp-refl-fade-from), transparent);
+}
+
+.fp-refltile-cur .fp-refltile-face {
+  --fp-gal-face: #ffffff;
+  width: 15px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.fp-refltile-cur .fp-refltile-fade {
+  width: 15px;
+}
+
+/* text-direction options: PPT-style direction glyph + label in the list; the
+ * 120px trigger can't fit the glyph next to the long rotate labels, so it
+ * stays text-only (matching PowerPoint's pane field) */
+.fp-dd-textdir .gs-dd-value .fp-dirico {
+  display: none;
+}
+
+.gs-dd-item .fp-dirico {
+  flex-shrink: 0;
+  margin-right: 8px;
+  color: var(--text-dim);
 }
 
 /* line previews inside dropdown triggers/options (compound + dash pickers) */
@@ -3546,15 +4073,6 @@ body.vib .slide-list {
 /* breathing room between stacked rows in one section (fill swatches ↔ 透明度, stroke ↔ 虚线样式) */
 .fp-row + .fp-row {
   margin-top: 10px;
-}
-
-.fp-link-target {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--text-secondary);
 }
 
 .fp-chart-series {
@@ -3676,11 +4194,6 @@ body.vib .slide-list {
   border-color: var(--accent);
   background: var(--active-bg);
   color: var(--accent);
-}
-
-.fp-btn.fp-danger:hover {
-  border-color: var(--slides-ai-error);
-  color: var(--slides-ai-error);
 }
 
 /* Color strip on ribbon large buttons (colored buttons such as background fill) */
@@ -4008,6 +4521,64 @@ body.vib .slide-list {
   color: var(--text-secondary);
   border-top: 1px solid var(--border);
   margin-top: 4px;
+  cursor: default;
+}
+
+.rb-font-download {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.rb-font-download-tag {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.rb-font-install-local {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  color: var(--accent);
+}
+
+.font-missing-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  background: var(--accent-soft);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.font-missing-banner .fmb-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.font-missing-banner .fmb-fonts {
+  margin-left: 6px;
+  color: var(--text-secondary);
+}
+.font-missing-banner button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.font-missing-banner button:hover {
+  background: var(--hover);
+}
+.font-missing-banner .fmb-download {
+  color: var(--accent);
+  font-weight: 600;
+}
+.font-missing-banner .fmb-download:disabled {
+  opacity: 0.6;
   cursor: default;
 }
 
@@ -4934,13 +5505,21 @@ body.vib .slide-list {
   z-index: 5;
   display: inline-flex;
   align-items: center;
+  /* Deck-wide presets and the selection-scoped entry sit in separate pills, so
+   * the gap itself tells them apart — they act on different things */
+  gap: 8px;
   margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.stage-ai-group {
+  display: inline-flex;
+  align-items: center;
   padding: 3px 5px;
   background: var(--surface);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   box-shadow: var(--slides-shadow-toolbar);
-  white-space: nowrap;
 }
 
 .stage-ai-btn {
@@ -5029,6 +5608,22 @@ body.vib .slide-list {
   color: var(--text-tertiary);
 }
 
+/* Long notes must stay readable at any pane height: native wheel scrolling
+ * plus a slim scrollbar (PowerPoint/WPS keep the notes pane scrollable even
+ * when it's dragged down to a single line) */
+.notes-pane textarea::-webkit-scrollbar {
+  width: 5px;
+}
+
+.notes-pane textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.notes-pane textarea::-webkit-scrollbar-thumb {
+  border-radius: 2.5px;
+  background: var(--slides-scroll-thumb);
+}
+
 /* Hidden pane: an invisible strip stays along the bottom edge so the splitter
  * remains grabbable — drag up to pull the notes pane back out (PPT behavior) */
 .notes-pull-zone {
@@ -5040,7 +5635,9 @@ body.vib .slide-list {
 /* Thin state (PowerPoint-style): dragged down to a one-line bar that stays
  * directly editable — click and type in place, or drag the handle back up.
  * The handle overlays the top edge (absolute) so the textarea gets the full
- * bar height and its line-height centers the single line vertically. */
+ * bar height and its line-height centers the single line vertically.
+ * Scrolling stays enabled (textarea default overflow) so multi-line notes
+ * remain reachable with the wheel even in the one-line bar. */
 .notes-pane.notes-thin {
   position: relative;
   padding-bottom: 0;
@@ -5053,7 +5650,6 @@ body.vib .slide-list {
 }
 
 .notes-pane.notes-thin textarea {
-  overflow-y: hidden;
   line-height: 30px;
 }
 
@@ -6777,12 +7373,36 @@ body.show-curtain::after {
   }
 }
 
+.ai-clarify-question-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
 .ai-clarify-label {
+  flex: 1;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--color-text-primary);
-  margin: 0 0 8px;
+  margin: 0;
   line-height: 1.4;
+}
+
+.ai-clarify-multi-badge {
+  flex-shrink: 0;
+  margin-top: 2px;
+  padding: 2px 7px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
 }
 
 .ai-clarify-desc {
@@ -6950,24 +7570,34 @@ body.show-curtain::after {
   margin-left: auto;
 }
 
-/* 32px filled advance arrow */
+/* Explicit multi-select advance action: text avoids looking like an unlabeled pager. */
 .ai-clarify-next {
-  width: 32px;
-  height: 32px;
+  min-width: 82px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
+  gap: 6px;
+  padding: 0 14px;
+  font-family: inherit;
   background: var(--color-btn-primary);
   color: var(--color-btn-primary-text);
   border: none;
   border-radius: 8px;
-  font-size: 16px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
   transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.ai-clarify-next:hover {
+.ai-clarify-next-arrow {
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.ai-clarify-next:hover:not(:disabled) {
   opacity: 0.85;
 }
 
@@ -6976,9 +7606,14 @@ body.show-curtain::after {
   box-shadow: 0 0 0 3px var(--slides-focus-ring-soft);
 }
 
+.ai-clarify-next:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
 .ai-clarify-skip {
-  height: 29px;
-  padding: 0 16px;
+  height: 36px;
+  padding: 0 14px;
   font-family: inherit;
   font-size: 14px;
   font-weight: 500;
@@ -6986,6 +7621,7 @@ body.show-curtain::after {
   background: transparent;
   border: 1px solid var(--color-border-default);
   border-radius: 8px;
+  white-space: nowrap;
   cursor: pointer;
   transition:
     border-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
@@ -6998,7 +7634,7 @@ body.show-curtain::after {
 }
 
 .ai-clarify-submit {
-  height: 29px;
+  height: 36px;
   padding: 0 16px;
   font-family: inherit;
   font-size: 14px;
@@ -7007,17 +7643,23 @@ body.show-curtain::after {
   background: var(--color-btn-primary);
   border: 1px solid transparent;
   border-radius: 8px;
+  white-space: nowrap;
   cursor: pointer;
   transition: filter 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.ai-clarify-submit:hover {
+.ai-clarify-submit:hover:not(:disabled) {
   filter: brightness(0.92);
 }
 
-.ai-clarify-submit:active {
+.ai-clarify-submit:active:not(:disabled) {
   filter: brightness(0.88);
   transform: scale(0.98);
+}
+
+.ai-clarify-submit:disabled {
+  opacity: 0.38;
+  cursor: default;
 }
 
 .ai-clarify-skip:focus-visible,
@@ -8164,29 +8806,6 @@ body.show-curtain::after {
   .slideshow [class*='ss-anim-'] {
     animation-duration: 0.01ms !important;
   }
-}
-
-.ai-msg-undelivered {
-  margin-top: 6px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--slides-ai-error);
-}
-
-.ai-retry-btn {
-  border: 1px solid var(--slides-ai-error-border);
-  border-radius: 4px;
-  background: none;
-  padding: 1px 8px;
-  font-size: 12px;
-  color: var(--slides-ai-error);
-  cursor: pointer;
-}
-
-.ai-retry-btn:hover {
-  background: var(--slides-ai-error-bg);
 }
 
 .ai-login-btn {

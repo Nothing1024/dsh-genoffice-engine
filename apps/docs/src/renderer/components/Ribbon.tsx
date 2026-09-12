@@ -22,15 +22,27 @@ import type {
   CustomNumberingLevel,
   DocDefaults,
   HeaderFooter,
+  Run,
   SectionSettings,
   SourceInfo,
   StyleInfo,
+  TableAutoFitMode,
+  TableLook,
   TextboxDisplay,
+  TextboxParaDisplay,
   ThemeColors,
   ThemeFonts,
 } from '@genoffice/docx-engine'
-import { ColorPicker, Dropdown, isSymbolFontFamily, useDismissablePopover } from '@genoffice/ui'
+import {
+  ColorPicker,
+  Dropdown,
+  RibbonCollapseButton,
+  isSymbolFontFamily,
+  useDismissablePopover,
+  useRibbonCollapse,
+} from '@genoffice/ui'
 import { HIGHLIGHT_CSS } from '../editor/extensions'
+import { applyCase, type CaseMode } from '../editor/case-transform'
 import { setParagraphDirection, setSelectionAlign } from '../editor/direction'
 import { setInactiveSelectionShown } from '../editor/inactive-selection'
 import { stepParagraphIndent } from '../editor/indent'
@@ -38,6 +50,14 @@ import { formatNumber } from '../editor/numbering'
 import type { InkTool } from '../editor/ink'
 import type { RibbonFormatState } from './ribbon-format-state'
 import { setSelectedColumnWidth } from '../editor/table-sizing'
+import {
+  applyTablePreset,
+  repeatHeaderState,
+  setTableAutoFit,
+  setTableLookOption,
+  toggleRepeatHeaderRows,
+  updateSelectedTableAttrs,
+} from '../editor/table-properties'
 import { useI18n, type StringKey } from '../i18n/locale'
 import { fontFamiliesFor, isEastAsianFontName } from '../font-list'
 import { useSystemFontFamilies } from '../system-fonts'
@@ -54,6 +74,9 @@ import {
   type InkPenSettings,
   type RevisionDisplayMode,
   type ViewMode,
+  insertImageFromDataUrl,
+  applyParagraphStyle,
+  setParaAttrs,
 } from './ribbon-tabs'
 import { WRAP_OPTIONS } from './ContextMenu'
 import { CropDialog, CutoutDialog } from './PictureDialogs'
@@ -63,10 +86,17 @@ import {
   IconAlignJustify,
   IconAlignLeft,
   IconAlignRight,
+  IconAutoFit,
   IconBorderAll,
+  IconBorderBottom,
   IconBorderInner,
+  IconBorderInsideH,
+  IconBorderInsideV,
+  IconBorderLeft,
   IconBorderNone,
   IconBorderOuter,
+  IconBorderRight,
+  IconBorderTop,
   IconBullets,
   IconCaret,
   IconCellAlignBottom,
@@ -110,8 +140,15 @@ import {
   IconSubscript,
   IconSuperscript,
   IconTableDelete,
+  IconRepeatHeader,
+  IconTableProperties,
 } from './icons'
 interface RibbonProps {
+  /** App keyboard shortcuts reuse ribbon closures through here (font-size stepping keeps its coalescing) */
+  actionsRef?: React.MutableRefObject<{
+    stepFontSize?: (dir: 1 | -1) => void
+    nudgeFontSize?: (dir: 1 | -1) => void
+  }>
   /** Quick-access area on the tab row's left (save/undo-redo/autosave), matching the WPS/Office QAT */
   quickActions?: React.ReactNode
   /** Right side of the tab row (file name, etc.) */
@@ -171,8 +208,8 @@ interface RibbonProps {
   onZoom: (zoom: number) => void
   /** compute zoom from the current window size (Word: page width / whole page) */
   onZoomFit: (mode: 'width' | 'page') => void
-  darkCanvas: boolean
-  onDarkCanvas: (v: boolean) => void
+  darkPage: boolean
+  onDarkPage: (v: boolean) => void
   onAiPreset: (instruction: string) => void
   /** external request (e.g. native menu Page Setup) to switch to a specific tab */
   tabRequest?: { tab: string; nonce: number } | null
@@ -195,12 +232,17 @@ interface RibbonProps {
   showNav: boolean
   onShowNav: (v: boolean) => void
   commentCount: number
+  /** unresolved root comments (drives the AI resolve-comments action) */
+  openCommentCount: number
   onShowComments: () => void
   /** Review → comments / revisions / compare / protection */
   canComment: boolean
   onNewComment: () => void
   trackChanges: boolean
   onTrackChanges: (on: boolean) => void
+  /** native check-as-you-type spellcheck (red squiggle) */
+  spellcheck: boolean
+  onSpellcheck: (on: boolean) => void
   revisionDisplay: RevisionDisplayMode
   onRevisionDisplay: (mode: RevisionDisplayMode) => void
   revisionCount: number
@@ -270,19 +312,6 @@ const PAINTER_BLOCK_EXTRA: Record<string, string[]> = {
   docListItem: ['kind', 'numId', 'ilvl'],
 }
 
-function transformCase(s: string, mode: 'upper' | 'lower' | 'title' | 'sentence'): string {
-  switch (mode) {
-    case 'upper':
-      return s.toUpperCase()
-    case 'lower':
-      return s.toLowerCase()
-    case 'title':
-      return s.toLowerCase().replace(/(^|\s)(\p{L})/gu, (m) => m.toUpperCase())
-    case 'sentence':
-      return s.toLowerCase().replace(/(^\s*\p{L})|([.!?。!?]\s*\p{L})/gu, (m) => m.toUpperCase())
-  }
-}
-
 // Word for Mac has no File ribbon tab: file actions live in the native menu
 // bar (which we provide). Windows Word does have one, so keep it there.
 const IS_MAC = navigator.platform.toLowerCase().includes('mac')
@@ -302,6 +331,56 @@ type RibbonTab =
   | (typeof TABLE_TABS)[number]
   | (typeof IMAGE_TABS)[number]
   | (typeof SHAPE_TABS)[number]
+
+const TABLE_PRESETS = [
+  {
+    label: 'ribbonTablePresetGrid',
+    headerFill: null,
+    band1Fill: null,
+    band2Fill: null,
+    borderColor: '808080',
+  },
+  {
+    label: 'ribbonTablePresetBlueHeader',
+    headerFill: 'D9EAF7',
+    band1Fill: null,
+    band2Fill: null,
+    borderColor: '5B9BD5',
+  },
+  {
+    label: 'ribbonTablePresetBlueBanded',
+    headerFill: 'BDD7EE',
+    band1Fill: 'DDEBF7',
+    band2Fill: 'FFFFFF',
+    borderColor: '9DC3E6',
+  },
+  {
+    label: 'ribbonTablePresetGrayBanded',
+    headerFill: 'D9E1F2',
+    band1Fill: 'E7E6E6',
+    band2Fill: 'FFFFFF',
+    borderColor: 'A5A5A5',
+  },
+  {
+    label: 'ribbonTablePresetGreenHeader',
+    headerFill: 'E2F0D9',
+    band1Fill: null,
+    band2Fill: null,
+    borderColor: '70AD47',
+  },
+] as const satisfies ReadonlyArray<{
+  label: StringKey
+  headerFill: string | null
+  band1Fill: string | null
+  band2Fill: string | null
+  borderColor: string
+}>
+
+const TABLE_AUTO_FIT_OPTIONS: Array<[TableAutoFitMode, StringKey]> = [
+  ['contents', 'ribbonAutoFitContents'],
+  ['window', 'ribbonAutoFitWindow'],
+  ['fixed', 'ribbonFixedColumnWidth'],
+]
 
 // tab values double as internal-state / external tabRequest keys; translated for display via these string keys
 const TAB_LABEL_KEYS: Record<string, StringKey> = {
@@ -538,6 +617,7 @@ function findNumIdOfKind(blocks: Block[], kind: 'bullet' | 'ordered'): string | 
 }
 
 function RibbonInner({
+  actionsRef,
   quickActions,
   trailingActions,
   editor,
@@ -582,8 +662,8 @@ function RibbonInner({
   zoom,
   onZoom,
   onZoomFit,
-  darkCanvas,
-  onDarkCanvas,
+  darkPage,
+  onDarkPage,
   onAiPreset,
   tabRequest,
   header,
@@ -603,11 +683,14 @@ function RibbonInner({
   showNav,
   onShowNav,
   commentCount,
+  openCommentCount,
   onShowComments,
   canComment,
   onNewComment,
   trackChanges,
   onTrackChanges,
+  spellcheck,
+  onSpellcheck,
   revisionDisplay,
   onRevisionDisplay,
   revisionCount,
@@ -632,6 +715,7 @@ function RibbonInner({
   onPagePreview,
 }: RibbonProps) {
   const { t, lang } = useI18n()
+  const collapse = useRibbonCollapse('aidocs.ribbonCollapsed')
   // The one-click AI actions need text to work on; grey them out on an empty document
   const docEmpty = !hasDoc || fs.docEmpty
   const [tab, setTab] = useState<RibbonTab>('home')
@@ -657,6 +741,7 @@ function RibbonInner({
   /** Picture Format → remove background / crop dialogs */
   const [pictureDialog, setPictureDialog] = useState<'cutout' | 'crop' | null>(null)
   const [listDialog, setListDialog] = useState(false)
+  const [tablePropertiesOpen, setTablePropertiesOpen] = useState(false)
 
   useEffect(() => {
     if (tabRequest && (TABS as readonly string[]).includes(tabRequest.tab)) {
@@ -731,7 +816,11 @@ function RibbonInner({
   }, [inImage])
 
   // ---- Shape Format (contextual tab when a floating box is selected, same mechanism) ----
-  const inShape = !sub && fs.textboxSelected
+  // Unlike the picture tab this one survives `sub`: double-clicking into the
+  // shape's text keeps the object selected in the main editor, and Word leaves
+  // Shape Format standing throughout — dropping it there is what forced a trip
+  // back to Home to change so much as the weight of the text just typed.
+  const inShape = fs.textboxSelected
   const shapeIsLine = !!fs.shapePrst?.startsWith('line')
   const wasInShape = useRef(false)
 
@@ -767,6 +856,80 @@ function RibbonInner({
       .focus()
       .updateAttributes('docProtected', { textboxes: [box, ...boxes.slice(1)] })
       .run()
+  }
+
+  /**
+   * Rewrite every run and paragraph of the selected shape. Only for object mode:
+   * with the shape selected there is no text selection for a mark command to act
+   * on, so Word reformats the whole shape and `editRun`/`editPara` see each part
+   * of it in turn. While a sub-editor holds focus the ordinary mark and alignment
+   * commands already target the text, and shapeTextCommand routes there instead.
+   *
+   * Confined to the first box like setShapeStyle: a paragraph anchoring several
+   * shapes packs them into one docProtected node, and the ribbon reads and writes
+   * only that one — reformatting the rest would hit shapes it is not showing.
+   *
+   * The node view re-feeds its sub-editors from the new attrs, so the shape
+   * repaints even while its text is being edited.
+   */
+  const setShapeText = (
+    editRun?: (run: Run) => Run,
+    editPara?: (para: TextboxParaDisplay) => TextboxParaDisplay,
+  ) => {
+    if (!canEdit) return
+    const attrs = editor.getAttributes('docProtected')
+    const boxes = attrs?.textboxes as TextboxDisplay[] | null
+    if (!Array.isArray(boxes) || boxes.length === 0 || boxes[0].readOnly) return
+    const box = {
+      ...boxes[0],
+      paras: boxes[0].paras.map((para) => {
+        const withRuns = editRun ? { ...para, runs: para.runs.map(editRun) } : para
+        return editPara ? editPara(withRuns) : withRuns
+      }),
+    }
+    editor
+      .chain()
+      .focus()
+      .updateAttributes('docProtected', { textboxes: [box, ...boxes.slice(1)] })
+      .run()
+  }
+
+  /** drop a run property rather than storing an explicit "off" Word would have to write out */
+  const withRunFlag = (run: Run, key: 'bold' | 'italic' | 'underline', on: boolean): Run => {
+    const next = { ...run }
+    if (on) next[key] = true
+    else delete next[key]
+    return next
+  }
+
+  /** Shape Format text buttons: the sub-editor when inside the text, the whole shape otherwise */
+  const shapeTextCommand = {
+    toggleMark: (name: 'bold' | 'italic' | 'underline', active: boolean) => {
+      if (sub) chain().toggleMark(name).run()
+      else setShapeText((run) => withRunFlag(run, name, !active))
+    },
+    setColor: (hex: string | null) => {
+      if (sub) setTextStyle({ color: hex })
+      else
+        setShapeText((run) => {
+          const next = { ...run }
+          if (hex) next.color = hex
+          else delete next.color
+          return next
+        })
+    },
+    setAlign: (align: 'left' | 'center' | 'right' | 'justify') => {
+      if (sub) setSelectionAlign(ed, align)
+      else setShapeText(undefined, (para) => ({ ...para, align }))
+    },
+  }
+
+  const shapeTextActive = {
+    bold: sub ? fs.bold : fs.shapeTextBold,
+    italic: sub ? fs.italic : fs.shapeTextItalic,
+    underline: sub ? fs.underline : fs.shapeTextUnderline,
+    color: sub ? fs.textColor : fs.shapeTextColor,
+    align: sub ? fs.align : fs.shapeTextAlign,
   }
 
   /**
@@ -900,14 +1063,42 @@ function RibbonInner({
     : 23.28
 
   type BorderSide = { style: string; szEighths?: number; color?: string }
-  /** Apply borders to selected cells: all/outer/inner compute the four sides per cell from selection geometry; none clears explicitly */
-  const applyCellBorders = (mode: 'all' | 'outer' | 'inner' | 'none') => {
+  /** Apply borders to selected cells: all/outer/inner compute the four sides per cell from selection geometry; none clears explicitly.
+   *  top/bottom/left/right apply only to that edge of the selection. insideH/insideV
+   *  write the table-level tblBorders attr (per-cell insideH/insideV has no renderer):
+   *  they apply to the whole table, as their tips state. */
+  const applyCellBorders = (
+    mode:
+      | 'all'
+      | 'outer'
+      | 'inner'
+      | 'none'
+      | 'top'
+      | 'bottom'
+      | 'left'
+      | 'right'
+      | 'insideH'
+      | 'insideV',
+  ) => {
     if (!canEdit || !isInTable(editor.state)) return
     editor.view.focus()
     const { state, view } = editor
     const rect = selectedRect(state)
     const solid: BorderSide = { style: 'single', szEighths: borderSz, color: borderColor }
     const none: BorderSide = { style: 'none' }
+    if (mode === 'insideH' || mode === 'insideV') {
+      const tablePos = rect.tableStart - 1
+      const tableNode = state.doc.nodeAt(tablePos)
+      if (!tableNode || tableNode.type.name !== 'docTable') return
+      const prev = (tableNode.attrs.borders as Record<string, BorderSide> | null) ?? {}
+      view.dispatch(
+        state.tr.setNodeMarkup(tablePos, undefined, {
+          ...tableNode.attrs,
+          borders: { ...prev, [mode]: solid },
+        }),
+      )
+      return
+    }
     let tr = state.tr
     const seen = new Set<number>()
     for (let row = rect.top; row < rect.bottom; row++) {
@@ -933,8 +1124,22 @@ function RibbonInner({
           else if (mode === 'none') next[side] = none
           else if (mode === 'outer' && edge[side]) next[side] = solid
           else if (mode === 'inner' && !edge[side]) next[side] = solid
+          else if (mode === side && edge[side]) next[side] = solid
         }
         tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, borders: next })
+      }
+    }
+    if (mode === 'none') {
+      // table-level inside lines (Inside Horizontal/Vertical) would otherwise survive No Borders
+      const tablePos = rect.tableStart - 1
+      const tableNode = tr.doc.nodeAt(tablePos)
+      const prev = tableNode?.attrs.borders as Record<string, BorderSide> | null | undefined
+      if (tableNode?.type.name === 'docTable' && prev && (prev.insideH || prev.insideV)) {
+        const { insideH: _h, insideV: _v, ...rest } = prev
+        tr = tr.setNodeMarkup(tablePos, undefined, {
+          ...tableNode.attrs,
+          borders: Object.keys(rest).length ? rest : null,
+        })
       }
     }
     view.dispatch(tr)
@@ -976,6 +1181,87 @@ function RibbonInner({
           widthCm: fs.cellWidthCm,
           vAlign: fs.cellVAlign,
         }
+
+  const tableAttrs = inTable ? editor.getAttributes('docTable') : {}
+  const tableHeader = inTable ? repeatHeaderState(editor.state) : { enabled: false, active: false }
+  const tableLook = (tableAttrs.tblLook as TableLook | null) ?? {
+    firstRow: true,
+    lastRow: false,
+    firstColumn: true,
+    lastColumn: false,
+    bandedRows: true,
+    bandedColumns: false,
+  }
+  const tableAutoFitMode: TableAutoFitMode =
+    tableAttrs.tblAutoFit === 'contents' || tableAttrs.tblAutoFit === 'window'
+      ? tableAttrs.tblAutoFit
+      : 'fixed'
+  const tableAutoFitLabel =
+    TABLE_AUTO_FIT_OPTIONS.find(([mode]) => mode === tableAutoFitMode)?.[1] ??
+    'ribbonFixedColumnWidth'
+
+  const applyTableProperties = (value: TablePropertiesValue) => {
+    if (!canEdit || !inTable) return
+    let measuredWidthPx = Number(tableAttrs.widthPx) || 0
+    if (!(measuredWidthPx > 0)) {
+      try {
+        const rect = selectedRect(editor.state)
+        const tableDom = editor.view.nodeDOM(rect.tableStart - 1)
+        if (tableDom instanceof HTMLElement) {
+          const zoomEl = document.querySelector('.doc-zoom') as HTMLElement | null
+          const zoom = zoomEl ? parseFloat(getComputedStyle(zoomEl).zoom || '1') || 1 : 1
+          measuredWidthPx = tableDom.getBoundingClientRect().width / zoom
+        }
+      } catch {
+        // A malformed table falls back to the section width below.
+      }
+    }
+    measuredWidthPx = Math.max(1, Math.round(measuredWidthPx || sectionContentWidthPx))
+    const positionedWidthPx =
+      value.autoFit === 'window' ? Math.round(sectionContentWidthPx) : measuredWidthPx
+    runTableCommand(setTableAutoFit(value.autoFit, sectionContentWidthPx))
+    const twips = (cm: number) => Math.max(0, Math.round(cm * TWIPS_PER_CM))
+    const signedTwips = (cm: number) => Math.round(cm * TWIPS_PER_CM)
+    const floatX =
+      value.wrap === 'right' && Math.abs(value.positionXCm) < 0.001
+        ? value.autoFit === 'window'
+          ? 0
+          : Math.max(0, Math.round((sectionContentWidthPx - positionedWidthPx) * 15))
+        : signedTwips(value.positionXCm)
+    const keepFloatSuppressed = value.floatSuppressed && value.wrap !== 'none'
+    runTableCommand(
+      updateSelectedTableAttrs({
+        tblFloatWidthPx: value.wrap === 'right' ? positionedWidthPx : null,
+        cellMar: {
+          top: twips(value.marginTopCm),
+          right: twips(value.marginRightCm),
+          bottom: twips(value.marginBottomCm),
+          left: twips(value.marginLeftCm),
+        },
+        cellMarEdited: true,
+        tblFloat: keepFloatSuppressed ? null : value.wrap,
+        tblFloatSource: value.wrap,
+        tblFloatSuppressed: keepFloatSuppressed,
+        tblFloatXTwips: value.wrap === 'none' ? null : floatX,
+        tblFloatYTwips: value.wrap === 'none' ? null : signedTwips(value.positionYCm),
+        tblFloatHorzAnchor:
+          value.wrap === 'none' ? null : (tableAttrs.tblFloatHorzAnchor ?? 'margin'),
+        tblFloatVertAnchor:
+          value.wrap === 'none' ? null : (tableAttrs.tblFloatVertAnchor ?? 'margin'),
+        tblFloatDistance:
+          value.wrap === 'none'
+            ? null
+            : {
+                top: twips(value.distanceCm),
+                right: twips(value.distanceCm),
+                bottom: twips(value.distanceCm),
+                left: twips(value.distanceCm),
+              },
+        tblFloatEdited: true,
+      }),
+    )
+    setTablePropertiesOpen(false)
+  }
 
   const activeCharStyleId = fs.charStyleId
   const presetAccent = themeColors?.accent1?.trim().toUpperCase() || DEFAULT_PRESET_ACCENT
@@ -1094,23 +1380,9 @@ function RibbonInner({
     else setTextStyle({ fontAscii: name })
   }
 
-  /** apply paragraph-level attrs to every block type in the selection */
+  /** apply paragraph-level attrs to every paragraph in the selection (textbox sub-editor included) */
   const setParaAttr = (attrs: Record<string, unknown>) => {
-    if (sub) {
-      // textbox paragraphs only support alignment; other keys are ignored
-      chain().updateAttributes('docParagraph', attrs).run()
-      setDropdown(null)
-      return
-    }
-    let c = chain()
-      .updateAttributes('docParagraph', attrs)
-      .updateAttributes('docHeading', attrs)
-      .updateAttributes('docListItem', attrs)
-    // alignment also applies to selected images (w:jc on the image paragraph)
-    if ('align' in attrs) {
-      c = c.updateAttributes('docProtected', { imageAlign: attrs.align ?? null })
-    }
-    c.run()
+    if (canEdit) setParaAttrs(ed, attrs)
     setDropdown(null)
   }
 
@@ -1139,51 +1411,8 @@ function RibbonInner({
       }
       return
     }
-    if (sub) return // textboxes have no heading styles
-    let c = chain()
-    if (key === 'p') c = c.setNode('docParagraph')
-    else c = c.setNode('docHeading', { level: Number(key.slice(1)) })
-    // Word-like: applying a paragraph style sheds the runs' direct font/size/color.
-    // Those render as inline span styles and would otherwise mask the style's look
-    // entirely (the click would seem to do nothing on documents whose body runs
-    // carry explicit rPr, common in CJK templates).
-    c.command(({ tr }) => {
-      const { from, to } = tr.selection
-      let start = from
-      let end = to
-      tr.doc.nodesBetween(from, to, (node, pos) => {
-        if (node.isTextblock) {
-          start = Math.min(start, pos + 1)
-          end = Math.max(end, pos + node.nodeSize - 1)
-        }
-      })
-      const type = editor.schema.marks.docTextStyle
-      const jobs: Array<{ from: number; to: number; attrs: Record<string, unknown> | null }> = []
-      tr.doc.nodesBetween(start, end, (node, pos) => {
-        if (!node.isText) return
-        const m = node.marks.find((mm) => mm.type === type)
-        if (!m) return
-        if (
-          m.attrs.color == null &&
-          m.attrs.sizeHalfPoints == null &&
-          m.attrs.font == null &&
-          m.attrs.fontAscii == null
-        )
-          return
-        const attrs = { ...m.attrs, color: null, sizeHalfPoints: null, font: null, fontAscii: null }
-        const keep = Object.values(attrs).some((v) => v !== null)
-        jobs.push({
-          from: Math.max(pos, start),
-          to: Math.min(pos + node.nodeSize, end),
-          attrs: keep ? attrs : null,
-        })
-      })
-      for (const job of jobs) {
-        tr.removeMark(job.from, job.to, type)
-        if (job.attrs) tr.addMark(job.from, job.to, type.create(job.attrs))
-      }
-      return true
-    }).run()
+    if (sub || !canEdit) return // textboxes have no heading styles
+    applyParagraphStyle(editor, key as 'p' | 'h1' | 'h2' | 'h3')
   }
 
   /** Style cards, shared by the inline gallery and its overflow menu */
@@ -1257,18 +1486,7 @@ function RibbonInner({
     stepParagraphIndent(editor, delta)
   }
 
-  const stepFontSize = (dir: 1 | -1) => {
-    const step = (base: number): number => {
-      const idx = FONT_SIZES.findIndex((s) => s >= base)
-      if (dir === 1)
-        return FONT_SIZES[
-          Math.min(
-            idx === -1 ? FONT_SIZES.length : idx + (FONT_SIZES[idx] === base ? 1 : 0),
-            FONT_SIZES.length - 1,
-          )
-        ]
-      return FONT_SIZES[Math.max(idx === -1 ? FONT_SIZES.length - 1 : idx - 1, 0)]
-    }
+  const applyFontStep = (step: (base: number) => number) => {
     // Every applied size change re-paginates the whole document synchronously —
     // ~700ms per click on table-heavy documents — so clicking A+/A- in a burst
     // froze the UI for seconds. Apply the first click immediately (a single
@@ -1313,6 +1531,30 @@ function RibbonInner({
     }, FONT_STEP_COALESCE_MS)
   }
 
+  /** A+/A- and ⇧⌘. / ⇧⌘,: walk Word's preset size list */
+  const stepFontSize = (dir: 1 | -1) =>
+    applyFontStep((base) => {
+      const idx = FONT_SIZES.findIndex((s) => s >= base)
+      if (dir === 1)
+        return FONT_SIZES[
+          Math.min(
+            idx === -1 ? FONT_SIZES.length : idx + (FONT_SIZES[idx] === base ? 1 : 0),
+            FONT_SIZES.length - 1,
+          )
+        ]
+      return FONT_SIZES[Math.max(idx === -1 ? FONT_SIZES.length - 1 : idx - 1, 0)]
+    })
+
+  /** Word's ⌘] / ⌘[: exactly one point, within Word's 1–1638pt range */
+  const nudgeFontSize = (dir: 1 | -1) =>
+    applyFontStep((base) => Math.min(Math.max(Math.round(base) + dir, 1), 1638))
+
+  useEffect(() => {
+    if (!actionsRef) return
+    actionsRef.current.stepFontSize = stepFontSize
+    actionsRef.current.nudgeFontSize = nudgeFontSize
+  })
+
   const toggleVertAlign = (kind: 'superscript' | 'subscript') => {
     setTextStyle({ vertAlign: fs.vertAlign === kind ? null : kind })
   }
@@ -1347,12 +1589,19 @@ function RibbonInner({
     // Paragraph formatting is picked up per Word's ¶-mark rule: a caret pickup
     // or a cross-paragraph selection carries the block identity (heading
     // level / list numbering / styleId) — which then applies to whole target
-    // paragraphs. ANY in-paragraph drag selection copies character formatting
-    // only (in Word a within-paragraph drag can never include the ¶ mark, even
-    // when it covers every visible character), so brushing selected text never
-    // restyles the target's entire paragraph.
+    // paragraphs. A PARTIAL in-paragraph drag copies character formatting
+    // only — but a selection covering the paragraph's ENTIRE content counts
+    // as including the ¶ mark, exactly like Word's triple-click (alpha ledger
+    // r134: "select whole paragraph → painter" dropped line spacing/indents
+    // while a caret pickup carried them — backwards to any user).
     const { $to } = state.selection
-    const includesParaMark = empty || !$from.sameParent($to)
+    const coversWholeParagraph =
+      !empty &&
+      $from.parent.isTextblock && // AllSelection's parent is the doc (bugbot)
+      $from.sameParent($to) &&
+      $from.parentOffset === 0 &&
+      $to.parentOffset === $to.parent.content.size
+    const includesParaMark = empty || !$from.sameParent($to) || coversWholeParagraph
     const marks = picked
       .filter((m) => PAINTER_MARK_TYPES.includes(m.type.name) && m.type.name !== 'docTextStyle')
       .map((m) => ({ type: m.type.name, attrs: { ...m.attrs } as Record<string, unknown> }))
@@ -1560,38 +1809,64 @@ function RibbonInner({
     }
   }, [painter, editor])
 
-  const changeCase = (mode: 'upper' | 'lower' | 'title' | 'sentence') => {
+  const changeCase = (mode: CaseMode) => {
     if (!canEdit) return
-    const { from, to } = ed.state.selection
-    if (from === to) return
-    ed.chain()
-      .focus()
-      .command(({ state, tr }) => {
-        state.doc.nodesBetween(from, to, (node, pos) => {
-          if (!node.isText || !node.text) return
-          const start = Math.max(from, pos)
-          const end = Math.min(to, pos + node.nodeSize)
-          const slice = node.text.slice(start - pos, end - pos)
-          const next = transformCase(slice, mode)
-          if (next !== slice) {
-            tr.replaceWith(
-              tr.mapping.map(start),
-              tr.mapping.map(end),
-              state.schema.text(next, node.marks),
-            )
-          }
-        })
-        return true
-      })
-      .run()
+    applyCase(ed, mode)
     setDropdown(null)
   }
 
   const clipboard = async (action: 'cut' | 'copy' | 'paste') => {
     if (action !== 'copy' && !canEdit) return
     if (action === 'paste') {
+      // Same pipeline as Ctrl+V: pasteHTML/pasteText run the editor's full
+      // paste machinery, where readText + insertContent flattened everything
+      // to plain text (r127). The synthesized event carries a real
+      // clipboardData so App's handlePaste branches (empty-paragraph
+      // wholesale replace, markdown conversion, image priority) behave
+      // exactly as on a native paste.
+      const pasteEvent = (html: string | null, text: string): ClipboardEvent => {
+        const data = new DataTransfer()
+        if (html) data.setData('text/html', html)
+        if (text) data.setData('text/plain', text)
+        return new ClipboardEvent('paste', { clipboardData: data })
+      }
+      try {
+        for (const item of await navigator.clipboard.read()) {
+          const text = item.types.includes('text/plain')
+            ? await (await item.getType('text/plain')).text()
+            : ''
+          if (item.types.includes('text/html')) {
+            const html = await (await item.getType('text/html')).text()
+            if (html) {
+              ed.view.pasteHTML(html, pasteEvent(html, text))
+              ed.commands.focus()
+              return
+            }
+          }
+          // image priority mirrors Ctrl+V: an image wins over missing or
+          // whitespace-only plain text (OS clipboards often advertise an
+          // empty text/plain beside image/png)
+          const imageType = item.types.find((type) => type.startsWith('image/'))
+          if (imageType && !text.trim()) {
+            const blob = await item.getType(imageType)
+            const reader = new FileReader()
+            reader.onload = () => {
+              if (typeof reader.result === 'string') {
+                void insertImageFromDataUrl(ed, reader.result, 'Image (pasted)')
+              }
+            }
+            reader.readAsDataURL(blob)
+            return
+          }
+        }
+      } catch {
+        /* clipboard.read unavailable/denied: plain-text fallback below */
+      }
       const text = await navigator.clipboard.readText()
-      if (text) chain().insertContent(text).run()
+      if (text) {
+        ed.view.pasteText(text, pasteEvent(null, text))
+        ed.commands.focus()
+      }
     } else {
       document.execCommand(action)
       ed.commands.focus()
@@ -1610,10 +1885,44 @@ function RibbonInner({
     </button>
   )
 
+  const shapeMarkBtn = (
+    name: 'bold' | 'italic' | 'underline',
+    active: boolean,
+    title: string,
+    label: ReactNode,
+  ) => (
+    <button
+      className={`rb-icon ${active ? 'active' : ''}`}
+      disabled={!canEdit}
+      data-tip={title}
+      aria-label={title}
+      onClick={() => shapeTextCommand.toggleMark(name, active)}
+    >
+      {label}
+    </button>
+  )
+
+  const shapeAlignBtn = (
+    align: 'left' | 'center' | 'right' | 'justify',
+    title: string,
+    icon: ReactNode,
+  ) => (
+    <button
+      className={`rb-icon ${shapeTextActive.align === align ? 'active' : ''}`}
+      disabled={!canEdit}
+      data-tip={title}
+      aria-label={title}
+      onClick={() => shapeTextCommand.setAlign(align)}
+    >
+      {icon}
+    </button>
+  )
+
   return (
-    <div className="ribbon">
+    <div className={`ribbon ${collapse.rootClass}`} ref={collapse.rootRef}>
       <div
         className={`ribbon-tabs ${IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
+        onDoubleClick={collapse.onTabsDoubleClick}
       >
         {!IS_MAC && (
           <div className="file-tab-wrap">
@@ -1661,6 +1970,7 @@ function RibbonInner({
             key={tabName}
             className={`ribbon-tab ${tab === tabName ? 'active' : ''}`}
             onClick={() => {
+              collapse.onTabPress(tab === tabName)
               lastRegularTab.current = tabName
               setTab(tabName)
               setDropdown(null)
@@ -1676,6 +1986,7 @@ function RibbonInner({
               key={tableTab}
               className={`ribbon-tab ${tab === tableTab ? 'active' : ''}`}
               onClick={() => {
+                collapse.onTabPress(tab === tableTab)
                 setTab(tableTab)
                 setDropdown(null)
               }}
@@ -1689,6 +2000,7 @@ function RibbonInner({
               key={imageTab}
               className={`ribbon-tab ${tab === imageTab ? 'active' : ''}`}
               onClick={() => {
+                collapse.onTabPress(tab === imageTab)
                 setTab(imageTab)
                 setDropdown(null)
               }}
@@ -1702,6 +2014,7 @@ function RibbonInner({
               key={shapeTab}
               className={`ribbon-tab ${tab === shapeTab ? 'active' : ''}`}
               onClick={() => {
+                collapse.onTabPress(tab === shapeTab)
                 setTab(shapeTab)
                 setDropdown(null)
               }}
@@ -1713,7 +2026,7 @@ function RibbonInner({
         {trailingActions}
       </div>
 
-      <div className="ribbon-body">
+      <div className="ribbon-body" data-ribbon-body="">
         {tab === 'shapeFormat' && inShape ? (
           <div className="table-ribbon-body">
             <div className="ribbon-group">
@@ -1783,6 +2096,69 @@ function RibbonInner({
               </div>
               <div className="ribbon-group-label">{t('ribbonGroupShapeStyles')}</div>
             </div>
+            {fs.shapeHasText && (
+              <div className="ribbon-group">
+                <div className="ribbon-group-items">
+                  <div className="rb-col">
+                    <div className="rb-row">
+                      {shapeMarkBtn('bold', shapeTextActive.bold, t('ribbonBoldTip'), <b>B</b>)}
+                      {shapeMarkBtn(
+                        'italic',
+                        shapeTextActive.italic,
+                        t('ribbonItalicTip'),
+                        <i>I</i>,
+                      )}
+                      {shapeMarkBtn(
+                        'underline',
+                        shapeTextActive.underline,
+                        t('ribbonUnderlineTip'),
+                        <u>U</u>,
+                      )}
+                      <div className="rb-split-wrap">
+                        <button
+                          className="rb-icon rb-color-btn"
+                          disabled={!canEdit}
+                          data-tip={t('ribbonFontColor')}
+                          aria-label={t('ribbonFontColor')}
+                          onClick={() =>
+                            setDropdown((v) => (v === 'shapeTextColor' ? null : 'shapeTextColor'))
+                          }
+                        >
+                          <span className="rb-color-glyph rb-color-glyph-svg">
+                            <IconFontColorA />
+                            <span
+                              className="rb-color-bar"
+                              style={{
+                                background: shapeTextActive.color
+                                  ? `#${shapeTextActive.color}`
+                                  : 'transparent',
+                              }}
+                            />
+                          </span>
+                        </button>
+                        {dropdown === 'shapeTextColor' && (
+                          <ShapeColorPalette
+                            current={shapeTextActive.color}
+                            noneLabel={t('ribbonAutomatic')}
+                            onPick={(hex) => {
+                              shapeTextCommand.setColor(hex)
+                              setDropdown(null)
+                            }}
+                          />
+                        )}
+                      </div>
+                    </div>
+                    <div className="rb-row">
+                      {shapeAlignBtn('left', t('ribbonAlignLeftTip'), <IconAlignLeft />)}
+                      {shapeAlignBtn('center', t('ribbonAlignCenterTip'), <IconAlignCenter />)}
+                      {shapeAlignBtn('right', t('ribbonAlignRightTip'), <IconAlignRight />)}
+                      {shapeAlignBtn('justify', t('ribbonJustifyTip'), <IconAlignJustify />)}
+                    </div>
+                  </div>
+                </div>
+                <div className="ribbon-group-label">{t('ribbonGroupText')}</div>
+              </div>
+            )}
           </div>
         ) : tab === 'pictureFormat' && inImage ? (
           <div className="table-ribbon-body">
@@ -1822,6 +2198,42 @@ function RibbonInner({
                   </span>
                   <span>{t('ribbonReplacePicture')}</span>
                 </button>
+                <div className="rb-col">
+                  <button
+                    className="rb-small"
+                    disabled={!canEdit}
+                    onClick={() => rotatePicture(90)}
+                  >
+                    <IconRotateRight size={18} />
+                    <span>{t('ribbonRotateRight')}</span>
+                  </button>
+                  <button
+                    className="rb-small"
+                    disabled={!canEdit}
+                    onClick={() => rotatePicture(-90)}
+                  >
+                    <IconRotateLeft size={18} />
+                    <span>{t('ribbonRotateLeft')}</span>
+                  </button>
+                </div>
+                <div className="rb-col">
+                  <button
+                    className={fs.imageFlipH ? 'rb-small active' : 'rb-small'}
+                    disabled={!canEdit}
+                    onClick={() => flipPicture('h')}
+                  >
+                    <IconFlipH size={18} />
+                    <span>{t('ribbonFlipH')}</span>
+                  </button>
+                  <button
+                    className={fs.imageFlipV ? 'rb-small active' : 'rb-small'}
+                    disabled={!canEdit}
+                    onClick={() => flipPicture('v')}
+                  >
+                    <IconFlipV size={18} />
+                    <span>{t('ribbonFlipV')}</span>
+                  </button>
+                </div>
               </div>
               <div className="ribbon-group-label">{t('ribbonGroupAdjust')}</div>
             </div>
@@ -1880,44 +2292,6 @@ function RibbonInner({
                     {icon}
                   </button>
                 ))}
-              </div>
-              <div className="table-tool-row">
-                <button
-                  className="table-tool-button"
-                  disabled={!canEdit}
-                  data-tip={t('ribbonRotateRight')}
-                  aria-label={t('ribbonRotateRight')}
-                  onClick={() => rotatePicture(90)}
-                >
-                  <IconRotateRight />
-                </button>
-                <button
-                  className="table-tool-button"
-                  disabled={!canEdit}
-                  data-tip={t('ribbonRotateLeft')}
-                  aria-label={t('ribbonRotateLeft')}
-                  onClick={() => rotatePicture(-90)}
-                >
-                  <IconRotateLeft />
-                </button>
-                <button
-                  className={fs.imageFlipH ? 'table-tool-button active' : 'table-tool-button'}
-                  disabled={!canEdit}
-                  data-tip={t('ribbonFlipH')}
-                  aria-label={t('ribbonFlipH')}
-                  onClick={() => flipPicture('h')}
-                >
-                  <IconFlipH />
-                </button>
-                <button
-                  className={fs.imageFlipV ? 'table-tool-button active' : 'table-tool-button'}
-                  disabled={!canEdit}
-                  data-tip={t('ribbonFlipV')}
-                  aria-label={t('ribbonFlipV')}
-                  onClick={() => flipPicture('v')}
-                >
-                  <IconFlipV />
-                </button>
               </div>
               <div className="ribbon-group-label">{t('ribbonGroupArrange')}</div>
             </div>
@@ -2009,13 +2383,34 @@ function RibbonInner({
                   <span className="table-style-card-grid plain" />
                   <span>{t('ribbonNoStyle')}</span>
                 </button>
+                {TABLE_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    className="table-style-card"
+                    data-tip={t(preset.label)}
+                    onClick={() => runTableCommand(applyTablePreset(preset))}
+                  >
+                    <span
+                      className="table-style-card-grid"
+                      style={{
+                        borderColor: `#${preset.borderColor}`,
+                        borderTopColor: `#${preset.headerFill ?? 'FFFFFF'}`,
+                        background: `repeating-linear-gradient(to bottom,#${preset.band1Fill ?? 'FFFFFF'} 0 50%,#${preset.band2Fill ?? preset.band1Fill ?? 'FFFFFF'} 50% 100%)`,
+                      }}
+                    />
+                    <span>{t(preset.label)}</span>
+                  </button>
+                ))}
                 {[...(styles?.values() ?? [])]
                   .filter((info) => info.type === 'table' && info.styleId !== 'TableNormal')
-                  .slice(0, 8)
                   .map((info) => (
                     <button
                       key={info.styleId}
-                      className="table-style-card"
+                      className={
+                        tableAttrs.tblStyleId === info.styleId
+                          ? 'table-style-card active'
+                          : 'table-style-card'
+                      }
                       data-tip={t('ribbonApplyTableStyleTip', { name: info.name })}
                       onClick={() =>
                         chain().updateAttributes('docTable', { tblStyleId: info.styleId }).run()
@@ -2037,6 +2432,36 @@ function RibbonInner({
                   ))}
               </div>
               <div className="ribbon-group-label">{t('ribbonGroupTableStyles')}</div>
+            </div>
+            <div className="ribbon-sep" />
+            <div className="table-tool-group">
+              <div className="table-style-options">
+                {(
+                  [
+                    ['firstRow', 'ribbonTableFirstRow'],
+                    ['lastRow', 'ribbonTableLastRow'],
+                    ['bandedRows', 'ribbonTableBandedRows'],
+                    ['firstColumn', 'ribbonTableFirstColumn'],
+                    ['lastColumn', 'ribbonTableLastColumn'],
+                    ['bandedColumns', 'ribbonTableBandedColumns'],
+                  ] as Array<[keyof TableLook, StringKey]>
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    className={
+                      tableLook[key]
+                        ? 'table-option-toggle table-tool-button active'
+                        : 'table-option-toggle table-tool-button'
+                    }
+                    aria-pressed={tableLook[key]}
+                    onClick={() => runTableCommand(setTableLookOption(key, !tableLook[key]))}
+                  >
+                    <span className="table-option-check" aria-hidden="true" />
+                    <span>{t(label)}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="ribbon-group-label">{t('ribbonTableStyleOptions')}</div>
             </div>
             <div className="ribbon-sep" />
             <div className="table-tool-group">
@@ -2087,6 +2512,50 @@ function RibbonInner({
                 >
                   <IconBorderNone />
                   {t('ribbonNoBorders')}
+                </button>
+              </div>
+              <div className="table-tool-grid table-tool-grid-three">
+                <button
+                  data-tip={t('ribbonOuterBordersTip')}
+                  onClick={() => applyCellBorders('top')}
+                >
+                  <IconBorderTop />
+                  {t('ribbonBorderTop')}
+                </button>
+                <button
+                  data-tip={t('ribbonOuterBordersTip')}
+                  onClick={() => applyCellBorders('bottom')}
+                >
+                  <IconBorderBottom />
+                  {t('ribbonBorderBottom')}
+                </button>
+                <button
+                  data-tip={t('ribbonOuterBordersTip')}
+                  onClick={() => applyCellBorders('left')}
+                >
+                  <IconBorderLeft />
+                  {t('ribbonBorderLeft')}
+                </button>
+                <button
+                  data-tip={t('ribbonOuterBordersTip')}
+                  onClick={() => applyCellBorders('right')}
+                >
+                  <IconBorderRight />
+                  {t('ribbonBorderRight')}
+                </button>
+                <button
+                  data-tip={t('ribbonTableInsideHBordersTip')}
+                  onClick={() => applyCellBorders('insideH')}
+                >
+                  <IconBorderInsideH />
+                  {t('ribbonTableInsideHBorders')}
+                </button>
+                <button
+                  data-tip={t('ribbonTableInsideVBordersTip')}
+                  onClick={() => applyCellBorders('insideV')}
+                >
+                  <IconBorderInsideV />
+                  {t('ribbonTableInsideVBorders')}
                 </button>
               </div>
               <div className="table-tool-row table-border-opts">
@@ -2293,6 +2762,76 @@ function RibbonInner({
               </div>
               <div className="ribbon-group-label">{t('ribbonGroupCellSize')}</div>
             </div>
+            <div className="ribbon-sep" />
+            <div className="table-tool-group table-tool-autofit">
+              <div className="table-tool-row">
+                <div className="rb-split-wrap table-autofit-wrap">
+                  <button
+                    className={`table-command-button${dropdown === 'tableAutoFit' ? ' active' : ''}`}
+                    data-tip={t('ribbonAutoFit')}
+                    aria-expanded={dropdown === 'tableAutoFit'}
+                    onClick={() =>
+                      setDropdown((current) => (current === 'tableAutoFit' ? null : 'tableAutoFit'))
+                    }
+                  >
+                    <IconAutoFit size={18} />
+                    <span className="table-command-copy">
+                      <span>{t('ribbonAutoFit')}</span>
+                      <small>{t(tableAutoFitLabel)}</small>
+                    </span>
+                    <IconCaret size={12} />
+                  </button>
+                  {dropdown === 'tableAutoFit' && (
+                    <div data-rb-panel="" className="layout-menu table-autofit-menu">
+                      {TABLE_AUTO_FIT_OPTIONS.map(([mode, label]) => (
+                        <button
+                          key={mode}
+                          className={tableAutoFitMode === mode ? 'active' : ''}
+                          onClick={() => {
+                            runTableCommand(setTableAutoFit(mode, sectionContentWidthPx))
+                            setDropdown(null)
+                          }}
+                        >
+                          <IconAutoFit size={17} />
+                          <span>{t(label)}</span>
+                          <span className="table-menu-state" aria-hidden="true" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="ribbon-group-label">{t('ribbonAutoFit')}</div>
+            </div>
+            <div className="ribbon-sep" />
+            <div className="table-tool-group table-tool-advanced">
+              <div className="table-tool-stack">
+                <button
+                  className={
+                    tableHeader.active
+                      ? 'table-command-row table-tool-button active'
+                      : 'table-command-row table-tool-button'
+                  }
+                  disabled={!tableHeader.enabled}
+                  aria-pressed={tableHeader.active}
+                  onClick={() => runTableCommand(toggleRepeatHeaderRows())}
+                >
+                  <IconRepeatHeader size={17} />
+                  <span>{t('ribbonRepeatHeaderRows')}</span>
+                </button>
+                <button
+                  className="table-command-row"
+                  onClick={() => {
+                    setDropdown(null)
+                    setTablePropertiesOpen(true)
+                  }}
+                >
+                  <IconTableProperties size={17} />
+                  <span>{t('ribbonTableProperties')}</span>
+                </button>
+              </div>
+              <div className="ribbon-group-label">{t('ribbonTableData')}</div>
+            </div>
           </div>
         ) : tab === 'home' ? (
           <>
@@ -2346,7 +2885,13 @@ function RibbonInner({
                   className="rb-big ai-entry"
                   disabled={docEmpty}
                   data-tip={t('aiPolishBtn')}
-                  onClick={() => onAiPreset(t('aiPolishPrompt'))}
+                  onClick={() =>
+                    onAiPreset(
+                      t(
+                        editor.state.selection.empty ? 'aiPolishPrompt' : 'aiPolishSelectionPrompt',
+                      ),
+                    )
+                  }
                 >
                   <span className="rb-big-icon">
                     <span className="ai-feature-icon" aria-hidden="true">
@@ -3233,8 +3778,10 @@ function RibbonInner({
             onTitlePg={onTitlePg}
             evenOddHf={evenOddHf}
             onEvenOddHf={onEvenOddHf}
-            commentCount={commentCount}
-            onShowComments={onShowComments}
+            canComment={canComment}
+            onNewComment={onNewComment}
+            isProtected={isProtected}
+            commentsAllowed={commentsAllowed}
           />
         ) : tab === 'design' ? (
           <DesignTab
@@ -3283,11 +3830,14 @@ function RibbonInner({
             setDropdown={setDropdown}
             onAiPreset={onAiPreset}
             commentCount={commentCount}
+            openCommentCount={openCommentCount}
             onShowComments={onShowComments}
             canComment={canComment}
             onNewComment={onNewComment}
             trackChanges={trackChanges}
             onTrackChanges={onTrackChanges}
+            spellcheck={spellcheck}
+            onSpellcheck={onSpellcheck}
             revisionDisplay={revisionDisplay}
             onRevisionDisplay={onRevisionDisplay}
             revisionCount={revisionCount}
@@ -3311,8 +3861,8 @@ function RibbonInner({
             showAi={showAi}
             hideAi={hideAi}
             onToggleAi={onToggleAi}
-            darkCanvas={darkCanvas}
-            onDarkCanvas={onDarkCanvas}
+            darkPage={darkPage}
+            onDarkPage={onDarkPage}
             showRuler={showRuler}
             onShowRuler={onShowRuler}
             showNav={showNav}
@@ -3329,6 +3879,10 @@ function RibbonInner({
           />
         )}
       </div>
+      <RibbonCollapseButton
+        state={collapse}
+        labels={{ collapse: t('ribbonCollapse'), pin: t('ribbonPin') }}
+      />
 
       {pictureDialog === 'cutout' && imageDataUrl && (
         <CutoutDialog
@@ -3357,6 +3911,13 @@ function RibbonInner({
             applyListPreset(levels)
           }}
           onClose={() => setListDialog(false)}
+        />
+      )}
+      {tablePropertiesOpen && (
+        <TablePropertiesDialog
+          initial={tablePropertiesFromAttrs(tableAttrs)}
+          onApply={applyTableProperties}
+          onClose={() => setTablePropertiesOpen(false)}
         />
       )}
     </div>
@@ -3390,6 +3951,222 @@ const LIST_FMT_SAMPLES: Record<string, string> = {
 }
 
 const TWIPS_PER_CM = 567
+
+type TableWrapMode = 'none' | 'left' | 'right'
+
+interface TablePropertiesValue {
+  autoFit: TableAutoFitMode
+  wrap: TableWrapMode
+  floatSuppressed: boolean
+  positionXCm: number
+  positionYCm: number
+  distanceCm: number
+  marginTopCm: number
+  marginRightCm: number
+  marginBottomCm: number
+  marginLeftCm: number
+}
+
+function tablePropertiesFromAttrs(attrs: Record<string, unknown>): TablePropertiesValue {
+  const cm = (value: unknown, fallback = 0) =>
+    +((Number.isFinite(Number(value)) ? Number(value) : fallback) / TWIPS_PER_CM).toFixed(2)
+  const margins = (attrs.cellMar as Record<string, number> | null) ?? {}
+  const distance = (attrs.tblFloatDistance as Record<string, number> | null) ?? {}
+  const wrap: TableWrapMode =
+    attrs.tblFloat === 'left' || attrs.tblFloat === 'right'
+      ? attrs.tblFloat
+      : attrs.tblFloatSource === 'left' || attrs.tblFloatSource === 'right'
+        ? attrs.tblFloatSource
+        : 'none'
+  return {
+    autoFit:
+      attrs.tblAutoFit === 'contents' || attrs.tblAutoFit === 'window' ? attrs.tblAutoFit : 'fixed',
+    wrap,
+    floatSuppressed: attrs.tblFloatSuppressed === true,
+    positionXCm: cm(attrs.tblFloatXTwips),
+    positionYCm: cm(attrs.tblFloatYTwips),
+    distanceCm: cm(distance.right ?? distance.left ?? distance.top ?? distance.bottom, 180),
+    marginTopCm: cm(margins.top),
+    marginRightCm: cm(margins.right, 108),
+    marginBottomCm: cm(margins.bottom),
+    marginLeftCm: cm(margins.left, 108),
+  }
+}
+
+function TablePropertiesDialog({
+  initial,
+  onApply,
+  onClose,
+}: {
+  initial: TablePropertiesValue
+  onApply: (value: TablePropertiesValue) => void
+  onClose: () => void
+}) {
+  const { t } = useI18n()
+  const [value, setValue] = useState(initial)
+  const update = (patch: Partial<TablePropertiesValue>) =>
+    setValue((current) => ({ ...current, ...patch }))
+  const numberInput = (
+    key:
+      | 'positionXCm'
+      | 'positionYCm'
+      | 'distanceCm'
+      | 'marginTopCm'
+      | 'marginRightCm'
+      | 'marginBottomCm'
+      | 'marginLeftCm',
+  ) => (
+    <input
+      type="number"
+      min={key === 'positionXCm' || key === 'positionYCm' ? -50 : 0}
+      max={50}
+      step={0.1}
+      value={value[key]}
+      onChange={(event) => update({ [key]: Number(event.target.value) || 0 })}
+    />
+  )
+  const wrapLabel: StringKey =
+    value.wrap === 'left'
+      ? 'appWrapSquareLeft'
+      : value.wrap === 'right'
+        ? 'appWrapSquareRight'
+        : 'appWrapInline'
+  const autoFitLabel =
+    TABLE_AUTO_FIT_OPTIONS.find(([mode]) => mode === value.autoFit)?.[1] ?? 'ribbonFixedColumnWidth'
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal gs-form table-properties-dialog">
+        <div className="table-properties-header">
+          <span className="table-properties-header-icon" aria-hidden="true">
+            <IconTableProperties size={22} />
+          </span>
+          <div>
+            <h2>{t('ribbonTableProperties')}</h2>
+            <p className="modal-desc">
+              {t(autoFitLabel)} · {t(wrapLabel)}
+            </p>
+          </div>
+        </div>
+
+        <section className="table-properties-card">
+          <h3>{t('ribbonAutoFit')}</h3>
+          <div className="table-properties-segments">
+            {TABLE_AUTO_FIT_OPTIONS.map(([mode, label]) => (
+              <label key={mode} className="table-properties-segment">
+                <input
+                  type="radio"
+                  name="table-autofit"
+                  checked={value.autoFit === mode}
+                  onChange={() => update({ autoFit: mode })}
+                />
+                <span>{t(label)}</span>
+              </label>
+            ))}
+          </div>
+        </section>
+
+        <section className="table-properties-card">
+          <h3>{t('ribbonWrapText')}</h3>
+          <div className="table-properties-segments">
+            {(
+              [
+                ['none', 'appWrapInline'],
+                ['left', 'appWrapSquareLeft'],
+                ['right', 'appWrapSquareRight'],
+              ] as Array<[TableWrapMode, StringKey]>
+            ).map(([mode, label]) => (
+              <label key={mode} className="table-properties-segment">
+                <input
+                  type="radio"
+                  name="table-wrap"
+                  checked={value.wrap === mode}
+                  onChange={() => update({ wrap: mode })}
+                />
+                <span>{t(label)}</span>
+              </label>
+            ))}
+          </div>
+          {value.wrap !== 'none' && (
+            <div className="table-properties-grid">
+              <label>
+                {t('ribbonHorizontalPosition')}
+                <span>
+                  {numberInput('positionXCm')}
+                  {t('ribbonCm')}
+                </span>
+              </label>
+              <label>
+                {t('ribbonVerticalPosition')}
+                <span>
+                  {numberInput('positionYCm')}
+                  {t('ribbonCm')}
+                </span>
+              </label>
+              <label>
+                {t('ribbonDistanceFromText')}
+                <span>
+                  {numberInput('distanceCm')}
+                  {t('ribbonCm')}
+                </span>
+              </label>
+            </div>
+          )}
+        </section>
+
+        <section className="table-properties-card table-properties-margins">
+          <h3>{t('ribbonCellMargins')}</h3>
+          <div className="table-properties-margin-layout">
+            <div className="table-properties-grid">
+              <label>
+                {t('ribbonMarginTop')}
+                <span>
+                  {numberInput('marginTopCm')}
+                  {t('ribbonCm')}
+                </span>
+              </label>
+              <label>
+                {t('ribbonMarginBottom')}
+                <span>
+                  {numberInput('marginBottomCm')}
+                  {t('ribbonCm')}
+                </span>
+              </label>
+              <label>
+                {t('ribbonMarginLeft')}
+                <span>
+                  {numberInput('marginLeftCm')}
+                  {t('ribbonCm')}
+                </span>
+              </label>
+              <label>
+                {t('ribbonMarginRight')}
+                <span>
+                  {numberInput('marginRightCm')}
+                  {t('ribbonCm')}
+                </span>
+              </label>
+            </div>
+            <div className="table-margin-preview" aria-hidden="true">
+              <span className="table-margin-value top">{value.marginTopCm}</span>
+              <span className="table-margin-value right">{value.marginRightCm}</span>
+              <span className="table-margin-value bottom">{value.marginBottomCm}</span>
+              <span className="table-margin-value left">{value.marginLeftCm}</span>
+              <span className="table-margin-preview-cell" />
+            </div>
+          </div>
+        </section>
+
+        <div className="modal-actions">
+          <button onClick={onClose}>{t('ribbonCancel')}</button>
+          <button className="primary" onClick={() => onApply(value)}>
+            {t('ribbonOk')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function ListDefineDialog({
   onApply,

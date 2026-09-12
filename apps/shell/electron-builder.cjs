@@ -19,15 +19,37 @@
  * into the packaged app's package.json via extraMetadata and read back by
  * src/main/analytics.ts. When either is unset — every source/fork build —
  * nothing is injected and the app runs with analytics fully disabled.
+ *
+ * GENOFFICE_FONT_CDN_URL — base URL for the curated downloadable-font catalog.
+ * Official release jobs inject it through extraMetadata so the endpoint stays
+ * out of source. Without it, font download prompts/catalog entries are hidden;
+ * users can still install local font files.
  */
 
 const { execFileSync } = require('node:child_process')
-const { existsSync } = require('node:fs')
+const { existsSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
+
+function normalizeHttpsBaseUrl(name, value) {
+  if (!value || !value.trim()) return null
+  try {
+    const url = new URL(value.trim())
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+      throw new Error('invalid')
+    }
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`
+  } catch {
+    throw new Error(`${name} must be an HTTPS base URL without credentials, query, or fragment`)
+  }
+}
 
 const updateUrl = process.env.GENOFFICE_UPDATE_URL
 const ga4MeasurementId = process.env.GENOFFICE_GA4_MEASUREMENT_ID
 const ga4ApiSecret = process.env.GENOFFICE_GA4_API_SECRET
+const fontCdnUrl = normalizeHttpsBaseUrl(
+  'GENOFFICE_FONT_CDN_URL',
+  process.env.GENOFFICE_FONT_CDN_URL,
+)
 
 // GENOFFICE_MAC_X64=1 — opt into packaging the Intel (x64) dmg/zip alongside
 // arm64. Off by default: Intel packages must only ever ship signed with the
@@ -37,6 +59,23 @@ const ga4ApiSecret = process.env.GENOFFICE_GA4_API_SECRET
 // alias) keys off which dmgs exist, so flipping this flag is the single
 // switch.
 const includeMacX64 = process.env.GENOFFICE_MAC_X64 === '1'
+
+// GENOFFICE_WIN_ARM64=1 — package the Windows ARM64 installer instead of x64.
+// CI runs it as a second electron-builder pass (own BUILD_DIR) after the
+// unchanged x64 pass, so the two never share an output dir or a sidecar path:
+// the sidecar comes from the matching cargo target dir and is checked to
+// exist at beforePack because electron-builder exits 0 on a missing
+// extraResources source (Sheets would ship dead on every ARM install).
+const winArm64 = process.env.GENOFFICE_WIN_ARM64 === '1'
+// 7-Zip packs ARM64 executables with its ARM64 branch filter, which the NSIS
+// install-time extractor (Nsis7z) cannot decode: it silently skips
+// GenOffice.exe and every dll (electron-builder#9983). BCJ it can decode.
+if (winArm64 && !process.env.ELECTRON_BUILDER_7Z_FILTER) {
+  process.env.ELECTRON_BUILDER_7Z_FILTER = 'BCJ'
+}
+const winArch = winArm64 ? 'arm64' : 'x64'
+const winSidecarTarget = winArm64 ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-gnu'
+const WIN_SIDECAR = `../sheets/native/xlsx-engine/target/${winSidecarTarget}/release/xlsx-sidecar.exe`
 
 // The gsk CLI tree below is copied verbatim from node_modules, and the
 // nested commander path depends on npm's current hoisting layout — fail the
@@ -59,6 +98,83 @@ for (const rel of [
     throw new Error(
       `electron-builder extraResources source missing: ${rel} (npm hoisting changed?)`,
     )
+  }
+}
+
+// macOS local-OCR helper (scanned-page text recovery): a swiftc output, not
+// an npm artifact — compiled here on demand so CI runners and fresh checkouts
+// need no manual step. Universal (arm64 + x86_64) when both targets compile,
+// host-arch otherwise; mac installers must not silently ship without it.
+const VISION_OCR_HELPER = '../../packages/pdf2docx/ocr-helper/vision-ocr'
+
+// Compile the helper. universalOnly=true has NO host-arch fallback: dual-arch
+// packaging must fail loudly rather than ship a host-arch binary to both dmgs.
+function compileVisionOcr({ universalOnly } = { universalOnly: false }) {
+  const src = join(__dirname, `${VISION_OCR_HELPER}.swift`)
+  const out = join(__dirname, VISION_OCR_HELPER)
+  try {
+    try {
+      const slices = ['arm64', 'x86_64'].map((arch) => {
+        const slice = `${out}.${arch}`
+        execFileSync('swiftc', ['-O', src, '-target', `${arch}-apple-macos12`, '-o', slice], {
+          stdio: 'inherit',
+        })
+        return slice
+      })
+      execFileSync('lipo', ['-create', ...slices, '-output', out], { stdio: 'inherit' })
+      for (const slice of slices) rmSync(slice, { force: true })
+    } catch (err) {
+      if (universalOnly) throw err
+      // cross-target SDK unavailable — a host-arch helper still serves this build
+      execFileSync('swiftc', ['-O', src, '-o', out], { stdio: 'inherit' })
+    }
+  } catch (err) {
+    throw new Error(`vision-ocr helper compile failed: ${err}`, { cause: err })
+  }
+}
+
+if (process.platform === 'darwin' && !existsSync(join(__dirname, VISION_OCR_HELPER))) {
+  compileVisionOcr()
+}
+
+// Windows local-OCR helper (Windows.Media.Ocr): compiled by the in-box .NET
+// Framework csc via build-win.mjs — same on-demand policy as the mac helper,
+// and Windows installers must not silently ship without it.
+const WIN_OCR_HELPER = '../../packages/pdf2docx/ocr-helper/win-ocr.exe'
+if (process.platform === 'win32' && !existsSync(join(__dirname, WIN_OCR_HELPER))) {
+  try {
+    execFileSync(
+      process.execPath,
+      [join(__dirname, '../../packages/pdf2docx/ocr-helper/build-win.mjs')],
+      { stdio: 'inherit' },
+    )
+  } catch (err) {
+    throw new Error(`win-ocr helper compile failed: ${err}`, { cause: err })
+  }
+}
+
+// Dual-arch packs share one extraResources path, so the shipped helper must be
+// a lipo fat binary. A stale host-arch build (dev path above) is rebuilt in
+// place; if a universal build cannot be produced, packaging aborts — otherwise
+// the other arch's OCR silently fails and every scanned page ships as bitmap.
+function assertUniversalVisionOcr() {
+  const helper = join(__dirname, VISION_OCR_HELPER)
+  const wanted = ['x86_64', 'arm64']
+  const archsOf = () =>
+    existsSync(helper)
+      ? execFileSync('lipo', ['-archs', helper], { encoding: 'utf8' }).trim().split(/\s+/)
+      : []
+  if (!wanted.every((w) => archsOf().includes(w))) {
+    rmSync(helper, { force: true })
+    compileVisionOcr({ universalOnly: true })
+  }
+  const archs = archsOf()
+  for (const want of wanted) {
+    if (!archs.includes(want)) {
+      throw new Error(
+        `vision-ocr helper is [${archs.join(', ')}] but both mac arch packages ship it`,
+      )
+    }
   }
 }
 
@@ -102,6 +218,7 @@ function assertModuleTreesPresent() {
     '../slides/out',
     '../pdf/out',
     '../markdown/out',
+    '../html/out',
   ]) {
     if (!existsSync(join(__dirname, rel))) {
       throw new Error(
@@ -120,7 +237,7 @@ const config = {
   // the old runtime).
   electronVersion: require('electron/package.json').version,
   directories: {
-    output: 'release',
+    output: process.env.BUILD_DIR || 'release',
   },
   files: ['out/**'],
   extraResources: [
@@ -152,6 +269,10 @@ const config = {
       from: '../markdown/out',
       to: 'modules/markdown',
     },
+    {
+      from: '../html/out',
+      to: 'modules/html',
+    },
     // PDF text editing engines: the bundled main resolves these under
     // Resources/wasm when node_modules is absent (apps/pdf/src/main/wasm-path.ts)
     {
@@ -161,6 +282,17 @@ const config = {
     {
       from: '../pdf/node_modules/harfbuzzjs/hb-subset.wasm',
       to: 'wasm/hb-subset.wasm',
+    },
+    // platform system-OCR helpers for scanned-page recovery (each exists only
+    // on its own build platform; electron-builder skips absent sources and the
+    // engine resolver degrades to the bitmap fallback when missing)
+    {
+      from: '../../packages/pdf2docx/ocr-helper/vision-ocr',
+      to: 'ocr/vision-ocr',
+    },
+    {
+      from: '../../packages/pdf2docx/ocr-helper/win-ocr.exe',
+      to: 'ocr/win-ocr.exe',
     },
     {
       from: '../../node_modules/@genspark/cli',
@@ -178,54 +310,91 @@ const config = {
   // `mimeType` is read only by the Linux target, where it becomes the
   // desktop entry's MimeType= list; associations without it are dropped
   // there. macOS and Windows ignore the field and key off `ext`.
+  //
+  // `icon` is extension-less on purpose: electron-builder resolves it against
+  // build/ as <icon>.icns for the mac CFBundleDocumentTypes entry and
+  // <icon>.ico for the NSIS DefaultIcon registry value. Without it both
+  // platforms fall back to the app icon, so every associated file shows the
+  // bare GenOffice logo instead of a per-type document icon. The icns/ico
+  // pairs are generated from the shell renderer's file-type tiles by
+  // tools/gen-file-association-icons.mjs.
   fileAssociations: [
     {
       ext: 'docx',
       name: 'Word Document',
       role: 'Editor',
+      icon: 'docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     },
     {
       ext: 'xlsx',
       name: 'Excel Workbook',
       role: 'Editor',
+      icon: 'xlsx',
       mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    },
+    {
+      ext: 'xlsm',
+      name: 'Excel Macro-Enabled Workbook',
+      role: 'Editor',
+      icon: 'xlsx',
+      mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12',
     },
     {
       ext: 'pptx',
       name: 'PowerPoint Presentation',
       role: 'Editor',
+      icon: 'pptx',
       mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     },
     {
       ext: 'xls',
       name: 'Excel 97-2003 Workbook',
       role: 'Editor',
+      icon: 'xlsx',
       mimeType: 'application/vnd.ms-excel',
     },
     {
       ext: 'csv',
       name: 'CSV Document',
       role: 'Editor',
+      icon: 'xlsx',
       mimeType: 'text/csv',
     },
     {
       ext: 'pdf',
       name: 'PDF Document',
       role: 'Editor',
+      icon: 'pdf',
       mimeType: 'application/pdf',
     },
     {
       ext: 'md',
       name: 'Markdown Document',
       role: 'Editor',
+      icon: 'md',
       mimeType: 'text/markdown',
     },
     {
       ext: 'markdown',
       name: 'Markdown Document',
       role: 'Editor',
+      icon: 'md',
       mimeType: 'text/markdown',
+    },
+    {
+      ext: 'html',
+      name: 'HTML Document',
+      role: 'Editor',
+      icon: 'html',
+      mimeType: 'text/html',
+    },
+    {
+      ext: 'htm',
+      name: 'HTML Document',
+      role: 'Editor',
+      icon: 'html',
+      mimeType: 'text/html',
     },
   ],
   npmRebuild: false,
@@ -258,12 +427,12 @@ const config = {
     target: [
       {
         target: 'nsis',
-        arch: ['x64'],
+        arch: [winArch],
       },
     ],
     extraResources: [
       {
-        from: '../sheets/native/xlsx-engine/target/x86_64-pc-windows-gnu/release/xlsx-sidecar.exe',
+        from: WIN_SIDECAR,
         to: 'native/xlsx-sidecar.exe',
       },
     ],
@@ -354,12 +523,53 @@ const config = {
   },
   beforePack: async (context) => {
     assertModuleTreesPresent()
-    if (context.electronPlatformName === 'darwin' && includeMacX64) assertUniversalSidecar()
+    if (context.electronPlatformName === 'darwin' && includeMacX64) {
+      assertUniversalSidecar()
+      assertUniversalVisionOcr()
+    }
+    if (context.electronPlatformName === 'win32' && !existsSync(join(__dirname, WIN_SIDECAR))) {
+      throw new Error(
+        `win extraResources source missing: ${WIN_SIDECAR} (cargo build --target ${winSidecarTarget} first)`,
+      )
+    }
   },
   dmg: {
     sign: true,
   },
   afterAllArtifactBuild: 'build/notarize-dmg.js',
+}
+
+// Windows in-package code signing. Security features that judge every PE
+// individually (Smart App Control, WDAC/AppLocker, AV heuristics) block
+// unsigned child processes — the unsigned xlsx-sidecar.exe died with
+// "spawn UNKNOWN" on such machines even though the installer itself was
+// signed. When CI exports GENOFFICE_WIN_SIGN_MODE ("test" = alpha
+// self-signed PFX, "production" = DigiCert KeyLocker — the two modes of
+// scripts/win-sign.cjs, whose env-var contract applies here too), every
+// binary electron-builder signs for win (GenOffice.exe, the NSIS
+// uninstaller, and the installer) goes through that script. The static
+// extraResources binaries (xlsx-sidecar.exe, win-ocr.exe) are signed by the
+// workflow before packaging since electron-builder does not sign
+// extraResources. Unset (local / fork builds) keeps the old behavior:
+// electron-builder has no signing config and packages everything unsigned.
+const winSignMode = process.env.GENOFFICE_WIN_SIGN_MODE
+if (winSignMode) {
+  if (winSignMode !== 'test' && winSignMode !== 'production') {
+    throw new Error(`GENOFFICE_WIN_SIGN_MODE must be "test" or "production", got "${winSignMode}"`)
+  }
+  config.win.signtoolOptions = {
+    // Single pass per file: the sha1+sha256 dual-signing default is a
+    // pre-Win8 relic and would invoke the hook twice per binary.
+    signingHashAlgorithms: ['sha256'],
+    sign: (configuration) => {
+      execFileSync(
+        process.execPath,
+        [join(__dirname, '../../scripts/win-sign.cjs'), winSignMode, configuration.path],
+        { stdio: 'inherit' },
+      )
+      return Promise.resolve()
+    },
+  }
 }
 
 if (updateUrl) {
@@ -372,15 +582,16 @@ if (updateUrl) {
   ]
 }
 
-// CI's "-c.extraMetadata.version=..." CLI override deep-merges with this
-// block, so both survive together in the packaged package.json.
+// CI's "-c.extraMetadata.version=..." CLI override deep-merges with this block,
+// so the version and all injected feature settings survive together.
+const extraMetadata = {}
 if (ga4MeasurementId && ga4ApiSecret) {
-  config.extraMetadata = {
-    genofficeAnalytics: {
-      measurementId: ga4MeasurementId,
-      apiSecret: ga4ApiSecret,
-    },
+  extraMetadata.genofficeAnalytics = {
+    measurementId: ga4MeasurementId,
+    apiSecret: ga4ApiSecret,
   }
 }
+if (fontCdnUrl) extraMetadata.genofficeFontCdn = { baseUrl: fontCdnUrl }
+if (Object.keys(extraMetadata).length) config.extraMetadata = extraMetadata
 
 module.exports = config

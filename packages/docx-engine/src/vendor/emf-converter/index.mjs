@@ -130,6 +130,7 @@ var EMR_STRETCHDIBITS = 81;
 var EMR_EXTCREATEFONTINDIRECTW = 82;
 var EMR_EXTTEXTOUTW = 84;
 var EMR_ALPHABLEND = 114;
+var EMR_GRADIENTFILL = 118;
 var EMR_POLYBEZIER16 = 85;
 var EMR_POLYGON16 = 86;
 var EMR_POLYLINE16 = 87;
@@ -137,6 +138,8 @@ var EMR_POLYBEZIERTO16 = 88;
 var EMR_POLYLINETO16 = 89;
 var EMR_POLYPOLYGON16 = 91;
 var EMR_EXTCREATEPEN = 95;
+var EMR_CREATEMONOBRUSH = 93;
+var EMR_CREATEDIBPATTERNBRUSHPT = 94;
 var EMR_SETICMMODE = 98;
 var EMR_SETLAYOUT = 115;
 var STOCK_OBJECT_BASE = 2147483648;
@@ -408,6 +411,10 @@ function applyBrush(ctx, state) {
     ctx.fillStyle = "rgba(0,0,0,0)";
     return;
   }
+  if (state.brushPattern) {
+    ctx.fillStyle = state.brushPattern;
+    return;
+  }
   ctx.fillStyle = rop2TransformColor(state.brushColor, paint.colorTransform);
 }
 function cssFontWeight(weight) {
@@ -423,12 +430,28 @@ function cssFontWeight(weight) {
   }
   return weight >= 700 ? "bold" : "";
 }
+var GENERIC_CSS_FAMILIES = /* @__PURE__ */ new Set([
+  "serif",
+  "sans-serif",
+  "monospace",
+  "cursive",
+  "fantasy",
+  "system-ui"
+]);
 function mapFontFamily(face, map) {
-  const resolved = map?.[face.toLowerCase().trim()] ?? face;
-  if (/[\s,]/.test(resolved) && !/^["']/.test(resolved)) {
-    return `"${resolved}"`;
+  // Strip control chars (corrupt facenames): an invalid family makes the
+  // whole ctx.font assignment fail silently, dropping the size too
+  const cleaned = (face || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
+  const resolved = map?.[cleaned.toLowerCase()] ?? cleaned;
+  if (!resolved) {
+    return "sans-serif";
   }
-  return resolved;
+  if (GENERIC_CSS_FAMILIES.has(resolved) || /^["']/.test(resolved)) {
+    return resolved;
+  }
+  // GDI falls back to a sans face for an unknown facename; without a generic family the
+  // browser picks its default (serif) — CJK Office text came out in Mincho/Song
+  return `"${resolved.replace(/["\\]/g, "")}", sans-serif`;
 }
 function fontSizePx(state, scale = 1) {
   return Math.max(Math.abs(state.fontHeight) * Math.abs(scale || 1), 8);
@@ -1602,7 +1625,7 @@ function handleBitBlt(rCtx, offset, dataOff, recSize) {
     if (offBmiSrc === 0 && rop === ROP_PATCOPY) {
       const prevFill = ctx.fillStyle;
       if (state.brushStyle !== BS_NULL) {
-        ctx.fillStyle = state.brushColor;
+        ctx.fillStyle = state.brushPattern ?? state.brushColor;
         ctx.fillRect(gmx(rCtx, dstX), gmy(rCtx, dstY), gmw(rCtx, dstW), gmh(rCtx, dstH));
       }
       ctx.fillStyle = prevFill;
@@ -1891,9 +1914,83 @@ function handleEmfGdiTextBitmapRecord(rCtx, recType, offset, dataOff, recSize) {
       return handleExcludeClipRect(rCtx, dataOff, recSize);
     case EMR_OFFSETCLIPRGN:
       return handleOffsetClipRgn(rCtx, dataOff, recSize);
+    case EMR_GRADIENTFILL:
+      return handleGradientFill(rCtx, dataOff, recSize);
     default:
       return false;
   }
+}
+
+// EMR_GRADIENTFILL (MS-EMF 2.3.5.12): TriVertex array + GRADIENT_RECT/TRIANGLE index
+// objects. Excel data bars in OLE table previews are drawn with H-mode rects.
+function handleGradientFill(rCtx, dataOff, recSize) {
+  const { ctx, view } = rCtx;
+  if (recSize < 36) return true;
+  const nVer = view.getUint32(dataOff + 16, true);
+  const nTri = view.getUint32(dataOff + 20, true);
+  const ulMode = view.getUint32(dataOff + 24, true);
+  if (nVer === 0 || nVer > MAX_GRADIENT_ELEMENTS || nTri > MAX_GRADIENT_ELEMENTS) return true;
+  const vtxOff = dataOff + 28;
+  const idxOff = vtxOff + nVer * 16;
+  const vtx = (i) => {
+    const o = vtxOff + i * 16;
+    return {
+      x: view.getInt32(o, true),
+      y: view.getInt32(o + 4, true),
+      // 16-bit color channels; GDI uses the high byte (the Alpha field is ignored by GDI)
+      color: `rgb(${view.getUint16(o + 8, true) >> 8},${view.getUint16(o + 10, true) >> 8},${view.getUint16(o + 12, true) >> 8})`,
+    };
+  };
+  if (ulMode === 2) {
+    // GRADIENT_FILL_TRIANGLE: flat-fill each triangle with its average color (rare in decks)
+    for (let t = 0; t < nTri; t++) {
+      const o = idxOff + t * 12;
+      if (o + 12 > dataOff + recSize - 8) break;
+      const a = vtx(view.getUint32(o, true) % nVer);
+      const b = vtx(view.getUint32(o + 4, true) % nVer);
+      const c = vtx(view.getUint32(o + 8, true) % nVer);
+      ctx.beginPath();
+      ctx.moveTo(gmx(rCtx, a.x), gmy(rCtx, a.y));
+      ctx.lineTo(gmx(rCtx, b.x), gmy(rCtx, b.y));
+      ctx.lineTo(gmx(rCtx, c.x), gmy(rCtx, c.y));
+      ctx.closePath();
+      const prev = ctx.fillStyle;
+      ctx.fillStyle = a.color;
+      ctx.fill();
+      ctx.fillStyle = prev;
+    }
+    return true;
+  }
+  // GRADIENT_FILL_RECT_H (0) / _V (1): each index pair = upper-left / lower-right vertex
+  for (let t = 0; t < nTri; t++) {
+    const o = idxOff + t * 8;
+    if (o + 8 > dataOff + recSize - 8) break;
+    const ul = vtx(view.getUint32(o, true) % nVer);
+    const lr = vtx(view.getUint32(o + 4, true) % nVer);
+    // Map both corners first, then normalize in device space — a negative world/
+    // viewport Y scale (common in GDI EMFs) inverts the mapped coords, and the
+    // gradient must still run ul→lr in the flipped direction
+    const ux = gmx(rCtx, ul.x);
+    const uy = gmy(rCtx, ul.y);
+    const lx = gmx(rCtx, lr.x);
+    const ly = gmy(rCtx, lr.y);
+    const x0 = Math.min(ux, lx);
+    const y0 = Math.min(uy, ly);
+    const x1 = Math.max(ux, lx);
+    const y1 = Math.max(uy, ly);
+    if (!(x1 > x0) || !(y1 > y0)) continue;
+    const grad =
+      ulMode === 1
+        ? ctx.createLinearGradient(x0, uy, x0, ly)
+        : ctx.createLinearGradient(ux, y0, lx, y0);
+    grad.addColorStop(0, ul.color);
+    grad.addColorStop(1, lr.color);
+    const prev = ctx.fillStyle;
+    ctx.fillStyle = grad;
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    ctx.fillStyle = prev;
+  }
+  return true;
 }
 
 // src/emf-gdi-draw-handlers.ts
@@ -2243,6 +2340,34 @@ function handleEmfObjectRecord(rCtx, recType, dataOff, recSize) {
       }
       return true;
     }
+    case EMR_CREATEMONOBRUSH:
+    case EMR_CREATEDIBPATTERNBRUSHPT: {
+      // ihBrush, iUsage, offBmi, cbBmi, offBits, cbBits — offsets from the record start.
+      // Excel OLE previews draw dotted cell borders as PATCOPY blits with an 8×8 DIB brush,
+      // so the brush becomes a repeating canvas pattern (average color as the fallback).
+      if (recSize >= 32) {
+        const recStart = dataOff - 8;
+        const ihBrush = view.getUint32(dataOff, true);
+        const offBmi = view.getUint32(dataOff + 8, true);
+        const offBits = view.getUint32(dataOff + 16, true);
+        const cbBits = view.getUint32(dataOff + 20, true);
+        let pattern = null;
+        let color = "#000000";
+        if (offBmi > 0 && offBits > 0 && cbBits > 0 && recStart + offBits + cbBits <= view.byteLength) {
+          const imageData = decodeDibToImageData(view, recStart + offBmi, recStart + offBits, cbBits);
+          if (imageData) {
+            const temp = createTempCanvas(imageData.width, imageData.height);
+            if (temp) {
+              temp.ctx.putImageData(imageData, 0, 0);
+              pattern = rCtx.ctx.createPattern(temp.canvas, "repeat") ?? null;
+            }
+          }
+          color = dibAverageColor(view, recStart + offBmi, recStart + offBits + cbBits);
+        }
+        rCtx.objectTable.set(ihBrush, { kind: "brush", style: 0, color, pattern });
+      }
+      return true;
+    }
     case EMR_CREATEBRUSHINDIRECT: {
       if (recSize >= 24) {
         const ihBrush = view.getUint32(dataOff, true);
@@ -2264,7 +2389,10 @@ function handleEmfObjectRecord(rCtx, recType, dataOff, recSize) {
         const italic = view.getUint8(dataOff + 24);
         const underline = view.getUint8(dataOff + 25);
         const strikeOut = view.getUint8(dataOff + 26);
-        const family = readUtf16LE(view, dataOff + 28, 32) || "sans-serif";
+        // LOGFONTW FaceName at +32: ihFont(4) Height..Weight(20)
+        // Italic/Underline/StrikeOut/CharSet(1 each) OutPrec/ClipPrec/Quality/
+        // PitchAndFamily(1 each) — +28 lands in the precision/quality bytes
+        const family = readUtf16LE(view, dataOff + 32, 32) || "sans-serif";
         rCtx.objectTable.set(ihFont, {
           kind: "font",
           height: Math.abs(height),
@@ -2291,6 +2419,7 @@ function handleEmfObjectRecord(rCtx, recType, dataOff, recSize) {
             case "brush":
               state.brushStyle = obj.style;
               state.brushColor = obj.color;
+              state.brushPattern = obj.pattern ?? null;
               break;
             case "font":
               state.fontHeight = obj.height;
@@ -2467,6 +2596,7 @@ function defaultState() {
     penStyle: 0,
     brushColor: "#ffffff",
     brushStyle: 0,
+    brushPattern: null,
     textColor: "#000000",
     bkColor: "#ffffff",
     bkMode: 1,
@@ -3803,8 +3933,9 @@ function parseEmfPlusImageObject(view, dataOff, recDataSize, objectId) {
   let imgData = null;
   const imgType = view.getUint32(dataOff + 4, true);
   if (imgType === 1 && recDataSize >= 28) {
+    // MS-EMFPLUS 2.1.1.2 BitmapDataType: Pixel = 0, Compressed = 1 (upstream tested 1/2)
     const bmpType = view.getUint32(dataOff + 24, true);
-    if (bmpType === 1) {
+    if (bmpType === 0) {
       const bmpW = view.getInt32(dataOff + 8, true);
       const bmpH = view.getInt32(dataOff + 12, true);
       const bmpStride = view.getInt32(dataOff + 16, true);
@@ -3828,7 +3959,7 @@ function parseEmfPlusImageObject(view, dataOff, recDataSize, objectId) {
           imgData = decoded;
         }
       }
-    } else if (bmpType === 2) {
+    } else if (bmpType === 1) {
       const imgStart = dataOff + 28;
       const imgLen = recDataSize - 28;
       emfLog(`  Bitmap(Compressed): imgLen=${imgLen}, imgStart=0x${imgStart.toString(16)}`);

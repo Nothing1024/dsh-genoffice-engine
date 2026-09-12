@@ -1,14 +1,19 @@
 import ReactDOM from 'react-dom/client'
 import { htmlLang, type Lang } from '@genoffice/i18n'
-import { installScreenTips } from '@genoffice/ui'
+import { applyAiPanelPrefs, installScreenTips } from '@genoffice/ui'
 
 import '@genoffice/ui/tokens.css'
 import '@genoffice/ui/screentip.css'
 import '@genoffice/ui/color-picker.css'
 import '@genoffice/ui/dropdown.css'
+import '@genoffice/ui/ribbon-collapse.css'
+import '@genoffice/ui/markdown.css'
+import '@genoffice/ui/ai-panel-prefs.css'
+import '@genoffice/ui/ai-scope-quote.css'
 import '@univerjs/preset-sheets-core/lib/index.css'
 
 import { App } from './App'
+import { installCanvasFontFallback, registerCellFontAliases } from './cell-font-fallback'
 import { LocaleProvider, setModuleLang } from './i18n/locale'
 import type { UiTheme } from '../shared/desktop-api'
 import './styles.css'
@@ -26,6 +31,7 @@ const root = document.getElementById('root')
 if (!root) throw new Error('Missing application root.')
 
 installScreenTips()
+installCanvasFontFallback()
 
 function applyTheme(theme: UiTheme): void {
   if (theme === 'system') document.documentElement.removeAttribute('data-theme')
@@ -36,9 +42,9 @@ function applyTheme(theme: UiTheme): void {
 // faces (Calibri/Aptos aliases in styles.css) must be loaded before Univer's
 // first skeleton — MDW, wrap points, and #### overflow all measure with them.
 async function loadCellFonts(): Promise<void> {
-  const loads: Promise<unknown>[] = []
+  const loads: Promise<unknown>[] = [registerCellFontAliases()]
   for (const variant of ['', 'bold ', 'italic ', 'italic bold ']) {
-    for (const family of ['Calibri', 'Aptos']) {
+    for (const family of ['Calibri', 'Aptos', "'Aptos Narrow'", 'Carlito']) {
       loads.push(document.fonts?.load?.(`${variant}16px ${family}`)?.catch(() => {}) ?? [])
     }
   }
@@ -65,6 +71,11 @@ async function bootstrap(): Promise<void> {
   applyTheme(theme)
   await loadCellFonts()
   window.desktopApi?.onThemeChanged(applyTheme)
+  void window.desktopApi
+    ?.getAiPanelPrefs?.()
+    .then(applyAiPanelPrefs)
+    .catch(() => {})
+  window.desktopApi?.onAiPanelPrefsChanged?.(applyAiPanelPrefs)
   ReactDOM.createRoot(root!).render(
     <LocaleProvider initial={lang}>
       <App />

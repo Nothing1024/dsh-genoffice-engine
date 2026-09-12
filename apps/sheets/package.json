@@ -37,6 +37,7 @@
     "@univerjs/core": "^0.25.1",
     "@univerjs/data-validation": "^0.25.1",
     "@univerjs/engine-render": "^0.25.1",
+    "@univerjs/find-replace": "^0.25.1",
     "@univerjs/preset-sheets-conditional-formatting": "^0.25.1",
     "@univerjs/preset-sheets-core": "^0.25.1",
     "@univerjs/preset-sheets-data-validation": "^0.25.1",
@@ -50,8 +51,10 @@
     "@univerjs/themes": "^0.25.1",
     "fast-xml-parser": "^5.3.4",
     "jszip": "^3.10.1",
+    "pdf-lib": "^1.17.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "rxjs": "^7.8.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -65,7 +68,7 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.11"
   },
   "author": "GenOffice"
 }

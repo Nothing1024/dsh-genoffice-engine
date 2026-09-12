@@ -458,6 +458,15 @@ export function IconShapes(props: IconProps) {
   )
 }
 
+export function IconSearch(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="6.9" cy="6.9" r="4.2" />
+      <path d="M 10 10 13.4 13.4" />
+    </Svg>
+  )
+}
+
 export function IconLink(props: IconProps) {
   return (
     <Svg {...props}>
@@ -560,6 +569,42 @@ export function IconTableDelete(props: IconProps) {
       />
       <path d="M 9.17 9.17 h 4.09 v 4.09 H 9.17 z" fill="var(--surface, #fff)" stroke="none" />
       <path d="m 9.97 9.97 2.63 2.63 M 12.6 9.97 l -2.63 2.63" strokeWidth="1" />
+    </Svg>
+  )
+}
+
+export function IconAutoFit(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3.1" y="4" width="9.8" height="8" rx="0.65" />
+      <path d="M 6.35 4 v 8 M 9.65 4 v 8 M 3.1 8 h 9.8" strokeWidth="1" />
+      <path d="M 1.35 8 h 2.6 M 1.35 8 l 1 -1 M 1.35 8 l 1 1" />
+      <path d="M 14.65 8 h -2.6 M 14.65 8 l -1 -1 M 14.65 8 l -1 1" />
+    </Svg>
+  )
+}
+
+export function IconRepeatHeader(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3" y="3.45" width="8.8" height="9.1" rx="0.65" />
+      <path d="M 3 6.2 h 8.8 M 3 9.35 h 8.8 M 7.4 3.45 v 9.1" strokeWidth="1" />
+      <path d="M 3.6 4.8 h 7.6" strokeWidth="1.5" />
+      <path d="M 11.35 10.15 a 2.15 2.15 0 1 1 -0.5 2.25" />
+      <path d="m 10.2 10.15 1.3 -0.05 -0.35 1.22" />
+    </Svg>
+  )
+}
+
+export function IconTableProperties(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="2.85" y="3.2" width="7.7" height="9.6" rx="0.65" />
+      <path d="M 2.85 6.4 h 7.7 M 2.85 9.6 h 7.7 M 6.7 3.2 v 9.6" strokeWidth="1" />
+      <path d="M 11.7 5.15 h 2.15 M 11.7 8 h 2.15 M 11.7 10.85 h 2.15" />
+      <circle cx="12.35" cy="5.15" r="0.55" fill="currentColor" stroke="none" />
+      <circle cx="13.15" cy="8" r="0.55" fill="currentColor" stroke="none" />
+      <circle cx="12.65" cy="10.85" r="0.55" fill="currentColor" stroke="none" />
     </Svg>
   )
 }
@@ -733,6 +778,75 @@ export function IconBorderNone(props: IconProps) {
         strokeDasharray="1.5 1.7"
         opacity="0.55"
       />
+    </Svg>
+  )
+}
+
+function IconBorderDashedFrame() {
+  return (
+    <rect
+      x="3.02"
+      y="3.02"
+      width="9.96"
+      height="9.96"
+      rx="0.42"
+      strokeWidth="1"
+      strokeDasharray="1.5 1.7"
+      opacity="0.55"
+    />
+  )
+}
+
+export function IconBorderTop(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <IconBorderDashedFrame />
+      <path d="M 3.02 3.02 h 9.96" />
+    </Svg>
+  )
+}
+
+export function IconBorderBottom(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <IconBorderDashedFrame />
+      <path d="M 3.02 12.98 h 9.96" />
+    </Svg>
+  )
+}
+
+export function IconBorderLeft(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <IconBorderDashedFrame />
+      <path d="M 3.02 3.02 v 9.96" />
+    </Svg>
+  )
+}
+
+export function IconBorderRight(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <IconBorderDashedFrame />
+      <path d="M 12.98 3.02 v 9.96" />
+    </Svg>
+  )
+}
+
+export function IconBorderInsideH(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <IconBorderDashedFrame />
+      <path d="M 3.02 8 h 9.96" />
+    </Svg>
+  )
+}
+
+export function IconBorderInsideV(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <IconBorderDashedFrame />
+      <path d="M 8 3.02 v 9.96" />
     </Svg>
   )
 }
@@ -1505,6 +1619,15 @@ export function IconWordArt(props: IconProps) {
       {/* stylized A with gradient effect hint */}
       <path d="M8 3 3.5 13h2.3l1-2.5h2.4l1 2.5h2.3L8 3Z" />
       <path d="M5.6 9.2h4.8" />
+    </Svg>
+  )
+}
+
+export function IconPencil(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M10.9 2.9a1.1 1.1 0 0 1 1.56 0l.64.64a1.1 1.1 0 0 1 0 1.56L6.2 12l-3.1.9.9-3.1 6.9-6.9Z" />
+      <path d="M9.6 4.2l2.2 2.2" />
     </Svg>
   )
 }

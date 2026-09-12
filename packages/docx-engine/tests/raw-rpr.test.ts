@@ -3,6 +3,7 @@
  * underline/themeColor/character spacing/all four rFonts slots…) survive paragraph
  * rebuilds; editing a modeled field rebuilds only its group.
  */
+import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
 import {
   generateParagraphXml,
@@ -423,5 +424,111 @@ describe('run-level character shading (w:shd)', () => {
       GEN_CTX,
     )
     expect(fresh).toContain('<w:shd w:val="clear" w:color="auto" w:fill="00B050"/>')
+  })
+})
+
+// rFonts theme refs: parse resolves w:asciiTheme/w:eastAsiaTheme to literal font
+// names for the model; regeneration must not materialize the refs into literals
+const THEME_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+  '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office">' +
+  '<a:themeElements><a:fontScheme name="Office">' +
+  '<a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>' +
+  '<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>' +
+  '</a:fontScheme></a:themeElements></a:theme>'
+
+const THEMED_RFONTS = '<w:rFonts w:ascii="Georgia" w:eastAsiaTheme="minorHAnsi" w:hAnsi="Georgia"/>'
+const THEMED_PARA = `<w:p><w:r><w:rPr>${THEMED_RFONTS}</w:rPr><w:t>themed</w:t></w:r></w:p>`
+
+async function parseThemed() {
+  const doc = await parseDocx(
+    await buildDocx({
+      bodyXml: THEMED_PARA,
+      extraParts: [
+        {
+          path: 'word/theme/theme1.xml',
+          xml: THEME_XML,
+          contentType: 'application/vnd.openxmlformats-officedocument.theme+xml',
+        },
+      ],
+    }),
+  )
+  return doc.blocks[0].runs![0]
+}
+
+describe('rFonts theme refs survive regeneration', () => {
+  it('parse resolves the ref and records its theme origin', async () => {
+    const run = await parseThemed()
+    expect(run.font).toBe('Calibri')
+    expect(run.fontAscii).toBe('Georgia')
+    expect(run.themeRFonts).toEqual({ font: 'Calibri' })
+  })
+
+  it('a text-only edit keeps the theme attrs instead of materializing them', async () => {
+    const run = await parseThemed()
+    const xml = generateParagraphXml(
+      { type: 'paragraph', runs: [{ ...run, text: 'edited' }] },
+      GEN_CTX,
+    )
+    expect(xml).toContain(THEMED_RFONTS)
+    expect(xml).not.toContain('w:eastAsia="Calibri"')
+  })
+
+  it('a real font edit still materializes the touched slot', async () => {
+    const run = await parseThemed()
+    const xml = generateParagraphXml(
+      { type: 'paragraph', runs: [{ ...run, font: 'Arial' }] },
+      GEN_CTX,
+    )
+    expect(xml).toContain('w:eastAsia="Arial"')
+    expect(xml).not.toContain('w:eastAsiaTheme')
+    // untouched Latin slot keeps its literal value
+    expect(xml).toContain('w:ascii="Georgia"')
+  })
+})
+
+describe('w:themeColor refs survive regeneration', () => {
+  const THEME_WITH_COLORS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office">' +
+    '<a:themeElements><a:clrScheme name="Office">' +
+    '<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>' +
+    '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>' +
+    '<a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>' +
+    '<a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2>' +
+    '<a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4>' +
+    '<a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6>' +
+    '<a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink>' +
+    '</a:clrScheme></a:themeElements></a:theme>'
+  // cached w:val from an older theme: the live accent1 resolves to another hex
+  const STALE_COLOR = '<w:color w:val="365F91" w:themeColor="accent1" w:themeShade="BF"/>'
+  const PARA = `<w:p><w:r><w:rPr><w:b/>${STALE_COLOR}<w:sz w:val="28"/></w:rPr><w:t>Titre</w:t></w:r></w:p>`
+
+  it('keeps the theme ref and cached literal when the run is rebuilt', async () => {
+    const doc = await parseDocx(
+      await buildDocx({
+        bodyXml: PARA,
+        extraParts: [
+          {
+            path: 'word/theme/theme1.xml',
+            xml: THEME_WITH_COLORS,
+            contentType: 'application/vnd.openxmlformats-officedocument.theme+xml',
+          },
+        ],
+      }),
+    )
+    const run = doc.blocks[0].runs![0]
+    expect(run.color).not.toBe('365F91')
+    expect(run.themeColor).toBe(run.color)
+    const saved = await saveDocx(doc, [
+      {
+        kind: 'generated',
+        block: { type: 'paragraph', runs: [{ ...run, text: 'Titre 2' }] },
+      },
+    ])
+    const xml = await (await JSZip.loadAsync(saved)).file('word/document.xml')!.async('string')
+    expect(xml).toContain('Titre 2')
+    expect(xml).toContain(STALE_COLOR)
+    expect(xml).not.toContain(`w:val="${run.color}"`)
   })
 })

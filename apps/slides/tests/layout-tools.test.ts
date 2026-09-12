@@ -190,6 +190,25 @@ describe('auditSlideLayout', () => {
     expect(issues.some((s) => s.includes('Text overflow'))).toBe(true)
   })
 
+  it('detects text overflow (laid-out line wider than the box inner width)', () => {
+    // Box width 200, insets 8 left/right -> inner width 184; run x=8 width 20*12=240 -> exceeds by 64px
+    const slide = slideOf([textNode('t1', box(80, 60, 200, 100), 'x'.repeat(20))])
+    const issues = auditSlideLayout(slide)
+    expect(issues.some((s) => s.includes('Text overflow (width)') && s.includes('64px'))).toBe(true)
+  })
+
+  it('does not flag width overflow on vertical text (vert mixes run axes)', () => {
+    // A vertical text body keeps horizontal layout convention in its lines,
+    // so run.x/widthPx describe the pre-rotation advance — comparing them
+    // against innerW false-positives on every vertical box. The audit must
+    // skip the width check when vert is set.
+    const node = textNode('t1', box(80, 60, 160, 640), 'x'.repeat(30))
+    node.text!.vert = 'eaVert'
+    const slide = slideOf([node])
+    const issues = auditSlideLayout(slide)
+    expect(issues.some((s) => s.includes('Text overflow (width)'))).toBe(false)
+  })
+
   it('decoration layers and large background blocks are excluded', () => {
     const bg = textNode('bg', box(0, 0, 1280, 720), 'Background watermark')
     const deco = { ...textNode('deco', box(100, 100, 400, 200), 'Decoration'), decoration: true }
@@ -291,8 +310,20 @@ describe('execute_layout_script tool', () => {
       name: 'read_slide',
       input: { slideIndex: 0 },
     } as any)
-    expect(r.output).toContain('Canvas 1280×720px')
+    expect(r.output).toContain('Canvas 1280×720px (1 px = 9525 EMU)')
     expect(r.output).toContain('pos(100,100) size 400×100')
     expect(r.output).toContain('font 18pt') // 24px → 18pt
+  })
+
+  it('read_slide reports the scale-adjusted px→EMU factor on non-16:9 decks', async () => {
+    // 4:3 deck: baseline 960 doc-px rendered at fitWidth 1280 → scale 4/3, 1 px = 7143.75 EMU
+    slide = { ...slide, scale: 4 / 3 }
+    const skill = createSlidesSkill(access())
+    const r = await skill.executeTool({
+      id: '5',
+      name: 'read_slide',
+      input: { slideIndex: 0 },
+    } as any)
+    expect(r.output).toContain('(1 px = 7143.75 EMU)')
   })
 })

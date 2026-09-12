@@ -376,10 +376,9 @@ export const IconRedo = () => (
 )
 export const IconSave = () => (
   <IconRatio>
-    <path d="M3 4.5C3 3.67158 3.67158 3 4.5 3H17.1407L21 6.60325V19.5C21 20.3285 20.3285 21 19.5 21H4.5C3.67158 21 3 20.3285 3 19.5V4.5Z" />
-    <path d="M12.0042 3L12 6.6923C12 6.86225 11.7761 7 11.5 7H7.5C7.22385 7 7 6.86225 7 6.6923V3H12.0042Z" />
-    <path d="M7 13H17" />
-    <path d="M7 17H12.0042" />
+    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+    <path d="M17 21v-8H7v8" />
+    <path d="M7 3v5h8V3" />
   </IconRatio>
 )
 
@@ -501,3 +500,35 @@ export const IconAiKeyPoints = () => (
     />
   </svg>
 )
+
+// ── password dialog (Lucide eye / eye-off / alert, shared DS field icons) ──
+
+export function IconEye({ size = 16 }: { size?: number }): ReactElement {
+  return (
+    <Icon size={size}>
+      <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </Icon>
+  )
+}
+
+export function IconEyeOff({ size = 16 }: { size?: number }): ReactElement {
+  return (
+    <Icon size={size}>
+      <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+      <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+      <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+      <path d="M2 2l20 20" />
+    </Icon>
+  )
+}
+
+export function IconAlert({ size = 13 }: { size?: number }): ReactElement {
+  return (
+    <Icon size={size}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 8v4" />
+      <path d="M12 16h.01" />
+    </Icon>
+  )
+}

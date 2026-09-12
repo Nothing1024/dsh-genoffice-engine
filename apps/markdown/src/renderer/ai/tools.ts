@@ -1,9 +1,21 @@
 import type { Editor, JSONContent } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { AgentToolCall, AgentToolDef, ToolExecution } from '@genoffice/agent-core'
-import { markAiRange } from '../editor/aiHighlight'
-import { stripLegacyFencedDivs } from '../markdown/docText'
+import {
+  OP_SPECS,
+  blockIndexRange,
+  buildOpsGuide,
+  isBlankDoc,
+  runOps,
+  usesBlockIndexes,
+  validateOps,
+  type FrontmatterAccess,
+  type MdOp,
+} from '../editor/ops'
 import { t } from '../i18n/locale'
+
+export type { FrontmatterAccess } from '../editor/ops'
+export { blockIndexRange } from '../editor/ops'
 
 const CONTEXT_MAX_CHARS = 8000
 const PREVIEW_CHARS = 60
@@ -60,9 +72,7 @@ function selectionMarkdown(editor: Editor): string {
 export function buildDocContext(editor: Editor): string {
   const doc = editor.state.doc
   const blockCount = doc.childCount
-  const isBlank =
-    blockCount === 0 || (blockCount === 1 && doc.firstChild!.textContent.trim() === '')
-  if (isBlank) {
+  if (isBlankDoc(doc)) {
     return ['## Document state', 'The document is currently blank.'].join('\n')
   }
   const lines: string[] = ['## Document state', `${blockCount} top-level blocks:`, '']
@@ -77,8 +87,18 @@ export function buildDocContext(editor: Editor): string {
     }
     lines.push(line)
   }
-  const selection = selectionMarkdown(editor)
-  if (selection) lines.push('', '## User selection', selection)
+  // report by range, not by text: a selected image/table has no text but the
+  // model still needs to know which block the request targets
+  const { from: selFrom, to: selTo } = editor.state.selection
+  if (selFrom < selTo) {
+    const { startIndex, endIndex } = blockIndexRange(doc, selFrom, selTo)
+    const where =
+      startIndex === endIndex ? `block ${startIndex}` : `blocks ${startIndex}-${endIndex}`
+    const selection =
+      selectionMarkdown(editor) ||
+      `(a non-text block is selected: ${blockLabel(doc.child(startIndex))})`
+    lines.push('', `## User selection (${where})`, selection)
+  }
   return lines.join('\n')
 }
 
@@ -109,34 +129,81 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     },
   },
   {
-    name: 'insert_content',
-    description:
-      'Insert new markdown content after a top-level block. Use afterIndex -1 to insert at the very beginning of the document. On a blank document this replaces the empty paragraph.',
+    name: 'apply_ops',
+    description: `Edit the document with a batch of ops — the same operations the editor's own toolbar performs. Ops run in order and stop at the first failure; the result lists what each op did.\n\n${buildOpsGuide()}`,
     inputSchema: {
       type: 'object',
       properties: {
-        afterIndex: {
-          type: 'integer',
-          description: '0-based block index to insert after; -1 = document start',
+        ops: {
+          type: 'array',
+          description: 'Ordered list of op objects (see the op catalogue)',
+          items: { type: 'object' },
         },
-        markdown: { type: 'string', description: 'Markdown content to insert' },
       },
-      required: ['afterIndex', 'markdown'],
+      required: ['ops'],
     },
   },
   {
-    name: 'replace_blocks',
+    name: 'image_search',
     description:
-      'Replace a range of top-level blocks (inclusive) with new markdown content. Use this for rewrites, formatting changes and deletions (empty markdown deletes the range).',
+      'Search for images. Returns a list of imageUrl entries; after picking one, insert it into the document with insert_image.',
     inputSchema: {
       type: 'object',
       properties: {
-        startIndex: { type: 'integer', description: '0-based index of the first block' },
-        endIndex: { type: 'integer', description: '0-based index of the last block (inclusive)' },
-        markdown: { type: 'string', description: 'Replacement markdown; empty string deletes' },
+        query: { type: 'string', description: 'Search keywords' },
+        maxResults: { type: 'integer', description: 'Maximum number of results, default 8' },
       },
-      required: ['startIndex', 'endIndex', 'markdown'],
+      required: ['query'],
     },
+  },
+  {
+    name: 'insert_image',
+    description:
+      'Download a direct image link (an imageUrl from image_search) and insert it into the document after a top-level block. The image file is saved next to the document, so the document must have been saved to disk at least once.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Direct image URL (http/https)' },
+        afterIndex: {
+          type: 'integer',
+          description:
+            '0-based block index to insert after; -1 = document start. Defaults to the end of the document.',
+        },
+        alt: { type: 'string', description: 'Alt text describing the image' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'generate_image',
+    description:
+      'Generate an illustration with AI from a text prompt and insert it into the document after a top-level block. For illustration/diagram-style art that image_search cannot find, or when the user asks to generate/draw a picture. The document must have been saved to disk at least once.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'Image description in English, concrete and visual',
+        },
+        aspectRatio: {
+          type: 'string',
+          description: 'Optional aspect ratio like "16:9", "1:1", "4:3"',
+        },
+        afterIndex: {
+          type: 'integer',
+          description:
+            '0-based block index to insert after; -1 = document start. Defaults to the end of the document.',
+        },
+        alt: { type: 'string', description: 'Alt text describing the image' },
+      },
+      required: ['prompt'],
+    },
+  },
+  {
+    name: 'read_frontmatter',
+    description:
+      'Read the document properties: the raw YAML frontmatter block at the top of the file (title, tags, date, …), without the --- fences. Write it back with the setFrontmatter op.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
   },
 ]
 
@@ -152,40 +219,123 @@ function clampIndex(value: unknown, max: number): number | null {
   return n
 }
 
-/** Byte offsets of each top-level block: [startPos, endPos] in the current doc */
-function blockRange(doc: PmNode, from: number, to: number): { from: number; to: number } {
-  let pos = 0
-  let start = 0
-  let end = 0
-  for (let i = 0; i <= to; i++) {
-    const child = doc.child(i)
-    if (i === from) start = pos
-    pos += child.nodeSize
-    if (i === to) end = pos
+/** Activity-chip label: the op's own label when exactly one op ran, else the count */
+function opsSummary(ops: MdOp[], applied: number): string {
+  if (ops.length === 1 && applied === 1) return t(OP_SPECS[ops[0]!.op].labelKey)
+  return t('aiToolApplyOpsDone', { n: applied })
+}
+
+function applyOps(editor: Editor, input: unknown, fm?: FrontmatterAccess): ToolExecution {
+  const label = t('aiToolApplyOps')
+  const parsed = validateOps(input)
+  if ('error' in parsed) return fail(parsed.error, label)
+  if (usesBlockIndexes(parsed.ops) && editedExternally(editor)) return fail(STALE_DOC_ERROR, label)
+  const r = runOps(editor, parsed.ops, { source: 'ai', frontmatter: fm })
+  const lines = r.results.map((res, i) =>
+    res.ok
+      ? `ops[${i}] ${parsed.ops[i]!.op}: ${res.message}`
+      : `ops[${i}] ${parsed.ops[i]!.op} FAILED: ${res.error}`,
+  )
+  const skipped = parsed.ops.length - r.results.length
+  if (skipped > 0) lines.push(`${skipped} later op(s) were not executed.`)
+  if (r.blocksChanged) lines.push(INDEX_CHANGE_NOTICE)
+  if (r.applied > 0) markDocSeen(editor)
+  const failed = r.applied < parsed.ops.length
+  return {
+    output: lines.join('\n'),
+    isError: failed || undefined,
+    mutated: r.applied > 0,
+    summary: opsSummary(parsed.ops, r.applied),
   }
-  return { from: start, to: end }
 }
 
-function parseMarkdownToNodes(editor: Editor, markdown: string): PmNode[] {
-  // model output guard: `:::` fenced divs are not GFM and would land as
-  // literal text — strip the fences and keep the body (same as file open).
-  // Raw HTML needs no guard: parse runs it through the schema, so semantic
-  // tags degrade to their GFM equivalents (<b>→bold, <img>→image) and
-  // anything the schema cannot represent loses its styling, keeping text.
-  const json = editor.markdown?.parse(stripLegacyFencedDivs(markdown))
-  const content = json?.content ?? []
-  return content.map((c) => editor.schema.nodeFromJSON(c))
+// ── image insertion (insert_image / generate_image) ──
+
+/** magic-byte sniff: the fetch handler's content-type mapping defaults unknown
+ *  types to jpeg, which would save webp/svg bytes under a lying .jpg name */
+function sniffImageExt(base64: string): string | null {
+  let head: string
+  try {
+    head = atob(base64.slice(0, 12))
+  } catch {
+    return null
+  }
+  if (head.startsWith('\x89PNG')) return 'png'
+  if (head.startsWith('GIF8')) return 'gif'
+  if (head.charCodeAt(0) === 0xff && head.charCodeAt(1) === 0xd8) return 'jpg'
+  return null
 }
 
-function isBlankDoc(doc: PmNode): boolean {
-  return doc.childCount === 1 && doc.firstChild!.textContent.trim() === ''
+/** download a direct image URL, persist it beside the document, insert an image block */
+async function insertImageFromUrl(
+  editor: Editor,
+  url: string,
+  input: { afterIndex?: unknown; alt?: unknown },
+  signal: AbortSignal | undefined,
+  labels: { fail: string; done: string },
+): Promise<ToolExecution> {
+  const fetched = await window.markdownApi.fetchImage(url)
+  // never write after the user hit stop (the download may resolve long after the abort)
+  if (signal?.aborted) return fail('stopped by the user; the image was not inserted', labels.fail)
+  if (!fetched) return fail('download failed (the image may not be accessible)', labels.fail)
+  const ext = sniffImageExt(fetched.base64)
+  if (!ext) {
+    return fail(
+      'unsupported image format (only png/jpg/gif can be embedded) — pick a different image',
+      labels.fail,
+    )
+  }
+  const rel = await window.markdownApi.saveImage({ base64: fetched.base64, ext })
+  if (signal?.aborted) return fail('stopped by the user; the image was not inserted', labels.fail)
+  if (!rel) {
+    return fail(
+      'the document has no saved location yet, so there is nowhere to store the image file — ask the user to save the document first, then retry',
+      labels.fail,
+    )
+  }
+  // downloads can take long: user edits made meanwhile must keep the freshness
+  // baseline stale, so only our own insertion may mark the doc seen
+  const userEditedDuringFetch = editedExternally(editor)
+  const maxIndex = editor.state.doc.childCount - 1
+  // typeof guard: Number(null) is 0, which would silently mean "after block 0"
+  const afterRaw = input.afterIndex
+  const after =
+    typeof afterRaw === 'number' && Number.isInteger(afterRaw)
+      ? Math.min(Math.max(afterRaw, -1), maxIndex)
+      : maxIndex
+  const r = runOps(editor, [{ op: 'insertImage', after, src: rel, alt: String(input.alt ?? '') }], {
+    source: 'ai',
+  })
+  const res = r.results[0]!
+  if (!res.ok) return fail(res.error, labels.fail)
+  if (!userEditedDuringFetch) markDocSeen(editor)
+  return {
+    output: `Inserted the image (saved as ${rel}). ${INDEX_CHANGE_NOTICE}`,
+    mutated: true,
+    summary: labels.done,
+  }
 }
 
-export function executeTool(editor: Editor, call: AgentToolCall): ToolExecution {
+export function executeTool(
+  editor: Editor,
+  call: AgentToolCall,
+  signal?: AbortSignal,
+  fm?: FrontmatterAccess,
+): ToolExecution | Promise<ToolExecution> {
   const doc = editor.state.doc
   const maxIndex = doc.childCount - 1
 
   switch (call.name) {
+    case 'read_frontmatter': {
+      if (!fm) return fail('frontmatter is not available', t('aiToolReadFm'))
+      const inner = fm.read()
+      return {
+        output: inner || '(the document has no frontmatter)',
+        mutated: false,
+        summary: t('aiToolReadFm'),
+      }
+    }
+
     case 'get_document_context': {
       markDocSeen(editor)
       return {
@@ -218,88 +368,63 @@ export function executeTool(editor: Editor, call: AgentToolCall): ToolExecution 
       }
     }
 
-    case 'insert_content': {
-      if (editedExternally(editor)) return fail(STALE_DOC_ERROR, t('aiToolInsert'))
-      const markdown = String(call.input.markdown ?? '')
-      if (!markdown.trim()) return fail('markdown must not be empty', t('aiToolInsert'))
-      const after = Number(call.input.afterIndex)
-      if (!Number.isInteger(after) || after < -1 || after > maxIndex) {
-        return fail(
-          `afterIndex out of range; the document has ${doc.childCount} blocks.`,
-          t('aiToolInsert'),
-        )
-      }
-      let nodes: PmNode[]
-      try {
-        nodes = parseMarkdownToNodes(editor, markdown)
-      } catch (err) {
-        return fail(
-          `markdown parse failed: ${err instanceof Error ? err.message : String(err)}`,
-          t('aiToolInsert'),
-        )
-      }
-      if (nodes.length === 0) return fail('markdown parsed to no content', t('aiToolInsert'))
+    case 'apply_ops':
+      return applyOps(editor, call.input.ops, fm)
 
-      let tr = editor.state.tr
-      if (isBlankDoc(doc)) {
-        tr = tr.replaceWith(0, doc.content.size, nodes)
-        tr = markAiRange(tr, 0, tr.doc.content.size)
-      } else {
-        const pos = after === -1 ? 0 : blockRange(doc, after, after).to
-        const insertedSize = nodes.reduce((s, n) => s + n.nodeSize, 0)
-        tr = tr.insert(pos, nodes)
-        tr = markAiRange(tr, pos, pos + insertedSize)
-      }
-      editor.view.dispatch(tr)
-      markDocSeen(editor)
-      return {
-        output: `Inserted ${nodes.length} block(s). ${INDEX_CHANGE_NOTICE}`,
-        mutated: true,
-        summary: t('aiToolInsertDone', { n: nodes.length }),
-      }
+    case 'image_search': {
+      const query = String(call.input.query ?? '').trim()
+      if (!query) return fail('query must not be empty', t('aiToolImageSearch'))
+      return window.markdownApi
+        .imageSearch(query, Number(call.input.maxResults) || 8)
+        .then((r): ToolExecution => {
+          // a backend failure must not read as an empty gallery — the model would fabricate image choices
+          if (r.method === 'error') {
+            return fail(
+              `image search failed (service error, not an empty result — you may retry): ${r.error ?? 'unknown error'}`,
+              t('aiToolImageSearch'),
+            )
+          }
+          const lines = r.images.map(
+            (im, i) =>
+              `${i + 1}. ${im.title || '(untitled)'} [${im.width ?? '?'}x${im.height ?? '?'}]\n   ${im.imageUrl}`,
+          )
+          return {
+            output: lines.join('\n') || '(no images)',
+            mutated: false,
+            summary: t('aiToolImageSearchDone', { query, count: r.images.length }),
+          }
+        })
     }
 
-    case 'replace_blocks': {
-      if (editedExternally(editor)) return fail(STALE_DOC_ERROR, t('aiToolReplace'))
-      const start = clampIndex(call.input.startIndex, maxIndex)
-      const end = clampIndex(call.input.endIndex, maxIndex)
-      if (start === null || end === null || start > end) {
-        return fail(
-          `Invalid block range; the document has ${doc.childCount} blocks.`,
-          t('aiToolReplace'),
-        )
-      }
-      const markdown = String(call.input.markdown ?? '')
-      let nodes: PmNode[]
-      try {
-        nodes = parseMarkdownToNodes(editor, markdown)
-      } catch (err) {
-        return fail(
-          `markdown parse failed: ${err instanceof Error ? err.message : String(err)}`,
-          t('aiToolReplace'),
-        )
-      }
-      const { from, to } = blockRange(doc, start, end)
-      let tr = editor.state.tr
-      if (nodes.length === 0) {
-        // deleting every block is not allowed by the schema — leave one empty paragraph
-        if (start === 0 && end === maxIndex) {
-          tr = tr.replaceWith(from, to, editor.schema.nodes.paragraph!.create())
-        } else {
-          tr = tr.delete(from, to)
-        }
-      } else {
-        const insertedSize = nodes.reduce((s, n) => s + n.nodeSize, 0)
-        tr = tr.replaceWith(from, to, nodes)
-        tr = markAiRange(tr, from, from + insertedSize)
-      }
-      editor.view.dispatch(tr)
-      markDocSeen(editor)
-      return {
-        output: `Replaced blocks ${start}-${end} with ${nodes.length} block(s). ${INDEX_CHANGE_NOTICE}`,
-        mutated: true,
-        summary: t('aiToolReplaceDone', { n: end - start + 1 }),
-      }
+    case 'insert_image': {
+      if (editedExternally(editor)) return fail(STALE_DOC_ERROR, t('aiToolInsertImage'))
+      const url = String(call.input.url ?? '')
+      if (!/^https?:\/\//.test(url)) return fail('invalid url', t('aiToolInsertImage'))
+      return insertImageFromUrl(editor, url, call.input, signal, {
+        fail: t('aiToolInsertImage'),
+        done: t('aiToolInsertImageDone'),
+      })
+    }
+
+    case 'generate_image': {
+      if (editedExternally(editor)) return fail(STALE_DOC_ERROR, t('aiToolGenImage'))
+      const prompt = String(call.input.prompt ?? '').trim()
+      if (!prompt) return fail('prompt must not be empty', t('aiToolGenImage'))
+      const aspectRatio = String(call.input.aspectRatio ?? '').trim()
+      return window.markdownApi
+        .aiGenerateImage({ prompt, ...(aspectRatio ? { aspectRatio } : {}) })
+        .then((generated): ToolExecution | Promise<ToolExecution> => {
+          if (signal?.aborted) {
+            return fail('stopped by the user; the image was not inserted', t('aiToolGenImage'))
+          }
+          if (!generated.url) {
+            return fail(generated.error ?? 'image generation failed', t('aiToolGenImage'))
+          }
+          return insertImageFromUrl(editor, generated.url, call.input, signal, {
+            fail: t('aiToolGenImage'),
+            done: t('aiToolGenImageDone'),
+          })
+        })
     }
 
     default:

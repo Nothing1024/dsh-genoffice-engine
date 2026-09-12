@@ -26,6 +26,9 @@ pub const MAX_RECALC_READ_CELLS: usize = 20_000;
 /// serves one document, so two covers the active file plus one recently
 /// closed-and-reopened neighbour.
 const MAX_RESIDENT_MODELS: usize = 2;
+/// Source files above this size (compressed bytes) count as heavy for the
+/// residency rule in `evict_beyond_cap`.
+const HEAVY_SOURCE_BYTES: u64 = 8_000_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,9 +94,10 @@ impl RecalcCache {
         Self::default()
     }
 
-    /// Drop the model for a path whose bytes are about to change (save).
+    /// Drop the model for a path whose bytes are about to change (save) or
+    /// whose session closed.
     pub fn purge(&mut self, path: &Path) {
-        self.entries.remove(path);
+        self.entries.remove(&cache_key(path));
     }
 
     fn evict_beyond_cap(&mut self) {
@@ -108,7 +112,34 @@ impl RecalcCache {
             };
             self.entries.remove(&oldest);
         }
+        // Heavy sources import into models that dwarf everything else in the
+        // process (a 31MB workbook's model holds ~1.2GB resident); keep at
+        // most one of those — the most recently used.
+        loop {
+            let mut heavy: Vec<(PathBuf, u64)> = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.size > HEAVY_SOURCE_BYTES)
+                .map(|(path, entry)| (path.clone(), entry.last_used))
+                .collect();
+            if heavy.len() <= 1 {
+                return;
+            }
+            heavy.sort_by_key(|(_, last_used)| *last_used);
+            let Some((oldest, _)) = heavy.first() else {
+                return;
+            };
+            self.entries.remove(&oldest.clone());
+        }
     }
+}
+
+/// Cache keys are canonicalized: sessions store the canonical workbook path
+/// (open() resolves it) while recalc requests carry the renderer's raw path,
+/// and on macOS temp files those differ (/var vs /private/var) — a raw key
+/// would make the close/save purge miss the resident model.
+fn cache_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn recalc_cells(
@@ -146,10 +177,11 @@ pub fn recalc_cells(
         .map_err(|error| SidecarError::Io(error.to_string()))?;
     let size = metadata.len();
 
+    let key = cache_key(path);
     // Take the entry out while working on it: a panic or error mid-apply
     // leaves the model in an unknown state, and a removed entry can never be
     // reused by the next request.
-    let resident = cache.entries.remove(path).filter(|entry| {
+    let resident = cache.entries.remove(&key).filter(|entry| {
         entry.mtime == mtime
             && entry.size == size
             && entry.applied.keys().all(|key| {
@@ -172,7 +204,7 @@ pub fn recalc_cells(
     cache.tick += 1;
     let mut entry = entry;
     entry.last_used = cache.tick;
-    cache.entries.insert(path.to_path_buf(), entry);
+    cache.entries.insert(key, entry);
     cache.evict_beyond_cap();
 
     Ok(RecalcResult { cells, cached })
@@ -192,9 +224,10 @@ fn run(
             let path_text = path.to_str().ok_or_else(|| {
                 SidecarError::InvalidRequest("Workbook path is not valid UTF-8.".into())
             })?;
-            let model = load_from_xlsx(path_text, "en", "UTC", "en").map_err(|error| {
+            let mut model = load_from_xlsx(path_text, "en", "UTC", "en").map_err(|error| {
                 SidecarError::Workbook(format!("Formula engine import failed: {error}"))
             })?;
+            pin_unparsable_formulas(&mut model);
             ResidentModel {
                 model,
                 mtime,
@@ -279,6 +312,56 @@ fn run(
     Ok((entry, cells))
 }
 
+enum PinnedValue {
+    Number(f64),
+    Text(String),
+    Bool(bool),
+}
+
+/// IronCalc cannot parse external-workbook references (`[1]Sheet1!A1`):
+/// such a formula evaluates to #ERROR! and the error cascades through every
+/// dependent. Excel keeps the cached values when the linked workbook is
+/// unreachable, so pin those cells to the value the file carries and let the
+/// dependents compute against it. The renderer never sees the cell as a
+/// formula afterwards, so its own cached copy stays on screen.
+fn pin_unparsable_formulas(model: &mut Model) {
+    use ironcalc::base::expressions::parser::Node;
+    use ironcalc::base::types::Cell;
+    let mut pins = Vec::new();
+    for (sheet, worksheet) in model.workbook.worksheets.iter().enumerate() {
+        let Some(parsed) = model.parsed_formulas.get(sheet) else {
+            continue;
+        };
+        for (row, columns) in &worksheet.sheet_data {
+            for (column, cell) in columns {
+                let (formula, value) = match cell {
+                    Cell::CellFormulaNumber { f, v, .. } => (*f, PinnedValue::Number(*v)),
+                    Cell::CellFormulaString { f, v, .. } => (*f, PinnedValue::Text(v.clone())),
+                    Cell::CellFormulaBoolean { f, v, .. } => (*f, PinnedValue::Bool(*v)),
+                    _ => continue,
+                };
+                if matches!(
+                    parsed.get(formula as usize),
+                    Some(Node::ParseErrorKind { .. })
+                ) {
+                    pins.push((sheet as u32, *row, *column, value));
+                }
+            }
+        }
+    }
+    for (sheet, row, column, value) in pins {
+        // A pin that fails leaves the cell as it was: #ERROR! on that cell,
+        // which the renderer already declines to display.
+        let _ = match value {
+            PinnedValue::Number(number) => {
+                model.update_cell_with_number(sheet, row, column, number)
+            }
+            PinnedValue::Text(text) => model.update_cell_with_text(sheet, row, column, &text),
+            PinnedValue::Bool(flag) => model.update_cell_with_bool(sheet, row, column, flag),
+        };
+    }
+}
+
 fn sheet_index(model: &Model, name: &str) -> Result<u32, SidecarError> {
     model
         .workbook
@@ -351,6 +434,32 @@ mod tests {
             .unwrap()
             .formatted
             .clone()
+    }
+
+    #[test]
+    fn keeps_at_most_one_heavy_model_resident() {
+        let mut cache = RecalcCache::new();
+        for (name, size) in [
+            ("heavy-old", HEAVY_SOURCE_BYTES + 1),
+            ("heavy-new", HEAVY_SOURCE_BYTES + 2),
+            ("light", 1),
+        ] {
+            cache.tick += 1;
+            cache.entries.insert(
+                PathBuf::from(name),
+                ResidentModel {
+                    model: Model::new_empty("fixture", "en", "UTC", "en").unwrap(),
+                    mtime: SystemTime::now(),
+                    size,
+                    applied: HashMap::new(),
+                    last_used: cache.tick,
+                },
+            );
+            cache.evict_beyond_cap();
+        }
+        assert!(!cache.entries.contains_key(Path::new("heavy-old")));
+        assert!(cache.entries.contains_key(Path::new("heavy-new")));
+        assert!(cache.entries.contains_key(Path::new("light")));
     }
 
     #[test]
@@ -473,9 +582,27 @@ mod tests {
             paths.push(path);
         }
         assert_eq!(cache.entries.len(), MAX_RESIDENT_MODELS);
-        // the oldest was evicted, the newest survives
-        assert!(!cache.entries.contains_key(&paths[0]));
-        assert!(cache.entries.contains_key(&paths[2]));
+        // the oldest was evicted, the newest survives (entries key by
+        // canonical path)
+        assert!(!cache.entries.contains_key(&cache_key(&paths[0])));
+        assert!(cache.entries.contains_key(&cache_key(&paths[2])));
+    }
+
+    #[test]
+    fn purge_hits_regardless_of_path_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recalc.xlsx");
+        fixture(&path);
+        let mut cache = RecalcCache::new();
+        recalc_cells(&mut cache, &path, &[], &[read_a1_a3()]).unwrap();
+        assert_eq!(cache.entries.len(), 1);
+        // The raw and canonical spellings differ on macOS temp dirs
+        // (/var vs /private/var); the close/save purge may hold either.
+        cache.purge(&path);
+        assert!(cache.entries.is_empty());
+        recalc_cells(&mut cache, &path, &[], &[read_a1_a3()]).unwrap();
+        cache.purge(&cache_key(&path));
+        assert!(cache.entries.is_empty());
     }
 
     #[test]
@@ -519,5 +646,103 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, SidecarError::InvalidRequest(_)));
+    }
+
+    fn write_external_link_fixture(path: &Path) {
+        use std::io::Write;
+        let entries: [(&str, &str); 8] = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><externalReferences><externalReference r:id="rId3"/></externalReferences></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/styles.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#,
+            ),
+            (
+                "xl/externalLinks/externalLink1.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><externalBook r:id="rId1"><sheetNames><sheetName val="Sheet1"/></sheetNames><sheetDataSet><sheetData sheetId="0"><row r="1"><cell r="A1"><v>42</v></cell></row></sheetData></sheetDataSet></externalBook></externalLink>"#,
+            ),
+            (
+                "xl/externalLinks/_rels/externalLink1.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath" Target="file:///C:/data/source.xlsx" TargetMode="External"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C2"/><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1"><c r="A1"><f>[1]Sheet1!A1*2</f><v>84</v></c><c r="B1"><f>A1+1</f><v>85</v></c><c r="C1" t="str"><f>'[1]Sheet1'!A1&amp;" units"</f><v>42 units</v></c></row><row r="2"><c r="A2"><v>5</v></c><c r="B2"><f>SUM(A1:A2)</f><v>89</v></c></row></sheetData></worksheet>"#,
+            ),
+        ];
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, content) in entries {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(content.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    /// External-workbook references never parse in IronCalc; the file's
+    /// cached values must stand in for them so dependents keep computing
+    /// instead of cascading #ERROR! (public issue 235).
+    #[test]
+    fn external_link_formulas_keep_their_cached_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("external.xlsx");
+        write_external_link_fixture(&path);
+        let mut cache = RecalcCache::new();
+        let result = recalc_cells(
+            &mut cache,
+            &path,
+            &[edit("A2", "10")],
+            &[RecalcRead {
+                sheet: "Sheet1".into(),
+                range: CellRange {
+                    start_row: 0,
+                    end_row: 1,
+                    start_column: 0,
+                    end_column: 2,
+                },
+            }],
+        )
+        .unwrap();
+        let at = |row: u32, column: u32| {
+            result
+                .cells
+                .iter()
+                .find(|cell| cell.row == row && cell.column == column)
+                .unwrap()
+        };
+        assert!(result.cells.iter().all(|cell| cell.formatted != "#ERROR!"));
+        // pinned to the cache and no longer reported as formulas
+        assert_eq!(
+            (at(0, 0).formatted.as_str(), at(0, 0).is_formula),
+            ("84", false)
+        );
+        assert_eq!(
+            (at(0, 2).formatted.as_str(), at(0, 2).is_formula),
+            ("42 units", false)
+        );
+        // dependents compute against the pinned values
+        assert_eq!(
+            (at(0, 1).formatted.as_str(), at(0, 1).is_formula),
+            ("85", true)
+        );
+        assert_eq!(
+            (at(1, 1).formatted.as_str(), at(1, 1).is_formula),
+            ("94", true)
+        );
     }
 }

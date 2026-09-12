@@ -26,6 +26,7 @@ export function resolveFill(
         kind: 'gradient',
         stops: fill.stops.map((s) => ({ pos: s.pos, color: s.color })),
         angleDeg: fill.angle != null ? fill.angle / 60000 : 0,
+        ...(fill.scaled ? { scaled: true } : {}),
         ...(fill.path ? { radial: true, path: fill.path } : {}),
         ...(fill.path && fill.fillTo
           ? {
@@ -86,6 +87,7 @@ export function resolveStroke(stroke: Stroke | undefined, vp: Viewport): RenderS
     gradient = {
       stops: rf.stops.map((s) => ({ pos: s.pos, color: s.color })),
       angleDeg: rf.angle != null ? rf.angle / 60000 : 0,
+      ...(rf.scaled ? { scaled: true } : {}),
     }
     color = rf.stops[0]!.color
   } else if (rf.type === 'none') return undefined
@@ -115,6 +117,19 @@ export function resolveGlow(
   return { color: glow.color, blurPx: emuToPx(glow.radius, vp.scale) }
 }
 
+export function resolveReflection(
+  reflection: import('@genoffice/pptx-engine').ReflectionEffect | undefined,
+  vp: Viewport,
+): import('./render-tree').RenderReflection | undefined {
+  if (!reflection) return undefined
+  return {
+    blurPx: emuToPx(reflection.blurRad, vp.scale),
+    startAlpha: reflection.startA,
+    endPos: reflection.endPos,
+    distPx: emuToPx(reflection.dist, vp.scale),
+  }
+}
+
 export function resolveShadow(
   shadow: ShadowEffect | undefined,
   vp: Viewport,
@@ -127,6 +142,14 @@ export function resolveShadow(
     blurPx: emuToPx(shadow.blurRad, vp.scale),
     offsetX: Math.cos(rad) * distPx,
     offsetY: Math.sin(rad) * distPx,
+    distPx,
+    dirDeg: shadow.dirDeg,
+    ...(shadow.inner ? { inner: true } : {}),
+    ...(shadow.sx != null ? { scaleX: shadow.sx } : {}),
+    ...(shadow.sy != null ? { scaleY: shadow.sy } : {}),
+    ...(shadow.kxDeg ? { skewXDeg: shadow.kxDeg } : {}),
+    ...(shadow.kyDeg ? { skewYDeg: shadow.kyDeg } : {}),
+    ...(shadow.algn ? { algn: shadow.algn } : {}),
   }
 }
 
