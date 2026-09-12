@@ -3116,11 +3116,12 @@ async function runDocsMarkdown(outDir) {
   const encOut = join(workDir, 'protected-out.docx')
   const exportOut = join(workDir, 'docs-export.docx')
   const mdFile = join(workDir, 'markdown-keep.md')
+  const mdExport = join(workDir, 'markdown-export.md')
   const badMd = join(workDir, 'invalid-utf8.md')
   const attachPdf = join(workDir, 'attach-keep.pdf')
   const missingDest = join(workDir, 'crypto-missing.docx')
   const failDest = join(workDir, 'crypto-fail.docx')
-  for (const file of [encDocx, encOut, exportOut, missingDest, failDest]) {
+  for (const file of [encDocx, encOut, exportOut, mdExport, missingDest, failDest]) {
     if (existsSync(file)) await unlink(file)
   }
   await writeKeepDocx(plainDocx, 'WfcEncKeep')
@@ -3210,7 +3211,6 @@ async function runDocsMarkdown(outDir) {
       timeout: 60_000,
     })
     const mdReady = await waitReady(relay.base, mdFile, 90_000)
-    const mdExport = join(workDir, 'markdown-export.md')
     const mdSaved = await post(relay.base, `/api/control/markdown/${docIdFor(mdFile)}/export`, { saveAs: mdExport })
     const asset = await mdPage.evaluate(async (b64) => window.markdownApi.saveImage({ base64: b64, ext: 'png' }), pngB64)
     const image = asset ? await mdPage.evaluate(async (src) => window.markdownApi.readImage(src), asset) : null
@@ -3356,6 +3356,7 @@ async function runHtmlEdit(outDir) {
   await writeFile(badHtml, Buffer.from([0, 1, 2, 3, 0, 255]))
   const beforeBad = sha256(await readFile(badHtml))
   const exportOut = join(workDir, 'html-export.html')
+  if (existsSync(exportOut)) await unlink(exportOut)
   const inventory = parseCsv(readFileSync(INVENTORY, 'utf8'))
   const task17 = inventory.filter((row) => Number(row.implementation_task) === 17)
   const htmlToDocx = inventory.filter((row) => row.entry === 'html-to-docx')
@@ -3424,7 +3425,7 @@ async function runHtmlEdit(outDir) {
 
     const successAssertions = [
       assertion('task17-rows-available', task17.length >= 2 && task17.every((row) => row.status === 'available'), true, task17.map((row) => `${row.app}:${row.entry}:${row.status}`)),
-      assertion('html-to-docx-not-claimed', htmlToDocx.every((row) => row.status !== 'available'), true, htmlToDocx.map((row) => row.status)),
+      assertion('html-to-docx-available', htmlToDocx.length === 1 && htmlToDocx[0].status === 'available', 'available', htmlToDocx.map((row) => row.status)),
       assertion('home-new-html', String(homePopupUrl).includes('/html') && String(homePopupUrl).includes('/docs/') === false, '/html', homePopupUrl),
       assertion('html-static-root', htmlRoot.status === 200 && /web-dist 未构建/.test(htmlRoot.text) === false, 200, htmlRoot),
       assertion('open-ready', opened.readiness === 'ready' && JSON.stringify(context).includes('WfcHtmlKeep'), true, { opened, context }),
@@ -3831,6 +3832,25 @@ async function main() {
     await writeFile(join(evidenceRoot, 'phase-0/task-12.log'), `${JSON.stringify(payload, null, 2)}\n`)
     console.log(JSON.stringify(payload, null, 2))
     if (missing.length > 0) throw new Error(`pdf-slides missing ${missing.join(',')}`)
+  }
+  if (args.all) {
+    if (PHASE0_CASES.every((name) => ran.includes(name))) ran.push('entries-sheets')
+    if (PHASE1_CASES.every((name) => ran.includes(name))) ran.push('pdf-slides')
+    const missing = CASES.filter((name) => ran.includes(name) === false)
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'EVD-007',
+      branch: 'all',
+      status: missing.length === 0 ? 'passed' : 'failed',
+      cases: ran.map((id) => ({ id, status: 'passed' })),
+      missing,
+      skipped: [],
+    }
+    await mkdir(join(evidenceRoot, 'phase-0'), { recursive: true })
+    await writeFile(join(evidenceRoot, 'phase-0/task-20.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (missing.length > 0) throw new Error(`--all missing ${missing.join(',')}`)
   }
   if (args.caseName === 'entries-sheets') {
     const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)
