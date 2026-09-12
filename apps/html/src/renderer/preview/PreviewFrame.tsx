@@ -32,7 +32,11 @@ export const PreviewFrame = forwardRef<PreviewFrameHandle, Props>(function Previ
   const frameRef = useRef<HTMLIFrameElement>(null)
   const onMessageRef = useRef(onMessage)
   onMessageRef.current = onMessage
-  const src = useMemo(() => (url ? `${url}?v=${nonce}` : 'about:blank'), [url, nonce])
+  const src = useMemo(() => {
+    if (!url) return 'about:blank'
+    if (url.startsWith('blob:') || url.startsWith('data:')) return url
+    return `${url}?v=${nonce}`
+  }, [url, nonce])
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {

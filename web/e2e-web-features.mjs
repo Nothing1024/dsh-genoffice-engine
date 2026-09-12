@@ -5,7 +5,7 @@
  * ENGINE_ROOT selects the isolated merge tree.
  */
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
-import { copyFile, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { execFileSync, spawn } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown', 'html-edit']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
@@ -120,12 +120,12 @@ async function runInventory(outDir) {
   push('ufs', rows.every((r) => /^UF-00[1-6]$/.test(r.uf)), 'UF-001..006', [...new Set(rows.map((r) => r.uf))])
   const stubs = rows.filter((r) => r.status === 'stub' || r.status === 'not-product-available' || r.status === 'compiled-only')
   push('stubs-owned', stubs.length > 0 && stubs.every((r) => Number(r.implementation_task) >= 2), 'owned stubs', stubs.length)
-  push('html-not-claimed-available', rows.filter((r) => r.app === 'html').every((r) => r.status !== 'available'), 'html not available', rows.filter((r) => r.app === 'html').map((r) => r.status))
+  push('html-future-not-claimed-available', rows.filter((r) => r.app === 'html' && Number(r.implementation_task) > 17).every((r) => r.status !== 'available'), 'html task>17 not available', rows.filter((r) => r.app === 'html').map((r) => `${r.entry}:${r.status}:${r.implementation_task}`))
   const ocrRows = rows.filter((r) => r.entry.includes('ocr'))
   const ocrClaimed = ocrRows.length > 0 && ocrRows.every((r) => r.status === 'available')
   push('ocr-inventory-matches-bridge', ocrClaimed === (deps.ocrWebNull === false), 'ocr inventory matches bridge', { ocrClaimed, ocrWebNull: deps.ocrWebNull })
   push('isolated-head', Boolean(deps.isolatedHead), 'sha', deps.isolatedHead)
-  push('html-present-no-web-build', deps.htmlPresent && !deps.htmlWebBuild, 'compiled-only', { htmlPresent: deps.htmlPresent, htmlWebBuild: deps.htmlWebBuild })
+  push('html-present-web-build', deps.htmlPresent && deps.htmlWebBuild && deps.htmlRouted, 'web:build+/html/', { htmlPresent: deps.htmlPresent, htmlWebBuild: deps.htmlWebBuild, htmlRouted: deps.htmlRouted })
   push('inventory-hash', true, 'sha256', sha(INVENTORY))
   const ok = assertions.every((a) => a.status === 'passed')
   const payload = {
@@ -3344,6 +3344,181 @@ async function runDocsMarkdown(outDir) {
 }
 
 
+async function runHtmlEdit(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-html-edit')
+  await mkdir(workDir, { recursive: true })
+  const htmlFile = join(workDir, 'keep.html')
+  const htmlBody = '<!doctype html><html><head><meta charset="utf-8"><title>WfcHtmlKeep</title></head><body><h1>WfcHtmlKeep</h1><p>keep phrase</p></body></html>\n'
+  await writeFile(htmlFile, htmlBody)
+  const beforeSha = sha256(await readFile(htmlFile))
+  const missing = join(workDir, 'missing-keep.html')
+  const badHtml = join(workDir, 'binary.html')
+  await writeFile(badHtml, Buffer.from([0, 1, 2, 3, 0, 255]))
+  const beforeBad = sha256(await readFile(badHtml))
+  const exportOut = join(workDir, 'html-export.html')
+  const inventory = parseCsv(readFileSync(INVENTORY, 'utf8'))
+  const task17 = inventory.filter((row) => Number(row.implementation_task) === 17)
+  const htmlToDocx = inventory.filter((row) => row.entry === 'html-to-docx')
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  let shot = null
+  try {
+    const home = await browser.newPage()
+    home.on('console', (msg) => logs.push(`[home] ${msg.text()}`))
+    await home.goto(`${relay.base}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    await home.waitForSelector('.quick-card', { timeout: 30_000 })
+    const popupPromise = home.waitForEvent('popup', { timeout: 15_000 })
+    await home.locator('.quick-card', { hasText: '.html' }).first().click()
+    const popup = await popupPromise
+    const homePopupUrl = popup.url()
+    await popup.waitForSelector('.app, .center-note, .ribbon', { timeout: 30_000 }).catch(() => {})
+    shot = await popup.screenshot({ type: 'png' }).catch(() => null)
+    await popup.close()
+    await home.close()
+
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[html] ${msg.text()}`))
+    await page.goto(`${relay.base}/html/?control=1&open=${encodeURIComponent(`path:${htmlFile}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, htmlFile, 90_000)
+    const liveShot = await page.screenshot({ type: 'png' }).catch(() => null)
+    if (liveShot) shot = liveShot
+    const context = await post(relay.base, `/api/control/html/${docIdFor(htmlFile)}/context`, {})
+    const edited = await post(relay.base, `/api/control/html/${docIdFor(htmlFile)}/tool`, {
+      call: {
+        id: randomUUID(),
+        name: 'apply_ops',
+        input: { ops: [{ op: 'str_replace', old: 'keep phrase', new: 'keep phrase WfcHtmlEdit' }] },
+      },
+    })
+    const saved = await post(relay.base, `/api/control/html/${docIdFor(htmlFile)}/export`, { saveAs: exportOut })
+    const blocked = await page.evaluate(async () => window.htmlApi.fetchImage('file:///etc/passwd'))
+    await page.close()
+
+    const exportText = existsSync(exportOut) ? await readFile(exportOut, 'utf8') : ''
+    const reopenPage = await browser.newPage()
+    reopenPage.on('console', (msg) => logs.push(`[html-reopen] ${msg.text()}`))
+    await reopenPage.goto(`${relay.base}/html/?control=1&open=${encodeURIComponent(`path:${exportOut}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const reopened = await waitReady(relay.base, exportOut, 60_000)
+    const reContext = await post(relay.base, `/api/control/html/${docIdFor(exportOut)}/context`, {})
+    await reopenPage.close()
+
+    const htmlRoot = await fetch(`${relay.base}/html/`).then(async (r) => ({ status: r.status, text: (await r.text()).slice(0, 240) }))
+    const afterKeep = sha256(await readFile(htmlFile))
+
+    const missingPage = await browser.newPage()
+    await missingPage.goto(`${relay.base}/html/?control=1&open=${encodeURIComponent(`path:${missing}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const missingReady = await waitReady(relay.base, missing, 45_000)
+    await missingPage.close()
+
+    const successAssertions = [
+      assertion('task17-rows-available', task17.length >= 2 && task17.every((row) => row.status === 'available'), true, task17.map((row) => `${row.app}:${row.entry}:${row.status}`)),
+      assertion('html-to-docx-not-claimed', htmlToDocx.every((row) => row.status !== 'available'), true, htmlToDocx.map((row) => row.status)),
+      assertion('home-new-html', String(homePopupUrl).includes('/html') && String(homePopupUrl).includes('/docs/') === false, '/html', homePopupUrl),
+      assertion('html-static-root', htmlRoot.status === 200 && /web-dist 未构建/.test(htmlRoot.text) === false, 200, htmlRoot),
+      assertion('open-ready', opened.readiness === 'ready' && JSON.stringify(context).includes('WfcHtmlKeep'), true, { opened, context }),
+      assertion('agent-edit', toolOk(edited), true, edited),
+      assertion('explicit-save', saved?.ok === true && exportText.includes('WfcHtmlKeep') && exportText.includes('WfcHtmlEdit'), true, { saved, hasExport: existsSync(exportOut) }),
+      assertion('reopen', reopened.readiness === 'ready' && JSON.stringify(reContext).includes('WfcHtmlEdit'), true, { reopened, reContext }),
+      assertion('source-kept-until-export', afterKeep === beforeSha, true, { afterKeep, beforeSha }),
+      assertion('blocked-file-url', blocked === null, null, blocked),
+    ]
+
+    const badPage = await browser.newPage()
+    badPage.on('console', (msg) => logs.push(`[html-bad] ${msg.text()}`))
+    await badPage.goto(`${relay.base}/html/?control=1&open=${encodeURIComponent(`path:${badHtml}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const badReady = await waitReady(relay.base, badHtml, 45_000)
+    const afterBad = sha256(await readFile(badHtml))
+    await badPage.close()
+    const recoverPage = await browser.newPage()
+    await recoverPage.goto(`${relay.base}/html/?control=1&open=${encodeURIComponent(`path:${htmlFile}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const recovered = await waitReady(relay.base, htmlFile, 60_000)
+    await recoverPage.close()
+    const failure2 = [
+      assertion('binary-html-error', badReady.readiness === 'error', 'error', badReady),
+      assertion('binary-html-kept', afterBad === beforeBad, true, { afterBad, beforeBad }),
+      assertion('load-recovery', recovered.readiness === 'ready', 'ready', recovered),
+    ]
+
+    const htmlDist = join(ENGINE, 'apps/html/web-dist')
+    const parked = `${htmlDist}.parked-task17`
+    let parkedMoved = false
+    if (existsSync(htmlDist)) {
+      await rename(htmlDist, parked)
+      parkedMoved = true
+    }
+    const offPort = await freePort(port + 1)
+    const offRelay = await startRelay(offPort)
+    try {
+      const missingBuild = await fetch(`${offRelay.base}/html/`)
+      const missingBody = await missingBuild.text()
+      const docsStill = await fetch(`${offRelay.base}/docs/`)
+      const docsBody = await docsStill.text()
+      const failure1 = [
+        assertion('missing-build-404', missingBuild.status === 404 && /未构建|404/.test(missingBody), 404, { status: missingBuild.status, body: missingBody.slice(0, 200) }),
+        assertion('missing-build-no-docs-route', /GenOffice Docs|docs-app|word\/document/i.test(missingBody) === false && docsStill.status === 200, true, { docs: docsStill.status, htmlBody: missingBody.slice(0, 160) }),
+        assertion('unreadable-no-ready', missingReady.readiness === 'error' && existsSync(missing) === false, 'error', missingReady),
+        assertion('docs-still-served', docsStill.status === 200 && docsBody.length > 0, 200, docsStill.status),
+      ]
+
+      const success = await writeEvidence(outDir, 'UF-006', 'success', {
+        cases: [{ id: 'html-edit-success', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+        console: logs.join('\n'),
+        network: { events: [opened, edited, saved, reopened, htmlRoot], count: 5 },
+        screenshot: shot,
+      })
+      const fail1 = await writeEvidence(outDir, 'UF-006', 'failure-1', {
+        cases: [{ id: 'html-edit-missing-build', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+        console: logs.join('\n'),
+        network: { events: [{ status: missingBuild.status, body: missingBody.slice(0, 200) }, missingReady], count: 2 },
+      })
+      const fail2 = await writeEvidence(outDir, 'UF-006', 'failure-2', {
+        cases: [{ id: 'html-edit-load-recovery', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+        console: logs.join('\n'),
+        network: { events: [badReady, recovered], count: 2 },
+      })
+      const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+      const payload = {
+        schema_version: 1,
+        package: 'web-feature-completion',
+        uf: 'UF-006',
+        branch: 'html-edit',
+        status: ok ? 'passed' : 'failed',
+        cases: [success.cases[0], fail1.cases[0], fail2.cases[0]],
+      }
+      await mkdir(join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0'), { recursive: true })
+      await writeFile(join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/task-17.log'), `${JSON.stringify(payload, null, 2)}\n`)
+      console.log(JSON.stringify(payload, null, 2))
+      if (ok === false) throw new Error('html-edit case failed')
+    } finally {
+      stopRelay(offRelay)
+      if (parkedMoved && existsSync(parked) && existsSync(htmlDist) === false) {
+        await rename(parked, htmlDist)
+      }
+    }
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -3411,6 +3586,10 @@ async function main() {
   if (args.caseName === 'docs-markdown' || args.all) {
     await runDocsMarkdown(evidenceRoot)
     ran.push('docs-markdown')
+  }
+  if (args.caseName === 'html-edit' || args.all) {
+    await runHtmlEdit(evidenceRoot)
+    ran.push('html-edit')
   }
   if (args.caseName === 'pdf-slides') {
     const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)

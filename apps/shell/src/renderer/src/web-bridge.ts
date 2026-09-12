@@ -148,6 +148,9 @@ function appForExt(ext: string): string | null {
       return 'slides'
     case 'pdf':
       return 'pdf'
+    case 'html':
+    case 'htm':
+      return 'html'
     default:
       return null
   }
@@ -162,7 +165,7 @@ function notifyUnsupported(ext: string): void {
   }
   const name = names[ext] ?? `.${ext} 文件`
   // eslint-disable-next-line no-alert
-  alert(`网页版暂不支持打开 ${name}。\n当前支持：Word (.docx)、Excel (.xlsx)、PPT (.pptx)、PDF (.pdf)、Markdown (.md)`)
+  alert(`网页版暂不支持打开 ${name}。\n当前支持：Word (.docx)、Excel (.xlsx)、PPT (.pptx)、PDF (.pdf)、Markdown (.md)、HTML (.html)`)
 }
 
 function openWebApp(app: string, query?: string): void {
@@ -272,6 +275,7 @@ const aiOffice: HomeApi = {
                 'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
                 'application/pdf': ['.pdf'],
                 'text/markdown': ['.md', '.markdown'],
+                'text/html': ['.html', '.htm'],
               },
             },
           ],

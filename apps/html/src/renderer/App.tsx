@@ -48,6 +48,8 @@ import { injectBrief, parseBrief, type Brief } from './document/brief'
 import { applyPatches } from './document/patch'
 import { deriveAutoFileName, deriveNameFromPrompt } from './document/auto-name'
 import type { ExportFormat, SaveMode } from '../shared/ipc'
+import { initControlMode, CONTROL_MODE, CONTROL_PATH } from './control'
+import type { HtmlDocAccess } from './ai/tools'
 
 type LoadStatus = 'loading' | 'ready' | 'error'
 type SaveState = 'idle' | 'saving' | 'saved' | 'failed'
@@ -177,6 +179,8 @@ export default function App() {
   const queueSeqRef = useRef(0)
   /** brief confirmed on the AI card; pinned into the head of the next generated document */
   const briefRef = useRef<Brief | null>(null)
+  const controlRef = useRef<ReturnType<typeof initControlMode>>(null)
+  const accessRef = useRef<HtmlDocAccess | null>(null)
   /** name taken from the first AI request of an untitled document: tab title now, file name at the first save */
   const provisionalNameRef = useRef<string | null>(null)
   const pendingStylesRef = useRef<Record<string, string | null>>({})
@@ -205,13 +209,39 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const handle = initControlMode({
+      getAccess: () => accessRef.current,
+      exportBytes: async () => {
+        if (statusRef.current !== 'ready') return null
+        const serialized = serializeDocText({ text: textRef.current, envelope: envelopeRef.current })
+        const name =
+          pathRef.current?.split(/[/\\]/).pop() ?? CONTROL_PATH?.split(/[/\\]/).pop() ?? 'document.html'
+        return { bytes: new TextEncoder().encode(serialized), name }
+      },
+      getDirty: () => textRef.current !== savedTextRef.current,
+      onSaved: () => {
+        savedTextRef.current = textRef.current
+        setSavedText(textRef.current)
+        window.htmlApi.setDirty(false)
+      },
+    })
+    controlRef.current = handle
+    handle?.setReadiness('loading')
+    return () => {
+      handle?.close()
+      controlRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const [pending, info] = await Promise.all([
-          window.htmlApi.consumePending(),
-          window.htmlApi.getPreviewInfo(),
-        ])
+        const pending = await window.htmlApi.consumePending()
+        if (cancelled) return
+        if (!pending && CONTROL_PATH) {
+          throw new Error('load-error: empty result for path target')
+        }
         const raw = pending ? await window.htmlApi.readFile(pending) : ''
         if (cancelled) return
         const doc = parseDocText(raw)
@@ -222,14 +252,23 @@ export default function App() {
         window.htmlApi.updatePreview(instrumentForPreview(doc.text, map0, inspectorSource))
         pushedTextRef.current = doc.text
         pushedVersionRef.current = map0.version
+        const info = await window.htmlApi.getPreviewInfo()
         setPath(pending)
         setText(doc.text)
         setSavedText(doc.text)
         setPreviewUrl(info.url)
         setStatus('ready')
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
+        const revision = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+        controlRef.current?.setReadiness('ready', { revision })
       } catch (err) {
         console.error('[html] open failed:', err)
-        if (!cancelled) setStatus('error')
+        if (!cancelled) {
+          setStatus('error')
+          controlRef.current?.setReadiness('error', {
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
     })()
     return () => {
@@ -250,6 +289,7 @@ export default function App() {
       window.htmlApi.updatePreview(instrumentForPreview(nextText, map, inspectorSource))
       pushedTextRef.current = nextText
       pushedVersionRef.current = map.version
+      void window.htmlApi.getPreviewInfo().then((info) => setPreviewUrl(info.url))
       setPreviewNonce((n) => n + 1)
     },
     [getMap],
@@ -332,6 +372,7 @@ export default function App() {
       }
       setText(next)
       refreshHistory()
+      controlRef.current?.bumpRevision()
     },
     [refreshHistory],
   )
@@ -1130,20 +1171,23 @@ export default function App() {
     }
   }, [autoSave, path, doSave, flushPending])
 
-  const aiDeps: HtmlAiDeps = {
-    access: {
-      getText: () => textRef.current,
-      getVersion: () => versionRef.current,
-      getMap,
-      getLastManualVersion: () => lastManualVersionRef.current,
-      getFilePath: () => pathRef.current,
-      getSelectedSid: () => selectedSidRef.current,
-      applyOps: (ops) => {
-        flushPending()
-        return applyOps(ops, false)
-      },
-      replaceAll: (html) => replaceAll(html, true),
+  const htmlAccess: HtmlDocAccess = {
+    getText: () => textRef.current,
+    getVersion: () => versionRef.current,
+    getMap,
+    getLastManualVersion: () => lastManualVersionRef.current,
+    getFilePath: () => pathRef.current,
+    getSelectedSid: () => selectedSidRef.current,
+    applyOps: (ops) => {
+      flushPending()
+      return applyOps(ops, false)
     },
+    replaceAll: (html) => replaceAll(html, true),
+  }
+  accessRef.current = htmlAccess
+
+  const aiDeps: HtmlAiDeps = {
+    access: htmlAccess,
     getSnapshot: () => ({ text: textRef.current }),
     restoreSnapshot: (snapshot) => replaceAll(snapshot.text, false),
     onPrompt: (text) => {
@@ -1249,6 +1293,7 @@ export default function App() {
       />
 
       <div className="app-main">
+        {!CONTROL_MODE && (
         <div className={`ai-dock${aiOpen ? '' : ' collapsed'}`}>
           {!aiOpen && (
             <button
@@ -1274,6 +1319,7 @@ export default function App() {
             onCollapse={() => setAiOpen(false)}
           />
         </div>
+        )}
         <div className="app-content">
           {findTarget && (
             <FindPanel

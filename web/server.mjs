@@ -225,7 +225,7 @@ const MIME = {
 
 /** find the first existing web-dist dir among the apps (shell first = the home screen) */
 function findStaticRoots() {
-  const candidates = ['shell', 'docs', 'markdown', 'pdf', 'sheets', 'slides']
+  const candidates = ['shell', 'docs', 'markdown', 'pdf', 'sheets', 'slides', 'html']
   const roots = []
   for (const app of candidates) {
     const dir = join(ROOT, 'apps', app, 'web-dist')
@@ -726,7 +726,7 @@ async function handleApi(req, res, pathname, body, url) {
   // loopback-only by default (INV-002); same ALLOW_ABS_PATHS policy as the
   // absolute-path read endpoints, plus a per-request loopback check (BR-005).
   const controlDenied = () => json(res, 403, { ok: false, error: 'loopback only' })
-  const controlMatch = pathname.match(/^\/api\/control\/(docs|markdown|sheets|slides|pdf)\/([0-9a-f]{64})\/(context|tool|export)$/)
+  const controlMatch = pathname.match(/^\/api\/control\/(docs|markdown|sheets|slides|pdf|html)\/([0-9a-f]{64})\/(context|tool|export)$/)
 
   // SSE downstream: the iframe adapter registers its executor here (BR-003).
   // event: hello (registration ack), event: ping (keepalive, 25s), then
@@ -1332,7 +1332,19 @@ async function serveStatic(res, pathname, roots) {
       break
     }
   }
-  if (!app) app = roots[0]
+  if (!app) {
+    const first = pathname.split('/').filter(Boolean)[0] ?? ''
+    const known = ['shell', 'docs', 'markdown', 'pdf', 'sheets', 'slides', 'html']
+    if (known.includes(first)) {
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' })
+      return res.end(
+        '<!doctype html><meta charset="utf-8"><title>GenOffice 404</title>'
+        + `<p>${first} web-dist 未构建。不误路由到其他应用。</p>`
+        + '<pre>cd engine &amp;&amp; npm run web:build --workspaces --if-present</pre>',
+      )
+    }
+    app = roots[0]
+  }
   const safe = normalize(rest).replace(/^(\.\.[/\\])+/, '')
   let filePath = join(app.dir, safe)
   if (!filePath.startsWith(app.dir)) filePath = join(app.dir, 'index.html')
