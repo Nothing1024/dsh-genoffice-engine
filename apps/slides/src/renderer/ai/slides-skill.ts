@@ -2580,6 +2580,234 @@ async function executeTool(
 
     case 'land_pages':
       return executeLandPages(access, call.input, state)
+
+    case 'get_deck_context':
+      return {
+        output:
+          `<deck outline>\n${buildDeckOutline(slides, access.getCurrent(), access.getSelectedIds())}\n</deck outline>`,
+        mutated: false,
+        summary: t('aiSumReadSlide', { n: access.getCurrent() + 1 }),
+      }
+
+    case 'add_table': {
+      const slide = Number(call.input.slideIndex)
+      const rows = Number(call.input.rows)
+      const cols = Number(call.input.cols)
+      if (!Number.isInteger(slide) || !slides[slide]) {
+        return fail(t('aiFailApplyOps'), `slideIndex out of range (0-${slides.length - 1})`)
+      }
+      if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+        return fail(t('aiFailApplyOps'), 'rows and cols must be positive integers')
+      }
+      // Host/plugin add_table is an explicit insert on an already-open file,
+      // not an LLM from-scratch assemble. Skip the apply_ops scratch guard.
+      const hostState = { ...state, htmlGenerated: true }
+      const created = await executeTool(
+        access,
+        {
+          id: call.id,
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'addTable',
+                target: { slide },
+                rows,
+                cols,
+                offset: { x: 80 * 9525, y: 160 * 9525, cx: 1120 * 9525, cy: 360 * 9525 },
+              },
+            ],
+          },
+        },
+        hostState,
+        signal,
+      )
+      const id = String(created.output ?? '')
+        .match(/New element ids:\s*([A-Za-z0-9_, ]+)/)?.[1]
+        ?.split(',')[0]
+        ?.trim()
+      if (created.isError || !id) return created
+      const cells = Array.isArray(call.input.cells) ? (call.input.cells as unknown[]) : []
+      const fillOps: Record<string, unknown>[] = []
+      for (let r = 0; r < cells.length; r++) {
+        const row = cells[r]
+        if (!Array.isArray(row)) continue
+        for (let c = 0; c < row.length; c++) {
+          fillOps.push({
+            op: 'setTableCell',
+            target: { slide, el: id },
+            row: r,
+            col: c,
+            paragraphs: [{ runs: [{ text: String(row[c] ?? '') }] }],
+          })
+        }
+      }
+      if (fillOps.length) {
+        const filled = await executeTool(
+          access,
+          { id: call.id, name: 'apply_ops', input: { ops: fillOps } },
+          state,
+          signal,
+        )
+        if (filled.isError) return filled
+      }
+      return {
+        ...created,
+        output: `${created.output}\nCreated table element id=${id}`,
+        mutated: true,
+      }
+    }
+
+    case 'add_chart': {
+      const slide = Number(call.input.slideIndex)
+      if (!Number.isInteger(slide) || !slides[slide]) {
+        return fail(t('aiFailApplyOps'), `slideIndex out of range (0-${slides.length - 1})`)
+      }
+      const hostState = { ...state, htmlGenerated: true }
+      const created = await executeTool(
+        access,
+        {
+          id: call.id,
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'addChart',
+                target: { slide },
+                kind: String(call.input.kind ?? 'bar'),
+                title: call.input.title != null ? String(call.input.title) : undefined,
+                categories: Array.isArray(call.input.categories)
+                  ? (call.input.categories as unknown[]).map(String)
+                  : [],
+                series: Array.isArray(call.input.series) ? call.input.series : [],
+                offset: { x: 80 * 9525, y: 200 * 9525, cx: 800 * 9525, cy: 360 * 9525 },
+                dataSource: call.input.dataSource ?? 'sample',
+              },
+            ],
+          },
+        },
+        hostState,
+        signal,
+      )
+      const id = String(created.output ?? '')
+        .match(/New element ids:\s*([A-Za-z0-9_, ]+)/)?.[1]
+        ?.split(',')[0]
+        ?.trim()
+      if (created.isError || !id) return created
+      return {
+        ...created,
+        output: `${created.output}\nCreated chart element id=${id}`,
+        mutated: true,
+      }
+    }
+
+    case 'edit_table_cell': {
+      if (call.input.cellId != null && (call.input.row == null || call.input.col == null)) {
+        return fail(t('aiFailApplyOps'), 'cellId is not supported; pass row and col')
+      }
+      const slide = Number(call.input.slideIndex)
+      const el = String(call.input.sourceId ?? call.input.elementId ?? '')
+      const row = Number(call.input.row)
+      const col = Number(call.input.col)
+      if (!el || !Number.isInteger(row) || !Number.isInteger(col)) {
+        return fail(t('aiFailApplyOps'), 'sourceId, row and col are required')
+      }
+      const rawParas = Array.isArray(call.input.paragraphs) ? (call.input.paragraphs as unknown[]) : []
+      const paragraphs = rawParas.map((para) => {
+        if (para && typeof para === 'object' && Array.isArray((para as { runs?: unknown }).runs)) {
+          return para
+        }
+        const text =
+          para && typeof para === 'object' && 'text' in para
+            ? String((para as { text: unknown }).text ?? '')
+            : String(para ?? '')
+        return { runs: [{ text }] }
+      })
+      return executeTool(
+        access,
+        {
+          id: call.id,
+          name: 'apply_ops',
+          input: {
+            ops: [{ op: 'setTableCell', target: { slide, el }, row, col, paragraphs }],
+          },
+        },
+        state,
+        signal,
+      )
+    }
+
+    case 'edit_table_structure': {
+      const slide = Number(call.input.slideIndex)
+      const el = String(call.input.sourceId ?? call.input.elementId ?? '')
+      const kind = String(call.input.kind ?? '')
+      const kinds = new Set(['insert-row', 'delete-row', 'insert-col', 'delete-col'])
+      if (!kinds.has(kind)) {
+        return fail(
+          t('aiFailApplyOps'),
+          `unknown kind "${kind}". Supported: insert-row, delete-row, insert-col, delete-col`,
+        )
+      }
+      if (!el) return fail(t('aiFailApplyOps'), 'sourceId is required')
+      const beforeIds = new Set(
+        collectNodeInfos(slides[slide]?.nodes ?? []).filter((n) => n.type === 'table').map((n) => n.id),
+      )
+      const changed = await executeTool(
+        access,
+        {
+          id: call.id,
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'tableStructure',
+                target: { slide, el },
+                kind,
+                index: Number(call.input.index ?? 0),
+                ...(call.input.before === true ? { before: true } : {}),
+              },
+            ],
+          },
+        },
+        state,
+        signal,
+      )
+      if (changed.isError) return changed
+      const afterIds = collectNodeInfos(access.getSlides()[slide]?.nodes ?? [])
+        .filter((n) => n.type === 'table')
+        .map((n) => n.id)
+      const remapped = afterIds.find((id) => !beforeIds.has(id)) ?? afterIds[0] ?? el
+      return {
+        ...changed,
+        output: `${changed.output}\nTable ${el} updated to ${remapped}`,
+      }
+    }
+
+    case 'edit_table_style': {
+      const slide = Number(call.input.slideIndex)
+      const el = String(call.input.sourceId ?? call.input.elementId ?? '')
+      return executeTool(
+        access,
+        {
+          id: call.id,
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'setTableStyle',
+                target: { slide, el },
+                styleName: call.input.styleName != null ? String(call.input.styleName) : undefined,
+                firstRow: call.input.firstRow,
+                bandRow: call.input.bandRow,
+              },
+            ],
+          },
+        },
+        state,
+        signal,
+      )
+    }
+
     case 'edit_chart': {
       const idx = Number(call.input.slideIndex)
       const sourceId = String(call.input.sourceId ?? '')

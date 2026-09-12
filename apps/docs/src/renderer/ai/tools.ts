@@ -475,6 +475,7 @@ const INDEX_WRITE_SUMMARIES: Record<string, () => string> = {
   replace_blocks: () => t('aiSumReplaceContent'),
   replace_selection: () => t('aiSumReplaceSelection'),
   apply_ops: () => t('aiSumApplyCommands'),
+  apply_commands: () => t('aiSumApplyCommands'),
   insert_chart: () => t('aiSumInsertChart'),
   edit_chart: () => t('aiSumEditChart'),
 }
@@ -1150,9 +1151,10 @@ function executeSyncTool(
       }
     }
 
+    case 'apply_commands':
     case 'apply_ops': {
       const dryRun = call.input.dryRun === true
-      const outcome = executeOps(editor, call.input.ops, {
+      const outcome = executeOps(editor, call.input.ops ?? call.input.commands, {
         numIds,
         track,
         selection: scope,
