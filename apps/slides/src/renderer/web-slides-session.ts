@@ -84,6 +84,7 @@ export interface WebSlideSession {
   undoStack: WebHistorySnapshot[]
   redoStack: WebHistorySnapshot[]
   historyBatch?: { depth: number; undoStart: number }
+  masterEdit?: { partPath: string; slide: Slide } | null
 }
 
 export interface WebHistorySnapshot {
@@ -192,7 +193,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
-function makeMediaResolver(opened: OpenedPptx) {
+export function makeMediaResolver(opened: OpenedPptx) {
   const cache = new Map<string, string | undefined>()
   return (mediaRef: string): string | undefined => {
     if (cache.has(mediaRef)) return cache.get(mediaRef)

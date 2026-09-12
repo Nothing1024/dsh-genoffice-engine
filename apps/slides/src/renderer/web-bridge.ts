@@ -31,7 +31,16 @@ import type {
   ApplyEditScriptOp,
   ExportImagesOp,
   HeaderFooterOp,
+  AnimationItem,
   ApplyThemeOp,
+  MasterDeleteElementOp,
+  MasterEditFillOp,
+  MasterEditStrokeOp,
+  MasterEditTextOp,
+  MasterEditTransformOp,
+  SetAdvanceTimesOp,
+  SetAnimationsOp,
+  SetTransitionOp,
   ApplyTxnOp,
   ApplyTxnResult,
   AddSectionOp,
@@ -79,7 +88,7 @@ import { DEFAULT_AI_PANEL_PREFS, NO_AUTO_SAVE_DEFAULT } from '@genoffice/ui'
 // registry empty, and every transaction fails with `unknown op`.
 import { runTxn } from '../main/ops'
 import { mapScriptOps } from '../main/ops/script-map'
-import type { RenderSlide } from '@genoffice/pptx-render'
+import { buildRenderSlide, HeuristicMetrics, type RenderSlide } from '@genoffice/pptx-render'
 import type { AiSettings, AiStreamChunk, AiStreamRequest } from '@genoffice/ai-provider'
 import { defaultAiSettings, streamForProvider } from '@genoffice/ai-provider'
 import {
@@ -112,6 +121,11 @@ import {
   getElementLink,
   getRunLinks,
   getSlideLinks,
+  getSlideAnimations,
+  getSlideTransition,
+  elementSpid,
+  listMasterParts,
+  parseMasterPart,
   getSections,
   readHeaderFooter,
   reparseDeck,
@@ -122,6 +136,7 @@ import {
   BUILTIN_LAYOUT_PREFIX,
   type OpenedPptx,
   type SectionInfo,
+  type Slide,
   type Paragraph,
   type TableStructureOp,
   type TableStyleEdit,
@@ -134,6 +149,7 @@ import {
   endHistoryBatch,
   getWebSession,
   buildAllRenderSlides,
+  makeMediaResolver,
   pushHistory,
   rebuildSlide,
   rebuildSlideWithReparse,
@@ -436,18 +452,62 @@ function notAvailable(method: string): Promise<never> {
 
 type TxnOp = Parameters<typeof runTxn>[1]['ops'][number]
 
-function webTxn(ops: TxnOp[]) {
+function webTxn(ops: TxnOp[], parts?: Map<string, Slide>) {
   const session = getWebSession()
   if (!session) return null
-  const plan = runTxn(session.opened, { ops, dryRun: true })
+  const extra = parts ? { parts } : {}
+  const plan = runTxn(session.opened, { ops, dryRun: true, ...extra })
   if (plan.failures?.length) return { session, r: plan, failed: true as const }
   pushHistory(session)
-  const r = runTxn(session.opened, { ops })
+  const r = runTxn(session.opened, { ops, ...extra })
   if (!r.applied) {
     session.undoStack.pop()
     return { session, r, failed: true as const }
   }
   return { session, r, failed: false as const }
+}
+
+function buildMasterRender(session: WebSlideSession) {
+  const me = session.masterEdit
+  if (!me) return null
+  return buildRenderSlide(me.slide, session.opened.deck.size, {
+    fitWidthPx: session.fitWidthPx,
+    media: makeMediaResolver(session.opened),
+    metrics: new HeuristicMetrics(),
+  })
+}
+
+function masterTxn(op: TxnOp) {
+  const session = getWebSession()
+  const me = session?.masterEdit
+  if (!session || !me) return null
+  return webTxn([op], new Map([[me.partPath, me.slide]]))
+}
+
+function readAnimations(session: WebSlideSession, slideIndex: number): AnimationItem[] {
+  const slide = session.opened.deck.slides[slideIndex]
+  if (!slide) return []
+  const bySpid = new Map<number, (typeof slide.elements)[number]>()
+  for (const el of slide.elements) {
+    const spid = elementSpid(el)
+    if (spid != null && !bySpid.has(spid)) bySpid.set(spid, el)
+  }
+  const out: AnimationItem[] = []
+  for (const a of getSlideAnimations(slide)) {
+    const el = bySpid.get(a.spid)
+    if (!el) continue
+    out.push({
+      sourceId: el.id,
+      targetName: el.name || el.type,
+      effect: a.effect,
+      trigger: a.trigger,
+      durationMs: a.durationMs,
+      delayMs: a.delayMs,
+      ...(a.motionPath != null ? { motionPath: a.motionPath } : {}),
+      ...(a.paragraph != null ? { paragraph: a.paragraph } : {}),
+    })
+  }
+  return out
 }
 
 function resolveLayoutPath(layoutPath?: string): string | undefined {
@@ -822,8 +882,13 @@ const slidesApi: SlidesApi = {
   getAiPanelPrefs: async () => DEFAULT_AI_PANEL_PREFS,
   onAiPanelPrefsChanged: () => () => {},
   onChromePressed: () => () => {},
-  setShowFullScreen: async () => {
-    console.warn('[web-slides] setShowFullScreen is not available in the web version')
+  setShowFullScreen: async (on: boolean) => {
+    try {
+      if (on && !document.fullscreenElement) await document.documentElement.requestFullscreen()
+      if (!on && document.fullscreenElement) await document.exitFullscreen()
+    } catch (e) {
+      console.warn('[web-slides] setShowFullScreen denied', e)
+    }
   },
   privateFontFaces: async () => [],
   privateFontData: async () => null,
@@ -1808,15 +1873,50 @@ const slidesApi: SlidesApi = {
     const session = getWebSession()
     return session ? chartColorSchemes(session.opened) : []
   },
-  getTransition: async () => 'none' as never,
-  setTransition: async () => notAvailable('setTransition'),
-  setAdvanceTimes: async () => notAvailable('setAdvanceTimes'),
-  getAnimations: async () => {
-    console.warn('[web-slides] getAnimations is not available in the web version (documented subset)')
-    return []
+  getTransition: async (slideIndex: number) => {
+    const session = getWebSession()
+    const slide = session?.opened.deck.slides[slideIndex]
+    return slide ? getSlideTransition(slide) : 'none'
   },
-  setAnimations: async () => notAvailable('setAnimations'),
-  getShapeKeys: async () => [],
+  setTransition: async (op: SetTransitionOp) => {
+    const session = getWebSession()
+    if (!session) return false
+    const slides = session.opened.deck.slides
+    const idxs =
+      op.slideIndex === -1 ? slides.map((_, i) => i) : slides[op.slideIndex] ? [op.slideIndex] : []
+    if (idxs.length === 0) return false
+    const txn = webTxn(idxs.map((i) => ({ op: 'setTransition', target: { slide: i }, kind: op.kind })))
+    return Boolean(txn && !txn.failed)
+  },
+  setAdvanceTimes: async (op: SetAdvanceTimesOp) => {
+    const session = getWebSession()
+    if (!session) return false
+    const slides = session.opened.deck.slides
+    const targets = op.times.filter((t) => slides[t.slideIndex])
+    if (targets.length === 0) return false
+    const txn = webTxn(
+      targets.map((t) => ({ op: 'setAdvanceTime', target: { slide: t.slideIndex }, ms: t.ms })),
+    )
+    return Boolean(txn && !txn.failed)
+  },
+  getAnimations: async (slideIndex: number) => {
+    const session = getWebSession()
+    return session ? readAnimations(session, slideIndex) : []
+  },
+  setAnimations: async (op: SetAnimationsOp) => {
+    const txn = webTxn([{ op: 'setAnimations', target: { slide: op.slideIndex }, items: op.items }])
+    return Boolean(txn && !txn.failed)
+  },
+  getShapeKeys: async (slideIndex: number) => {
+    const session = getWebSession()
+    const slide = session?.opened.deck.slides[slideIndex]
+    if (!slide) return []
+    return slide.elements.map((el) => ({
+      sourceId: el.id,
+      spid: elementSpid(el),
+      name: el.name ?? '',
+    }))
+  },
   getChartData: async (slideIndex, sourceId) => {
     const session = getWebSession()
     if (!session) return null
@@ -1908,22 +2008,129 @@ const slidesApi: SlidesApi = {
     }
   },
 
-  masterOpen: async () => notAvailable('masterOpen'),
-  masterEnter: async () => notAvailable('masterEnter'),
-  masterClose: async () => null,
-  masterEditText: async () => notAvailable('masterEditText'),
-  masterEditTransform: async () => notAvailable('masterEditTransform'),
-  masterEditFill: async () => notAvailable('masterEditFill'),
-  masterEditStroke: async () => notAvailable('masterEditStroke'),
-  masterDeleteElement: async () => notAvailable('masterDeleteElement'),
+  masterEnter: async (fitWidthPx: number) => {
+    const session = getWebSession()
+    if (!session) return null
+    session.fitWidthPx = fitWidthPx
+    const items = []
+    for (const part of listMasterParts(session.opened.archive)) {
+      const slide = parseMasterPart(session.opened.archive, part.partPath)
+      if (!slide) continue
+      const rendered = buildRenderSlide(slide, session.opened.deck.size, {
+        fitWidthPx,
+        media: makeMediaResolver(session.opened),
+        metrics: new HeuristicMetrics(),
+      })
+      items.push({ partPath: part.partPath, kind: part.kind, name: part.name, slide: rendered })
+      if (!session.masterEdit) session.masterEdit = { partPath: part.partPath, slide }
+    }
+    return items.length ? { items } : null
+  },
+  masterOpen: async (partPath: string) => {
+    const session = getWebSession()
+    if (!session) return null
+    const slide = parseMasterPart(session.opened.archive, partPath)
+    if (!slide) return null
+    session.masterEdit = { partPath, slide }
+    return buildMasterRender(session)
+  },
+  masterClose: async () => {
+    const session = getWebSession()
+    if (!session) return null
+    session.masterEdit = null
+    return buildAllRenderSlides(session.opened, session.fitWidthPx)
+  },
+  masterEditText: async (op: MasterEditTextOp) => {
+    const session = getWebSession()
+    const me = session?.masterEdit
+    if (!session || !me) return null
+    const txn = masterTxn({
+      op: 'setText',
+      target: { part: me.partPath, el: op.sourceId },
+      paragraphs: op.paragraphs,
+    })
+    return txn && !txn.failed ? buildMasterRender(session) : null
+  },
+  masterEditTransform: async (op: MasterEditTransformOp) => {
+    const session = getWebSession()
+    const me = session?.masterEdit
+    if (!session || !me) return null
+    const el = me.slide.elements.find((item) => matchesElementRef(item, op.sourceId))
+    if (!el) return null
+    const baseWidthPx = session.opened.deck.size.cx / EMU_PER_PX_96
+    const scale = op.fitWidthPx / baseWidthPx
+    const toEmu = (px: number) => Math.round((px / scale) * EMU_PER_PX_96)
+    if (op.preview) {
+      el.transform = {
+        ...el.transform,
+        offset: { x: toEmu(op.xPx), y: toEmu(op.yPx), cx: toEmu(op.wPx), cy: toEmu(op.hPx) },
+        rot: Math.round(op.rotationDeg * 60000),
+      }
+      return buildMasterRender(session)
+    }
+    const txn = masterTxn({
+      op: 'setTransform',
+      target: { part: me.partPath, el: op.sourceId },
+      box: { x: toEmu(op.xPx), y: toEmu(op.yPx), cx: toEmu(op.wPx), cy: toEmu(op.hPx) },
+      rotDeg: op.rotationDeg,
+    })
+    return txn && !txn.failed ? buildMasterRender(session) : null
+  },
+  masterEditFill: async (op: MasterEditFillOp) => {
+    const session = getWebSession()
+    if (!session?.masterEdit) return null
+    const txn = masterTxn({
+      op: 'setFill',
+      target: { part: session.masterEdit.partPath, el: op.sourceId },
+      fill: op.fill,
+    })
+    return txn && !txn.failed ? buildMasterRender(session) : null
+  },
+  masterEditStroke: async (op: MasterEditStrokeOp) => {
+    const session = getWebSession()
+    const me = session?.masterEdit
+    if (!session || !me) return null
+    const txn = masterTxn({
+      op: 'setStroke',
+      target: { part: me.partPath, el: op.sourceId },
+      stroke: op.stroke
+        ? { color: op.stroke.color, widthEmu: Math.round(op.stroke.widthPt * EMU_PER_PT) }
+        : null,
+    })
+    return txn && !txn.failed ? buildMasterRender(session) : null
+  },
+  masterDeleteElement: async (op: MasterDeleteElementOp) => {
+    const session = getWebSession()
+    const me = session?.masterEdit
+    if (!session || !me) return null
+    const txn = masterTxn({
+      op: 'deleteElement',
+      target: { part: me.partPath, el: op.sourceId },
+    })
+    return txn && !txn.failed ? buildMasterRender(session) : null
+  },
 
-  presenterStart: async () => notAvailable('presenterStart'),
-  presenterEnd: async () => notAvailable('presenterEnd'),
-  presenterSync: async () => notAvailable('presenterSync'),
-  presenterSwap: async () => notAvailable('presenterSwap'),
-  presenterInk: async () => notAvailable('presenterInk'),
-  audienceNav: async () => notAvailable('audienceNav'),
-  audienceReady: async () => notAvailable('audienceReady'),
+  presenterStart: async () => {
+    try {
+      if (!document.fullscreenElement) await document.documentElement.requestFullscreen()
+      return { audience: false }
+    } catch (e) {
+      console.warn('[web-slides] presenterStart fullscreen denied', e)
+      return { audience: false }
+    }
+  },
+  presenterEnd: async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen()
+    } catch {
+      /* ignore */
+    }
+  },
+  presenterSync: () => {},
+  presenterSwap: async () => false,
+  presenterInk: () => {},
+  audienceNav: () => {},
+  audienceReady: async () => null,
   onAudienceNav: () => () => {},
   onShowSync: () => () => {},
   onShowInk: () => () => {},

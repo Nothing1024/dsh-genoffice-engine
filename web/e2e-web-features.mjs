@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
@@ -2317,6 +2317,211 @@ async function runSlidesMedia(outDir) {
   }
 }
 
+
+async function runSlidesPresentation(outDir) {
+  const fixture = join(ENGINE, 'fixtures/generated/sample.pptx')
+  if (!existsSync(fixture)) throw new Error(`missing slides fixture ${fixture}`)
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-slides-presentation')
+  await mkdir(workDir, { recursive: true })
+  const file = join(workDir, 'presentation-source.pptx')
+  await copyFile(fixture, file)
+  const beforeSha = sha256(await readFile(file))
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[slides] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[slides] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, file, 90_000)
+
+    const failApi = await page.evaluate(async () => {
+      const api = window.slidesApi
+      const badTransition = await api.setTransition({ slideIndex: 0, kind: 'not-a-transition' })
+      const badMaster = await api.masterOpen('ppt/slideMasters/missing.xml')
+      const badAnim = await api.setAnimations({
+        slideIndex: 0,
+        items: [{ sourceId: 'missing-el', effect: 'fade', trigger: 'onClick', durationMs: 500, delayMs: 0 }],
+      })
+      const swap = await api.presenterSwap()
+      const slides = await api.getRenderSlides()
+      return { badTransition, badMaster, badAnim, swap, slideCount: slides?.length ?? 0 }
+    })
+    const afterFailSha = sha256(await readFile(file))
+
+    const menu = await page.evaluate(async () => {
+      const api = window.slidesApi
+      const entered = await api.masterEnter(960)
+      const part = entered?.items?.[0]
+      const masterSlide = part ? await api.masterOpen(part.partPath) : null
+      const textNode = masterSlide?.nodes?.find((n) =>
+        (n.type === 'shape' || n.type === 'text') && !n.decoration && (n.durableId || n.sourceId),
+      )
+      let edited = textNode
+        ? await api.masterEditText({
+            sourceId: textNode.durableId || textNode.sourceId,
+            paragraphs: [{ runs: [{ text: 'WfcMaster' }] }],
+          })
+        : null
+      if (!edited && textNode) {
+        edited = await api.masterEditFill({
+          sourceId: textNode.durableId || textNode.sourceId,
+          fill: '#C43E1C',
+        })
+      }
+      const closed = await api.masterClose()
+      const slides = await api.getRenderSlides()
+      const node = slides?.[0]?.nodes?.find((n) => n.durableId || n.sourceId)
+      const sourceId = node?.durableId || node?.sourceId
+      const transOk = await api.setTransition({ slideIndex: 0, kind: 'fade' })
+      const animOk = sourceId
+        ? await api.setAnimations({
+            slideIndex: 0,
+            items: [{ sourceId, effect: 'appear', trigger: 'onClick', durationMs: 400, delayMs: 0 }],
+          })
+        : false
+      const transition = await api.getTransition(0)
+      const animations = await api.getAnimations(0)
+      const started = await api.presenterStart()
+      const swapped = await api.presenterSwap()
+      await api.presenterEnd()
+      const advanceOk = await api.setAdvanceTimes({ times: [{ slideIndex: 0, ms: 1500 }] })
+      return {
+        masterCount: entered?.items?.length ?? 0,
+        masterEdited: Boolean(edited),
+        masterClosed: Array.isArray(closed),
+        sourceId,
+        transOk,
+        animOk,
+        transition,
+        animCount: animations?.length ?? 0,
+        animEffect: animations?.[0]?.effect ?? null,
+        started,
+        swapped,
+        advanceOk,
+      }
+    })
+
+    const tool = await callSlidesTool(relay.base, file, 'apply_ops', {
+      ops: [
+        { op: 'setTransition', target: { slide: 0 }, kind: 'wipe' },
+        menu.sourceId
+          ? {
+              op: 'setAnimations',
+              target: { slide: 0 },
+              items: [{ sourceId: menu.sourceId, effect: 'fade', trigger: 'onClick', durationMs: 300, delayMs: 0 }],
+            }
+          : { op: 'setTransition', target: { slide: 0 }, kind: 'wipe' },
+      ],
+    })
+    const undone = await page.evaluate(async () => Boolean(await window.slidesApi.undo()))
+    const redone = await page.evaluate(async () => Boolean(await window.slidesApi.redo()))
+    const saved = await saveSlides(relay.base, file)
+    const zip = await JSZip.loadAsync(await readFile(file))
+    const names = Object.keys(zip.files)
+    const slideXml = (await zip.file('ppt/slides/slide1.xml')?.async('string')) ?? ''
+    let masterXml = ''
+    for (const name of names) {
+      if (/^ppt\/slideMasters\/slideMaster\d+\.xml$/i.test(name)) {
+        masterXml += await zip.file(name).async('string')
+      }
+    }
+    const savedSha = sha256(await readFile(file))
+    await page.locator('.status-play-btn').click({ timeout: 5_000 }).catch(() => {})
+    const showVisible = await page.locator('.slideshow').isVisible().catch(() => false)
+    if (showVisible) await page.keyboard.press('Escape')
+    await page.close()
+
+    const reopenPage = await browser.newPage()
+    await reopenPage.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const reopened = await waitReady(relay.base, file, 90_000)
+    const reopenState = await reopenPage.evaluate(async () => {
+      const api = window.slidesApi
+      return {
+        transition: await api.getTransition(0),
+        animations: await api.getAnimations(0),
+      }
+    })
+    shot = await reopenPage.screenshot({ type: 'png' })
+    await reopenPage.close()
+
+    const successAssertions = [
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened.readiness),
+      assertion('menu-master', menu.masterCount > 0 && menu.masterClosed, true, menu),
+      assertion('menu-transition', menu.transOk === true && menu.transition === 'fade', 'fade', menu.transition),
+      assertion('menu-animation', menu.animOk === true && menu.animCount >= 1, 1, menu),
+      assertion('menu-presenter', menu.started?.audience === false && menu.swapped === false, false, menu.started),
+      assertion('tool-ops', toolOk(tool), true, tool),
+      assertion('undo-redo', undone && redone, true, { undone, redone }),
+      assertion('save-ok', saved.ok === true, true, saved),
+      assertion('disk-changed', savedSha !== beforeSha, 'changed', { beforeSha, savedSha }),
+      assertion('persist-transition', /<p:wipe\b/.test(slideXml) || /wipe/.test(slideXml), true, slideXml.includes('transition')),
+      assertion('persist-anim', /<p:timing\b/.test(slideXml) || /anim/.test(slideXml), true, /timing/.test(slideXml)),
+      assertion('reopen-ready', reopened.readiness === 'ready', 'ready', reopened.readiness),
+      assertion('reopen-transition', reopenState.transition === 'wipe', 'wipe', reopenState.transition),
+      assertion('reopen-anim', (reopenState.animations?.length ?? 0) >= 1, 1, reopenState.animations),
+    ]
+    const failure1 = [
+      assertion('bad-transition-rejected', failApi.badTransition === false, false, failApi.badTransition),
+      assertion('bad-anim-rejected', failApi.badAnim === false, false, failApi.badAnim),
+      assertion('invalid-keeps-disk', afterFailSha === beforeSha, beforeSha, afterFailSha),
+    ]
+    const failure2 = [
+      assertion('bad-master-rejected', failApi.badMaster == null, null, failApi.badMaster),
+      assertion('presenter-swap-denied', failApi.swap === false, false, failApi.swap),
+    ]
+
+    const success = await writeEvidence(outDir, 'UF-004', 'success', {
+      cases: [{ id: 'slides-presentation-master-anim-show', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+      console: logs.join('\n'),
+      network: { events: networkEvents.slice(0, 80), count: networkEvents.length },
+      screenshot: shot,
+    })
+    const fail1 = await writeEvidence(outDir, 'UF-004', 'failure-1', {
+      cases: [{ id: 'slides-presentation-invalid-config', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+      console: `${logs.join('\n')}\nfailApi=${JSON.stringify(failApi)}\n`,
+      network: { events: [failApi], count: 1 },
+      screenshot: shot,
+    })
+    const fail2 = await writeEvidence(outDir, 'UF-004', 'failure-2', {
+      cases: [{ id: 'slides-presentation-permission', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+      console: `${logs.join('\n')}\nfailApi=${JSON.stringify(failApi)}\nmasterXmlHasWfc=${/WfcMaster/.test(masterXml)}\n`,
+      network: { events: [failApi], count: 1 },
+      screenshot: shot,
+    })
+    const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-004',
+      branch: 'slides-presentation',
+      status: ok ? 'passed' : 'failed',
+      results: { success, failure1: fail1, failure2: fail2, menu, reopenState, showVisible },
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-11.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (ok === false) throw new Error('slides-presentation case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -2363,6 +2568,10 @@ async function main() {
   if (args.caseName === 'slides-media' || args.all) {
     await runSlidesMedia(evidenceRoot)
     ran.push('slides-media')
+  }
+  if (args.caseName === 'slides-presentation' || args.all) {
+    await runSlidesPresentation(evidenceRoot)
+    ran.push('slides-presentation')
   }
   if (args.caseName === 'entries-sheets') {
     const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)
