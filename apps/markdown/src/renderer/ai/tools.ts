@@ -371,6 +371,27 @@ export function executeTool(
     case 'apply_ops':
       return applyOps(editor, call.input.ops, fm)
 
+    // Pre-official plugin/control names: keep the shared adapter contract.
+    case 'insert_content': {
+      const afterRaw = call.input.afterIndex
+      const after = Number.isInteger(afterRaw) ? Number(afterRaw) : -1
+      return applyOps(
+        editor,
+        [{ op: 'insertContent', after, markdown: String(call.input.markdown ?? '') }],
+        fm,
+      )
+    }
+
+    case 'replace_blocks': {
+      const start = Number(call.input.startIndex ?? 0)
+      const end = Number(call.input.endIndex ?? start)
+      return applyOps(
+        editor,
+        [{ op: 'replaceBlocks', target: { start, end }, markdown: String(call.input.markdown ?? '') }],
+        fm,
+      )
+    }
+
     case 'image_search': {
       const query = String(call.input.query ?? '').trim()
       if (!query) return fail('query must not be empty', t('aiToolImageSearch'))

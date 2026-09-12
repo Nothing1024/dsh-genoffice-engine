@@ -529,3 +529,24 @@ describe('frontmatter tools', () => {
     expect(result.isError).toBe(true)
   })
 })
+
+
+describe('legacy plugin/control tool names', () => {
+  it('insert_content maps onto insertContent', () => {
+    const editor = createEditor('# A\n\nfirst')
+    const result = executeTool(editor, call('insert_content', { afterIndex: 0, markdown: 'inserted' }))
+    expect(result.isError).toBeUndefined()
+    expect(result.mutated).toBe(true)
+    expect(editor.getMarkdown()).toContain('inserted')
+  })
+
+  it('replace_blocks maps onto replaceBlocks', () => {
+    const editor = createEditor('# A\n\nfirst')
+    markDocSeen(editor)
+    const result = executeTool(editor, call('replace_blocks', { startIndex: 0, endIndex: 0, markdown: '# B' }))
+    expect(result.isError).toBeUndefined()
+    expect(result.mutated).toBe(true)
+    expect(editor.getMarkdown()).toContain('# B')
+    expect(editor.getMarkdown()).not.toContain('# A')
+  })
+})

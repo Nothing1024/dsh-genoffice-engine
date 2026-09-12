@@ -320,6 +320,10 @@ function familyFile(workDir, app) {
   return join(workDir, `${app}-loop${ext}`)
 }
 
+function sheetIdFromContext(payload) {
+  return toolOutput(payload).match(/\(id=([^,\s)]+)/)?.[1] || 'sheet-1'
+}
+
 async function editFamily(base, app, file, marker) {
   if (app === 'markdown') {
     return callTool(base, app, file, 'apply_ops', {
@@ -330,19 +334,23 @@ async function editFamily(base, app, file, marker) {
     })
   }
   if (app === 'docs') {
-    return callTool(base, app, file, 'insert_paragraph', { afterIndex: -1, text: marker }).then(async (first) => {
+    return callTool(base, app, file, 'insert_content', {
+      afterBlockIndex: -1,
+      html: `<p>${marker}</p>`,
+    }).then(async (first) => {
       if (toolOk(first)) return first
       return callTool(base, app, file, 'replace_blocks', {
-        startIndex: 0,
-        endIndex: 0,
-        markdown: `# ${marker}`,
-      }).then(async (second) => (toolOk(second) ? second : callTool(base, app, file, 'insert_content', { afterIndex: -1, markdown: marker })))
+        startBlockIndex: 0,
+        endBlockIndex: 0,
+        html: `<p>${marker}</p>`,
+      })
     })
   }
   if (app === 'sheets') {
-    return callTool(base, app, file, 'set_cell', { sheet: 0, row: 0, col: 0, value: marker }).then(async (first) => {
-      if (toolOk(first)) return first
-      return callTool(base, app, file, 'edit_cell', { row: 0, col: 0, value: marker })
+    const sheetId = sheetIdFromContext(await contextApp(base, app, file))
+    return callTool(base, app, file, 'propose_operations', {
+      summary: `write ${marker}`,
+      operations: [{ op: 'set_cell', sheetId, address: 'A1', value: marker }],
     })
   }
   if (app === 'slides') {
@@ -631,11 +639,18 @@ async function runFiveFamily(ctx) {
     await openFamily(page, ctx.base, app, file)
     const reopened = await waitReady(ctx.base, file)
     const reContext = await contextApp(ctx.base, app, file)
+    let reText = toolOutput(reContext)
+    if (app === 'sheets') {
+      const cells = await callTool(ctx.base, app, file, 'read_cells', {
+        addresses: ['A1'],
+        sheetId: sheetIdFromContext(reContext),
+      })
+      reText = `${reText}\n${toolOutput(cells)}`
+    }
     shot = await page.screenshot({ type: 'png' })
     await page.close()
     events.push({ app, opened, edited, saved, reopened })
     const marker = `Five${app}Keep`
-    const reText = toolOutput(reContext)
     assertions.push(assertion(`${app}-open-ready`, opened.readiness === 'ready', 'ready', opened))
     assertions.push(assertion(`${app}-context`, toolOutput(context).length > 0, 'context', toolOutput(context).slice(0, 200)))
     if (app !== 'pdf') {
@@ -856,6 +871,19 @@ async function main() {
           console: land.console,
           network: land.network,
           screenshot: land.screenshot,
+        })
+      }
+    }
+    else if (args.caseName === 'five-family') {
+      const five = results.find((item) => item.name === 'five-family')
+      if (five) {
+        await writeEvidence(outDir, 'UF-001', 'success', {
+          run_id: ctx.runId,
+          status: five.ok ? 'passed' : 'failed',
+          cases: [{ id: 'UF-001-success', status: five.ok ? 'passed' : 'failed', assertions: five.assertions }],
+          console: five.console,
+          network: five.network,
+          screenshot: five.screenshot,
         })
       }
     }
