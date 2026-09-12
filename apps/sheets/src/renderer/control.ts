@@ -18,8 +18,8 @@ export { CONTROL_MODE, CONTROL_PATH }
 
 
 export type FileLoadMeta = {
-  mtimeMs?: number | null
-  fileRevision?: string | null
+  mtimeMs?: number | null | undefined
+  fileRevision?: string | null | undefined
 }
 
 type FileMetaSink = { apply(meta: FileLoadMeta): void }
