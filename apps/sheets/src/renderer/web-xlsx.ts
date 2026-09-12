@@ -4,7 +4,8 @@
  * Read path: relay `/api/file` bytes → JSZip → `xl/workbook.xml` (sheet
  * order/names), `xl/_rels/workbook.xml.rels` (sheet part paths),
  * `xl/sharedStrings.xml`, per-worksheet XML (cells / merges / cols / freeze),
- * `xl/styles.xml` (numFmts + cellXfs → `WorkbookCellStyle[]`) → a
+ * `xl/styles.xml` (numFmts + cellXfs → `WorkbookCellStyle[]`),
+ * drawings/media and pivot table parts → a
  * `WorkbookFile`-conformant snapshot the renderer's lazy model consumes
  * (`loadWorkbookSkeleton` + `readWorkbookRange`/`readWorkbookFormulas`).
  *
@@ -28,6 +29,7 @@ import type {
   WorkbookFormulaCellsResult,
   WorkbookSaveRequest,
   WorkbookCellStyle,
+  WorkbookVisualObject,
 } from '../shared/desktop-api'
 import {
   assembleWithJsZip,
@@ -38,6 +40,7 @@ import type { CellEdit, SheetStructuralOps } from '../gateway/xlsx-gateway'
 import type { SheetEditPlan } from '../gateway/xlsx-sheets'
 import { columnIndex } from '../domain/cell-address'
 import { translateSharedFormula } from '../gateway/xlsx-structure'
+import { parseWorksheetPivots, parseWorksheetVisuals } from './web-xlsx-media'
 
 /** One record of workbookRangeResultSchema.cells (no exported type name). */
 interface WebRangeCell {
@@ -137,6 +140,8 @@ export interface WebSheetStore {
     name?: string
     columns?: string[]
   }>
+  pivotTables: WorkbookFile['sheets'][number]['pivotTables']
+  pivotRanges: WorkbookFile['sheets'][number]['pivotRanges']
 }
 
 export interface ParsedWorkbook {
@@ -309,6 +314,8 @@ async function parseWorksheet(
     autoFilter: null,
     sheetProtection: null,
     tables: [],
+    pivotTables: [],
+    pivotRanges: [],
   }
   // <dimension ref="A1:C10"/> — the declared used range (absent in some files)
   const dimension = xml.match(/<dimension\b[^>]*\/>/)
@@ -542,10 +549,17 @@ export async function parseXlsxWorkbook(
     const state = readXmlAttribute(attributes, 'state')
     sheet.hidden = state === 'hidden' || state === 'veryHidden'
     sheet.tables = await parseWorksheetTables(zip, path)
+    const pivots = await parseWorksheetPivots(zip, path)
+    sheet.pivotTables = pivots.pivotTables
+    sheet.pivotRanges = pivots.pivotRanges
     sheets.push(sheet)
   }
   if (sheets.length === 0) throw new Error('Workbook contains no readable worksheets.')
   const sha256 = await sha256Hex(bytes)
+  const visuals: WorkbookVisualObject[] = []
+  for (const sheet of sheets) {
+    visuals.push(...(await parseWorksheetVisuals(zip, sheet.worksheetPath, sheet.id, visuals.length)))
+  }
   const file: WorkbookFile = {
     sessionId: crypto.randomUUID(),
     name,
@@ -573,15 +587,15 @@ export async function parseXlsxWorkbook(
       ...(sheet.showFormulas ? { showFormulas: true } : {}),
       tables: sheet.tables,
       comments: [],
-      pivotRanges: [],
-      pivotTables: [],
+      pivotRanges: sheet.pivotRanges,
+      pivotTables: sheet.pivotTables,
       sparklines: [],
       cellImages: [],
       ...(sheet.defaultRowHeight === null ? {} : {}),
     })),
     styles,
     dxfStyles: [],
-    visuals: [],
+    visuals,
     definedNames: parseDefinedNames(workbookXml),
     readOnly: false,
   }

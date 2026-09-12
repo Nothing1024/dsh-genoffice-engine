@@ -9,6 +9,7 @@
  *     browser xlsx parse (web-xlsx.ts) → `WorkbookFile` (lazy model intact)
  *   - home `/webdoc/...` targets reuse the shared IndexedDB store (no sidecar spawn)
  *   - range/formula reads → in-memory parsed store (shared formulas + names/hidden/tables/filters/protection)
+ *   - media/pivot reads → zip parts + gateway parsePivotDefinition (INV-003)
  *   - save → the renderer's edit journal applied to the ORIGINAL archive via
  *     the gateway's pure-JSZip pipeline (only touched entries change — BR-009)
  *   - theme / language / AI settings → localStorage
@@ -59,11 +60,18 @@ import {
   parseXlsxWorkbook,
   type ParsedWorkbook,
 } from './web-xlsx'
+import {
+  bytesToBase64,
+  readMediaPart,
+  readPivotParts,
+  sniffImageMediaType,
+} from './web-xlsx-media'
 
 declare global {
   interface Window {
     __GENOFFICE_WEB__?: boolean
     __genofficeExportBytes?: () => Promise<{ bytes: Uint8Array; name: string } | null>
+    __genofficeWorkbookFile?: () => WorkbookFile | null
     showOpenFilePicker?: (options?: unknown) => Promise<unknown[]>
     showSaveFilePicker?: (options?: unknown) => Promise<unknown>
   }
@@ -278,6 +286,7 @@ export async function exportCurrentBytes(): Promise<{ bytes: Uint8Array; name: s
 }
 
 window.__genofficeExportBytes = exportCurrentBytes
+window.__genofficeWorkbookFile = () => opened?.file ?? null
 
 // ── window.desktopApi ───────────────────────────────────────────────────
 
@@ -358,16 +367,33 @@ const desktopApi: DesktopApi = {
     return { cells: [] }
   },
 
-  readWorkbookMedia: async (): Promise<WorkbookMediaResult> => {
-    throw new Error('readWorkbookMedia is unavailable in the web version')
+  readWorkbookMedia: async (request): Promise<WorkbookMediaResult> => {
+    if (!opened) throw new Error('No workbook open')
+    if (request.sessionId !== opened.file.sessionId) throw new Error('Unknown workbook session.')
+    const visual = opened.file.visuals.find((candidate) => candidate.id === request.visualId)
+    const mediaPath = visual?.mediaPath ?? visual?.fillMediaPath
+    if (!mediaPath) throw new Error('Unknown workbook image.')
+    return readMediaPart(opened.latestBytes, mediaPath)
   },
 
-  readPivotDefinition: async (): Promise<WorkbookPivotDefinition> => {
-    throw new Error('readPivotDefinition is unavailable in the web version')
+  readPivotDefinition: async (request): Promise<WorkbookPivotDefinition> => {
+    if (!opened) throw new Error('No workbook open')
+    if (request.sessionId !== opened.file.sessionId) throw new Error('Unknown workbook session.')
+    return readPivotParts(opened.latestBytes, request.path, request.cachePath)
   },
 
-  readLocalImage: async (): Promise<LocalImageResult> => {
-    throw new Error('readLocalImage is unavailable in the web version')
+  readLocalImage: async (request): Promise<LocalImageResult> => {
+    const raw = request.path
+    const resolved = raw.startsWith('~/') ? raw : raw
+    const absolute = resolved.startsWith('/') || /^[A-Za-z]:[\\/]/.test(resolved)
+    if (!absolute) throw new Error('Image path must be absolute.')
+    const fetched = await fetchPathBytes(resolved)
+    if (fetched.bytes.byteLength > 20 * 1024 * 1024) {
+      throw new Error('Image exceeds the 20MB limit.')
+    }
+    const mediaType = sniffImageMediaType(fetched.bytes)
+    if (mediaType === null) throw new Error('The image is not PNG/JPEG/GIF.')
+    return { mediaType, base64: bytesToBase64(fetched.bytes) }
   },
 
   onChromePressed: () => () => {},

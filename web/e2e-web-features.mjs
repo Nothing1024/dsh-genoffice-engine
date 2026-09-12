@@ -20,7 +20,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
 function parseArgs(argv) {
@@ -999,6 +999,526 @@ async function runSheetsSemantics(outDir) {
 }
 
 
+
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+function emptySavePayload(sessionId, visualEdits = []) {
+  return {
+    sessionId,
+    mode: 'save',
+    edits: [],
+    structuralOps: [],
+    chartEdits: [],
+    visualEdits,
+    visualAdditions: [],
+    tableAdditions: [],
+    pivotAdditions: [],
+    sheetOps: [],
+    sheetOrder: [],
+    filterStates: [],
+    hyperlinkEdits: [],
+    cfStates: [],
+    dvStates: [],
+    pageSetupStates: [],
+    noteStates: [],
+    formulaValues: [],
+    pivotCacheRefreshPaths: [],
+    pivotRefreshUpdates: [],
+    sheetProtections: [],
+    sparklineAdditions: [],
+    definedNamesState: null,
+    themeState: null,
+    workbookProtectionState: null,
+    protectedRangeStates: [],
+  }
+}
+
+async function buildMediaFixture({ corruptMedia = false, invalidRel = false } = {}) {
+  const zip = new JSZip()
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+  <Override PartName="/xl/pivotTables/pivotTable1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml"/>
+  <Override PartName="/xl/pivotCache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`)
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`)
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Data" sheetId="1" r:id="rId1"/>
+    <sheet name="Locked" sheetId="2" r:id="rId2"/>
+  </sheets>
+</workbook>`)
+  zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`)
+  zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:H7"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c><c r="B1" t="inlineStr"><is><t>Product</t></is></c><c r="C1" t="inlineStr"><is><t>Sales</t></is></c></row>
+    <row r="2"><c r="A2" t="inlineStr"><is><t>East</t></is></c><c r="B2" t="inlineStr"><is><t>A</t></is></c><c r="C2"><v>10</v></c></row>
+    <row r="3"><c r="A3" t="inlineStr"><is><t>East</t></is></c><c r="B3" t="inlineStr"><is><t>B</t></is></c><c r="C3"><v>20</v></c></row>
+    <row r="4"><c r="A4" t="inlineStr"><is><t>West</t></is></c><c r="B4" t="inlineStr"><is><t>A</t></is></c><c r="C4"><v>30</v></c></row>
+    <row r="5"><c r="A5" t="inlineStr"><is><t>West</t></is></c><c r="B5" t="inlineStr"><is><t>B</t></is></c><c r="C5"><v>40</v></c></row>
+    <row r="6"><c r="A6" t="inlineStr"><is><t>East</t></is></c><c r="B6" t="inlineStr"><is><t>A</t></is></c><c r="C6"><v>5</v></c></row>
+    <row r="7"><c r="A7" t="inlineStr"><is><t>West</t></is></c><c r="B7" t="inlineStr"><is><t>B</t></is></c><c r="C7"><v>1</v></c></row>
+  </sheetData>
+  <drawing r:id="rId1"/>
+</worksheet>`)
+  zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/>
+</Relationships>`)
+  const embed = invalidRel ? 'rId99' : 'rId1'
+  zip.file('xl/drawings/drawing1.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>9</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>17</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="2" name="Logo"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>
+      <xdr:blipFill>
+        <a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${embed}"/>
+        <a:stretch><a:fillRect/></a:stretch>
+      </xdr:blipFill>
+      <xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>`)
+  zip.file('xl/drawings/_rels/drawing1.xml.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>`)
+  zip.file('xl/media/image1.png', corruptMedia ? Buffer.from('not-a-png') : PNG_1X1)
+  zip.file('xl/pivotTables/pivotTable1.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="PivotTable1" cacheId="1">
+  <location ref="E3:H7" firstHeaderRow="1" firstDataRow="2" firstDataCol="1"/>
+  <pivotFields count="3">
+    <pivotField axis="axisRow" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField axis="axisCol" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="1"><field x="0"/></rowFields>
+  <rowItems count="3"><i><x/></i><i><x v="1"/></i><i t="grand"><x/></i></rowItems>
+  <colFields count="1"><field x="1"/></colFields>
+  <colItems count="3"><i><x/></i><i><x v="1"/></i><i t="grand"><x/></i></colItems>
+  <dataFields count="1"><dataField name="Sum of Sales" fld="2"/></dataFields>
+</pivotTableDefinition>`)
+  zip.file('xl/pivotTables/_rels/pivotTable1.xml.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition1.xml"/>
+</Relationships>`)
+  zip.file('xl/pivotCache/pivotCacheDefinition1.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <cacheSource type="worksheet"><worksheetSource ref="A1:C7" sheet="Data"/></cacheSource>
+  <cacheFields count="3">
+    <cacheField name="Region"><sharedItems count="2"><s v="East"/><s v="West"/></sharedItems></cacheField>
+    <cacheField name="Product"><sharedItems count="2"><s v="A"/><s v="B"/></sharedItems></cacheField>
+    <cacheField name="Sales"><sharedItems containsString="0" containsNumber="1"/></cacheField>
+  </cacheFields>
+</pivotCacheDefinition>`)
+  zip.file('xl/worksheets/sheet2.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1"/>
+  <sheetProtection password="CA3E" sheet="1" objects="1" scenarios="1"/>
+  <sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>LockedKeep</t></is></c></row></sheetData>
+</worksheet>`)
+  zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders>
+  <cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf/></cellXfs>
+</styleSheet>`)
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}
+
+async function inspectMediaWorkbook(bytes) {
+  const zip = await JSZip.loadAsync(bytes)
+  const drawing = await zip.file('xl/drawings/drawing1.xml')?.async('string') ?? ''
+  const pivot = await zip.file('xl/pivotTables/pivotTable1.xml')?.async('string') ?? ''
+  const cache = await zip.file('xl/pivotCache/pivotCacheDefinition1.xml')?.async('string') ?? ''
+  const media = Object.keys(zip.files).filter((name) => name.startsWith('xl/media/') && zip.files[name].dir === false)
+  const fromRows = [...drawing.matchAll(/<(?:xdr:)?from>[\s\S]*?<(?:xdr:)?row>(\d+)/g)].map((m) => Number(m[1]))
+  return {
+    mediaCount: media.length,
+    picCount: (drawing.match(/<(?:xdr:)?pic\b/g) || []).length,
+    fromRows,
+    pivotRef: pivot.includes('ref="E3:H7"'),
+    cacheSource: cache.includes('A1:C7') && cache.includes('Data'),
+  }
+}
+
+async function runSheetsMedia(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-sheets-media')
+  await mkdir(workDir, { recursive: true })
+  const file = join(workDir, 'sheets-media.xlsx')
+  const bytes = await buildMediaFixture()
+  await writeFile(file, bytes)
+  const beforeSha = sha256(await readFile(file))
+  const insertPng = join(workDir, 'insert-logo.png')
+  await writeFile(insertPng, PNG_1X1)
+  const badPng = join(workDir, 'corrupt-logo.png')
+  await writeFile(badPng, Buffer.from('not-a-png'))
+  const badExt = join(workDir, 'not-image.bin')
+  await writeFile(badExt, Buffer.from('nope'))
+  const invalidFile = join(workDir, 'invalid-rel.xlsx')
+  const invalidBytes = await buildMediaFixture({ invalidRel: true })
+  await writeFile(invalidFile, invalidBytes)
+  const invalidCreatedSha = sha256(invalidBytes)
+  const corruptFile = join(workDir, 'corrupt-media.xlsx')
+  await writeFile(corruptFile, await buildMediaFixture({ corruptMedia: true }))
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[sheets] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[sheets] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, file)
+    const context = await contextApp(relay.base, file)
+    const contextText = toolOutput(context)
+    const dataId = contextText.match(/Data \(id=([^,\s)]+)/)?.[1] || 'sheet-1'
+    const lockedId = contextText.match(/Locked \(id=([^,\s)]+)/)?.[1] || 'sheet-2'
+    const features = toolOutput(await callTool(relay.base, file, 'read_sheet_features', { sheetId: dataId }))
+
+    const snapshot = await page.evaluate(() => {
+      const fileSnap = window.__genofficeWorkbookFile?.()
+      return fileSnap
+        ? {
+            sessionId: fileSnap.sessionId,
+            visuals: fileSnap.visuals,
+            pivots: fileSnap.sheets.flatMap((sheet) => sheet.pivotTables),
+          }
+        : null
+    })
+    const visual = snapshot?.visuals?.find((item) => item.kind === 'image')
+    const pivot = snapshot?.pivots?.[0]
+    let media = null
+    let mediaError = null
+    if (snapshot && visual) {
+      try {
+        media = await page.evaluate(
+          async ({ sessionId, visualId }) => window.desktopApi.readWorkbookMedia({ sessionId, visualId }),
+          { sessionId: snapshot.sessionId, visualId: visual.id },
+        )
+      } catch (error) {
+        mediaError = String(error?.message ?? error)
+      }
+    }
+    let pivotDef = null
+    let pivotError = null
+    if (snapshot && pivot?.path && pivot?.cachePath) {
+      try {
+        pivotDef = await page.evaluate(
+          async ({ sessionId, path, cachePath }) => window.desktopApi.readPivotDefinition({ sessionId, path, cachePath }),
+          { sessionId: snapshot.sessionId, path: pivot.path, cachePath: pivot.cachePath },
+        )
+      } catch (error) {
+        pivotError = String(error?.message ?? error)
+      }
+    }
+    const localImage = await page.evaluate(
+      async (path) => window.desktopApi.readLocalImage({ path }),
+      insertPng,
+    )
+
+    const inserted = await callTool(relay.base, file, 'propose_operations', {
+      summary: 'insert logo image',
+      operations: [{ op: 'add_image', sheetId: dataId, path: insertPng, anchorCell: 'H20' }],
+    })
+    const afterInsertSha = sha256(await readFile(file))
+    const savedInsert = await saveApp(relay.base, file)
+    const afterInsertSaveSha = sha256(await readFile(file))
+    const afterInsertFeat = await inspectMediaWorkbook(await readFile(file))
+
+    await page.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const reopenedInsert = await waitReady(relay.base, file)
+    const afterInsertSnap = await page.evaluate(() => {
+      const fileSnap = window.__genofficeWorkbookFile?.()
+      return fileSnap
+        ? { sessionId: fileSnap.sessionId, visuals: fileSnap.visuals }
+        : null
+    })
+    const fileVisual = afterInsertSnap?.visuals?.find((item) => item.kind === 'image' && item.drawingPath)
+    let moved = null
+    let moveError = null
+    if (afterInsertSnap && fileVisual) {
+      const movedAnchor = {
+        ...fileVisual.anchor,
+        fromRow: 30,
+        toRow: 38,
+      }
+      try {
+        moved = await page.evaluate(
+          async ({ payload }) => window.desktopApi.saveWorkbookEdits(payload),
+          {
+            payload: emptySavePayload(afterInsertSnap.sessionId, [
+              {
+                drawingPath: fileVisual.drawingPath,
+                drawingIndex: fileVisual.drawingIndex,
+                anchor: movedAnchor,
+              },
+            ]),
+          },
+        )
+      } catch (error) {
+        moveError = String(error?.message ?? error)
+      }
+    }
+    const savedMove = await saveApp(relay.base, file)
+    const afterMoveSha = sha256(await readFile(file))
+    const movedFeat = await inspectMediaWorkbook(await readFile(file))
+
+    await page.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const reopenedMove = await waitReady(relay.base, file)
+    const reContext = toolOutput(await contextApp(relay.base, file))
+    const reDataId = reContext.match(/Data \(id=([^,\s)]+)/)?.[1] || dataId
+    const reFeatures = toolOutput(await callTool(relay.base, file, 'read_sheet_features', { sheetId: reDataId }))
+    const finalSnap = await page.evaluate(() => {
+      const fileSnap = window.__genofficeWorkbookFile?.()
+      return fileSnap
+        ? {
+            visuals: fileSnap.visuals.map((item) => ({
+              id: item.id,
+              kind: item.kind,
+              fromRow: item.anchor?.fromRow,
+              fromColumn: item.anchor?.fromColumn,
+            })),
+            pivots: fileSnap.sheets.flatMap((sheet) => sheet.pivotTables),
+          }
+        : null
+    })
+    shot = await page.screenshot({ type: 'png' })
+    await page.close()
+
+    const badExtResult = await (async () => {
+      const extra = await browser.newPage()
+      await extra.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      await waitReady(relay.base, file)
+      const ctx = toolOutput(await contextApp(relay.base, file))
+      const sheet = ctx.match(/Data \(id=([^,\s)]+)/)?.[1] || 'sheet-1'
+      const result = await callTool(relay.base, file, 'propose_operations', {
+        summary: 'insert invalid image',
+        operations: [{ op: 'add_image', sheetId: sheet, path: badExt, anchorCell: 'A1' }],
+      })
+      await extra.close()
+      return result
+    })()
+    const afterBadExtSha = sha256(await readFile(file))
+
+    const badPngResult = await (async () => {
+      const extra = await browser.newPage()
+      await extra.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      await waitReady(relay.base, file)
+      const ctx = toolOutput(await contextApp(relay.base, file))
+      const sheet = ctx.match(/Data \(id=([^,\s)]+)/)?.[1] || 'sheet-1'
+      const result = await callTool(relay.base, file, 'propose_operations', {
+        summary: 'insert corrupt png',
+        operations: [{ op: 'add_image', sheetId: sheet, path: badPng, anchorCell: 'A1' }],
+      })
+      await extra.close()
+      return result
+    })()
+    const afterBadPngSha = sha256(await readFile(file))
+
+    const protectFail = await (async () => {
+      const extra = await browser.newPage()
+      await extra.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      await waitReady(relay.base, file)
+      const ctx = toolOutput(await contextApp(relay.base, file))
+      const sheet = ctx.match(/Locked \(id=([^,\s)]+)/)?.[1] || 'sheet-2'
+      const result = await callTool(relay.base, file, 'propose_operations', {
+        summary: 'unprotect locked sheet',
+        operations: [{ op: 'protect_sheet', sheetId: sheet, protected: false }],
+      })
+      await extra.close()
+      return result
+    })()
+    const afterProtectSha = sha256(await readFile(file))
+
+    const invalidPage = await browser.newPage()
+    await invalidPage.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${invalidFile}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const invalidReady = await waitReady(relay.base, invalidFile)
+    const invalidSnap = await invalidPage.evaluate(() => {
+      const fileSnap = window.__genofficeWorkbookFile?.()
+      return fileSnap ? fileSnap.visuals.filter((item) => item.kind === 'image').length : -1
+    })
+    const invalidSha = sha256(await readFile(invalidFile))
+    await invalidPage.close()
+
+    const corruptPage = await browser.newPage()
+    await corruptPage.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${corruptFile}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const corruptReady = await waitReady(relay.base, corruptFile)
+    const corruptBefore = sha256(await readFile(corruptFile))
+    const corruptRead = await corruptPage.evaluate(async () => {
+      const fileSnap = window.__genofficeWorkbookFile?.()
+      const visual = fileSnap?.visuals?.find((item) => item.kind === 'image')
+      if (fileSnap === undefined || fileSnap === null || visual === undefined) {
+        return { ok: false, error: 'no-visual' }
+      }
+      try {
+        await window.desktopApi.readWorkbookMedia({ sessionId: fileSnap.sessionId, visualId: visual.id })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: String(error?.message ?? error) }
+      }
+    })
+    const unknownRead = await corruptPage.evaluate(async () => {
+      const fileSnap = window.__genofficeWorkbookFile?.()
+      try {
+        await window.desktopApi.readWorkbookMedia({ sessionId: fileSnap.sessionId, visualId: 'missing-visual' })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: String(error?.message ?? error) }
+      }
+    })
+    const corruptAfter = sha256(await readFile(corruptFile))
+    await corruptPage.close()
+
+    const mediaB64 = media?.base64 ?? ''
+    const mediaBytes = mediaB64 ? Buffer.from(mediaB64, 'base64') : Buffer.alloc(0)
+    const successAssertions = [
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened.readiness),
+      assertion('features-image', /image @ A10/i.test(features), 'image @ A10', features),
+      assertion('features-pivot', /Pivot tables:/i.test(features) && /E3:H7/.test(features), 'pivot E3:H7', features),
+      assertion('read-media-png', media?.mediaType === 'image/png' && mediaBytes[0] === 0x89 && mediaBytes[1] === 0x50, 'image/png', { media, mediaError }),
+      assertion('read-pivot', pivotDef?.outputRef === 'E3:H7' && pivotDef?.sourceSheet === 'Data' && pivotDef?.sourceRef === 'A1:C7', 'E3:H7 Data!A1:C7', { pivotDef, pivotError }),
+      assertion('read-local-image', localImage?.mediaType === 'image/png' && localImage?.base64?.length > 0, 'png', localImage?.mediaType),
+      assertion('add-image-ok', toolOk(inserted), true, inserted),
+      assertion('disk-unchanged-until-save', afterInsertSha === beforeSha, beforeSha, afterInsertSha),
+      assertion('insert-save-ok', savedInsert.ok === true, true, savedInsert),
+      assertion('insert-media-added', afterInsertFeat.mediaCount >= 2 && afterInsertFeat.picCount >= 2 && afterInsertFeat.pivotRef, true, afterInsertFeat),
+      assertion('reopen-after-insert', reopenedInsert.readiness === 'ready', 'ready', reopenedInsert.readiness),
+      assertion('move-ok', moved !== null && moveError === null && moved?.canceled === false, true, { moved, moveError }),
+      assertion('move-save-ok', savedMove.ok === true, true, savedMove),
+      assertion('moved-anchor-persisted', movedFeat.fromRows.includes(30) && movedFeat.pivotRef && movedFeat.cacheSource, true, movedFeat),
+      assertion('reopen-after-move', reopenedMove.readiness === 'ready', 'ready', reopenedMove.readiness),
+      assertion('reopen-features-image', /image @/i.test(reFeatures), 'image still listed', reFeatures),
+      assertion('reopen-features-pivot', /Pivot tables:/i.test(reFeatures) && /E3:H7/.test(reFeatures), 'pivot kept', reFeatures),
+      assertion('reopen-visual-count', (finalSnap?.visuals?.length ?? 0) >= 2, '>=2', finalSnap),
+    ]
+    const sidecarAssertions = [
+      assertion('invalid-rel-ready', invalidReady.readiness === 'ready', 'ready', invalidReady),
+      assertion('invalid-rel-no-fake-image', invalidSnap === 0, 0, invalidSnap),
+      assertion('invalid-rel-disk-unchanged', invalidSha === invalidCreatedSha, 'unchanged', { invalidSha, invalidCreatedSha }),
+      assertion('corrupt-media-ready', corruptReady.readiness === 'ready', 'ready', corruptReady),
+      assertion('corrupt-media-read-fails', corruptRead.ok === false, false, corruptRead),
+      assertion('unknown-visual-fails', unknownRead.ok === false, false, unknownRead),
+      assertion('corrupt-media-disk-unchanged', corruptAfter === corruptBefore, corruptBefore, corruptAfter),
+    ]
+    const illegalAssertions = [
+      assertion('bad-ext-rejected', toolOk(badExtResult) === false, false, badExtResult),
+      assertion('bad-png-rejected', toolOk(badPngResult) === false, false, badPngResult),
+      assertion('protect-rejected', toolOk(protectFail) === false, false, protectFail),
+      assertion('illegal-does-not-write-disk', afterBadExtSha === afterMoveSha && afterBadPngSha === afterMoveSha && afterProtectSha === afterMoveSha, afterMoveSha, { afterBadExtSha, afterBadPngSha, afterProtectSha }),
+    ]
+
+    const success = await writeEvidence(outDir, 'UF-002', 'success', {
+      cases: [{
+        id: 'sheets-media-read-insert-move',
+        status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: successAssertions,
+      }],
+      console: logs.join('\n'),
+      network: { events: networkEvents.slice(0, 80), count: networkEvents.length },
+      screenshot: shot,
+    })
+    const failure1 = await writeEvidence(outDir, 'UF-002', 'failure-1', {
+      cases: [{
+        id: 'sheets-media-corrupt-or-invalid-rel',
+        status: sidecarAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: sidecarAssertions,
+      }],
+      console: `${logs.join('\n')}\ncorruptRead=${JSON.stringify(corruptRead)}\nunknownRead=${JSON.stringify(unknownRead)}\n`,
+      network: { events: [invalidReady, corruptReady], count: 2 },
+      screenshot: shot,
+    })
+    const failure2 = await writeEvidence(outDir, 'UF-002', 'failure-2', {
+      cases: [{
+        id: 'sheets-media-illegal-image-or-protect',
+        status: illegalAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: illegalAssertions,
+      }],
+      console: `${logs.join('\n')}\nbadExt=${JSON.stringify(badExtResult)}\nbadPng=${JSON.stringify(badPngResult)}\nprotect=${JSON.stringify(protectFail)}\n`,
+      network: { events: [badExtResult, badPngResult, protectFail], count: 3 },
+      screenshot: shot,
+    })
+    const ok = [success, failure1, failure2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-002',
+      branch: 'sheets-media',
+      status: ok ? 'passed' : 'failed',
+      results: { success, failure1, failure2 },
+      features,
+      reFeatures,
+      snapshot,
+      pivotDef,
+      afterInsertFeat,
+      movedFeat,
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-5.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (ok === false) throw new Error('sheets-media case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -1019,6 +1539,9 @@ async function main() {
   }
   if (args.caseName === 'sheets-semantics' || args.all) {
     await runSheetsSemantics(evidenceRoot)
+  }
+  if (args.caseName === 'sheets-media' || args.all) {
+    await runSheetsMedia(evidenceRoot)
   }
 }
 

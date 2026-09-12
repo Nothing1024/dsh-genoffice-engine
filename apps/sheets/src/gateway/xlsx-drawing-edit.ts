@@ -20,6 +20,12 @@ export class VisualEditError extends Error {}
 // counts anchors by local name, so the index pairing must see those too.
 const ANCHOR_PATTERN =
   /<([A-Za-z_][\w.-]*:)?(twoCellAnchor|oneCellAnchor|absoluteAnchor)\b[\s\S]*?<\/\1\2>/g
+/// Document-order anchor blocks; indexes match the sidecar / visualEdits pair.
+export function listDrawingAnchorXml(xml: string): string[] {
+  const pattern = new RegExp(ANCHOR_PATTERN.source, ANCHOR_PATTERN.flags)
+  return [...xml.matchAll(pattern)].map((match) => match[0])
+}
+
 const ATTRIBUTE_PATTERN = /\s[\w:.-]+="([^"]*)"/g
 const CHART_OWNED_RELATIONSHIP_TYPES =
   /\/(?:chartStyle|chartColorStyle|package|oleObject|theme|themeOverride|chartUserShapes|image|externalLink)$/
