@@ -59,6 +59,7 @@ import { providersReady, searchFixture, generateFixture, analyzeFixture, modelCh
 import { cryptoReady, decryptDocxRequest, encryptDocxRequest } from './docs-crypto.mjs'
 import { extractReady, extractAttachmentRequest } from './docs-extract.mjs'
 import { assetsReady, saveMarkdownAsset } from './markdown-assets.mjs'
+import { htmlDocxReady, startHtmlDocxJob, getHtmlDocxJob, cancelHtmlDocxJob, waitHtmlDocxJob } from './html-docx.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -597,6 +598,7 @@ async function handleApi(req, res, pathname, body, url) {
       docsCrypto: cryptoReady(),
       docsExtract: extractReady(),
       markdownAssets: assetsReady(),
+      htmlDocx: htmlDocxReady(),
     })
   }
 
@@ -658,6 +660,26 @@ async function handleApi(req, res, pathname, body, url) {
     if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
     return json(res, 200, await extractAttachmentRequest(body ?? {}))
   }
+  if (req.method === 'GET' && pathname === '/api/html/docx/ready') {
+    return json(res, 200, { ok: true, ...htmlDocxReady() })
+  }
+  if (req.method === 'POST' && pathname === '/api/html/docx/jobs') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, startHtmlDocxJob(body ?? {}))
+  }
+  if (req.method === 'GET' && pathname === '/api/html/docx/jobs') {
+    const job = getHtmlDocxJob(url.searchParams.get('id'))
+    return json(res, 200, job ?? { ok: false, error: 'unknown job' })
+  }
+  if (req.method === 'POST' && pathname === '/api/html/docx/jobs/wait') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, await waitHtmlDocxJob(body?.id))
+  }
+  if (req.method === 'POST' && pathname === '/api/html/docx/jobs/cancel') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, cancelHtmlDocxJob(body?.id))
+  }
+
   if (req.method === 'GET' && pathname === '/api/markdown/assets/ready') {
     return json(res, 200, { ok: true, ...assetsReady() })
   }

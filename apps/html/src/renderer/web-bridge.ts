@@ -611,8 +611,52 @@ const htmlApi: HtmlApi = {
   onPrintRequest: () => () => {},
   onChromePressed: () => () => {},
 
-  exportDocx: async (_request: ExportDocxRequest): Promise<ExportResult> => {
-    return { ok: false, error: 'html-to-docx-unavailable' }
+  exportDocx: async (request: ExportDocxRequest): Promise<ExportResult> => {
+    const destHint = (request as ExportDocxRequest & { dest?: string }).dest
+    const stem = String(request.suggestedName || 'html').replace(/\.[^.]+$/, '')
+    const dest =
+      typeof destHint === 'string' && destHint.startsWith('/')
+        ? destHint
+        : currentPath && currentPath.startsWith('/')
+          ? `${currentPath.replace(/\/[^/]+$/, '')}/${stem}.docx`
+          : ''
+    const ready = await relay<{ available?: boolean; reason?: string }>('/html/docx/ready')
+    if (!ready?.available) {
+      return { ok: false, error: ready?.reason ?? 'html-to-docx-unavailable' }
+    }
+    if (!dest) return { ok: false, error: 'missing dest' }
+    if (!request.html) return { ok: false, error: 'missing html' }
+    const started = await relay<{ ok?: boolean; jobId?: string; error?: string; available?: boolean }>(
+      '/html/docx/jobs',
+      { html: request.html, dest, app: 'html' },
+    )
+    if (!started?.ok || !started.jobId) {
+      return { ok: false, error: started?.error ?? 'html-docx-rejected' }
+    }
+    const done = await (async () => {
+      try {
+        const resp = await fetch(`${RELAY_BASE}/html/docx/jobs/wait`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: started.jobId }),
+          signal: AbortSignal.timeout(120_000),
+        })
+        if (!resp.ok) return null
+        return (await resp.json()) as {
+          ok?: boolean
+          dest?: string
+          error?: string
+          status?: string
+        }
+      } catch {
+        return null
+      }
+    })()
+    if (done?.status === 'cancelled') return { ok: true, canceled: true }
+    if (!done?.ok) return { ok: false, error: done?.error ?? 'html-docx-failed' }
+    const path = done.dest ?? dest
+    window.open(`/docs/?open=${encodeURIComponent(`path:${path}`)}`, '_blank', 'noopener')
+    return { ok: true, path }
   },
 
   exportPdf: async (request: ExportPdfRequest): Promise<ExportResult> => {

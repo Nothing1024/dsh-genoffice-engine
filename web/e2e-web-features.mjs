@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown', 'html-edit']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown', 'html-edit', 'html-docx']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
@@ -120,7 +120,7 @@ async function runInventory(outDir) {
   push('ufs', rows.every((r) => /^UF-00[1-6]$/.test(r.uf)), 'UF-001..006', [...new Set(rows.map((r) => r.uf))])
   const stubs = rows.filter((r) => r.status === 'stub' || r.status === 'not-product-available' || r.status === 'compiled-only')
   push('stubs-owned', stubs.length > 0 && stubs.every((r) => Number(r.implementation_task) >= 2), 'owned stubs', stubs.length)
-  push('html-future-not-claimed-available', rows.filter((r) => r.app === 'html' && Number(r.implementation_task) > 17).every((r) => r.status !== 'available'), 'html task>17 not available', rows.filter((r) => r.app === 'html').map((r) => `${r.entry}:${r.status}:${r.implementation_task}`))
+  push('html-future-not-claimed-available', rows.filter((r) => r.app === 'html' && Number(r.implementation_task) > 18).every((r) => r.status !== 'available'), 'html task>18 not available', rows.filter((r) => r.app === 'html').map((r) => `${r.entry}:${r.status}:${r.implementation_task}`))
   const ocrRows = rows.filter((r) => r.entry.includes('ocr'))
   const ocrClaimed = ocrRows.length > 0 && ocrRows.every((r) => r.status === 'available')
   push('ocr-inventory-matches-bridge', ocrClaimed === (deps.ocrWebNull === false), 'ocr inventory matches bridge', { ocrClaimed, ocrWebNull: deps.ocrWebNull })
@@ -3519,6 +3519,143 @@ async function runHtmlEdit(outDir) {
   }
 }
 
+async function runHtmlDocx(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-html-docx')
+  await mkdir(workDir, { recursive: true })
+  const htmlFile = join(workDir, 'keep.html')
+  const htmlBody = '<!doctype html><html><head><meta charset="utf-8"><title>WfcHtmlDocx</title></head><body><h1>WfcHtmlDocx</h1><p>keep phrase</p></body></html>\n'
+  await writeFile(htmlFile, htmlBody)
+  const dest = join(workDir, 'keep.docx')
+  const missingDest = join(workDir, 'disabled.docx')
+  const failDest = join(workDir, 'fail.docx')
+  const cancelDest = join(workDir, 'cancel.docx')
+  const invalidDest = join(workDir, 'invalid.docx')
+  const blockedDest = join(workDir, 'blocked.docx')
+  const inventory = parseCsv(readFileSync(INVENTORY, 'utf8'))
+  const row = inventory.filter((item) => item.entry === 'html-to-docx')
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[html] ${msg.text()}`))
+    await page.goto(`${relay.base}/html/?control=1&open=${encodeURIComponent(`path:${htmlFile}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, htmlFile, 90_000)
+    shot = await page.screenshot({ type: 'png' }).catch(() => null)
+    const ready = await fetch(`${relay.base}/api/html/docx/ready`).then((r) => r.json())
+    const exported = await page.evaluate(async ({ html, dest }) => {
+      return window.htmlApi.exportDocx({ html, suggestedName: 'keep', dest })
+    }, { html: htmlBody, dest })
+    await page.close()
+
+    const zip = existsSync(dest) ? await JSZip.loadAsync(await readFile(dest)).catch(() => null) : null
+    const xml = zip ? await zip.file('word/document.xml')?.async('string') : ''
+
+    const docsPage = await browser.newPage()
+    docsPage.on('console', (msg) => logs.push(`[docs] ${msg.text()}`))
+    await docsPage.goto(`${relay.base}/docs/?control=1&open=${encodeURIComponent(`path:${dest}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const docsReady = await waitReady(relay.base, dest, 90_000)
+    const docsContext = await post(relay.base, `/api/control/docs/${docIdFor(dest)}/context`, {})
+    await docsPage.close()
+
+    const successAssertions = [
+      assertion('html-to-docx-available', row.length === 1 && row[0].status === 'available', 'available', row.map((item) => item.status)),
+      assertion('service-ready', ready.available === true, true, ready),
+      assertion('html-ready', opened.readiness === 'ready', 'ready', opened),
+      assertion('convert-ok', exported?.ok === true && existsSync(dest), true, exported),
+      assertion('docx-keep', String(xml).includes('WfcHtmlDocx'), true, { hasXml: Boolean(xml), snippet: String(xml).slice(0, 180) }),
+      assertion('docs-reopen', docsReady.readiness === 'ready' && JSON.stringify(docsContext).includes('WfcHtmlDocx'), true, { docsReady, docsContext }),
+    ]
+
+    const offPort = await freePort(port + 1)
+    const offRelay = await startRelay(offPort, { GENOFFICE_HTML_DOCX_DISABLED: '1' })
+    try {
+      const offReady = await fetch(`${offRelay.base}/api/html/docx/ready`).then((r) => r.json())
+      const offJob = await post(offRelay.base, '/api/html/docx/jobs', { html: htmlBody, dest: missingDest })
+      const failure1 = [
+        assertion('docx-unconfigured', offReady.available === false && offJob?.available === false && existsSync(missingDest) === false, false, { offReady, offJob }),
+        assertion('disabled-keeps-html', opened.readiness === 'ready' && existsSync(htmlFile), true, { opened }),
+      ]
+
+      const failPort = await freePort(offPort + 1)
+      const failRelay = await startRelay(failPort, { GENOFFICE_HTML_DOCX_FAIL: '1' })
+      try {
+        const failJob = await post(failRelay.base, '/api/html/docx/jobs', { html: htmlBody, dest: failDest })
+        const failWait = failJob?.jobId ? await post(failRelay.base, '/api/html/docx/jobs/wait', { id: failJob.jobId }) : failJob
+        const invalid = await post(relay.base, '/api/html/docx/jobs', { html: 'not-a-document', dest: invalidDest })
+        const blocked = await post(relay.base, '/api/html/docx/jobs', {
+          html: '<html><body><img src="file:///etc/passwd"><p>WfcHtmlDocx</p></body></html>',
+          dest: blockedDest,
+        })
+        const cancelStart = await post(relay.base, '/api/html/docx/jobs', { html: htmlBody, dest: cancelDest, holdMs: 8000 })
+        const cancelled = cancelStart?.jobId
+          ? await post(relay.base, '/api/html/docx/jobs/cancel', { id: cancelStart.jobId })
+          : { ok: false }
+        const cancelWait = cancelStart?.jobId
+          ? await post(relay.base, '/api/html/docx/jobs/wait', { id: cancelStart.jobId })
+          : { ok: false }
+        const recovered = await post(relay.base, '/api/html/docx/jobs', { html: htmlBody, dest })
+        const recoveredWait = recovered?.jobId ? await post(relay.base, '/api/html/docx/jobs/wait', { id: recovered.jobId }) : recovered
+        const recoveredZip = existsSync(dest) ? await JSZip.loadAsync(await readFile(dest)).catch(() => null) : null
+        const recoveredXml = recoveredZip ? await recoveredZip.file('word/document.xml')?.async('string') : ''
+        const failure2 = [
+          assertion('runtime-fail', failWait?.ok === false && existsSync(failDest) === false, false, failWait),
+          assertion('invalid-html', invalid?.ok === false && invalid?.error === 'invalid-html' && existsSync(invalidDest) === false, 'invalid-html', invalid),
+          assertion('blocked-external', blocked?.ok === false && blocked?.error === 'blocked-external-resource' && existsSync(blockedDest) === false, 'blocked-external-resource', blocked),
+          assertion('user-cancel', cancelled?.ok === true && (cancelWait?.canceled === true || cancelWait?.status === 'cancelled') && existsSync(cancelDest) === false, true, { cancelled, cancelWait }),
+          assertion('convert-recovery', recoveredWait?.ok === true && String(recoveredXml).includes('WfcHtmlDocx'), true, { recoveredWait }),
+        ]
+
+        const success = await writeEvidence(outDir, 'UF-006', 'success', {
+          cases: [{ id: 'html-docx-success', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+          console: logs.join('\n'),
+          network: { events: [ready, exported, docsReady], count: 3 },
+          screenshot: shot,
+        })
+        const fail1 = await writeEvidence(outDir, 'UF-006', 'failure-1', {
+          cases: [{ id: 'html-docx-unconfigured', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+          console: logs.join('\n'),
+          network: { events: [offReady, offJob], count: 2 },
+        })
+        const fail2 = await writeEvidence(outDir, 'UF-006', 'failure-2', {
+          cases: [{ id: 'html-docx-runtime-and-recovery', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+          console: logs.join('\n'),
+          network: { events: [failWait, invalid, blocked, cancelWait, recoveredWait], count: 5 },
+        })
+        const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+        const payload = {
+          schema_version: 1,
+          package: 'web-feature-completion',
+          uf: 'UF-006',
+          branch: 'html-docx',
+          status: ok ? 'passed' : 'failed',
+          cases: [success.cases[0], fail1.cases[0], fail2.cases[0]],
+        }
+        await mkdir(join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0'), { recursive: true })
+        await writeFile(join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/task-18.log'), `${JSON.stringify(payload, null, 2)}\n`)
+        console.log(JSON.stringify(payload, null, 2))
+        if (ok === false) throw new Error('html-docx case failed')
+      } finally {
+        stopRelay(failRelay)
+      }
+    } finally {
+      stopRelay(offRelay)
+    }
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -3590,6 +3727,10 @@ async function main() {
   if (args.caseName === 'html-edit' || args.all) {
     await runHtmlEdit(evidenceRoot)
     ran.push('html-edit')
+  }
+  if (args.caseName === 'html-docx' || args.all) {
+    await runHtmlDocx(evidenceRoot)
+    ran.push('html-docx')
   }
   if (args.caseName === 'pdf-slides') {
     const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)
