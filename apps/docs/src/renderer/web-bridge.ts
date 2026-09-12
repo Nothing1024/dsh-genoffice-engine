@@ -809,6 +809,10 @@ const desktop: DesktopApi = {
   },
 
   webSearch: async (query, maxResults) => {
+    const ready = await relay<{ search?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.search?.available) {
+      return { results: [], method: 'error', error: ready?.search?.reason ?? 'search-unconfigured' }
+    }
     const res = await relay<{
       results: Array<{ title: string; url: string; snippet: string }>
       answer?: string
@@ -824,6 +828,10 @@ const desktop: DesktopApi = {
   },
 
   imageSearch: async (query, maxResults) => {
+    const ready = await relay<{ imageSearch?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.imageSearch?.available) {
+      return { images: [], method: 'error', error: ready?.imageSearch?.reason ?? 'image-search-unconfigured' }
+    }
     const res = await relay<{
       images: Array<{
         title: string
@@ -848,9 +856,18 @@ const desktop: DesktopApi = {
     return await relay<{ base64: string; mime: string }>('/fetch-image', { url })
   },
 
-  aiGenerateImage: async () => ({
-    error: '网页版未接入云端生图通道',
-  }),
+  aiGenerateImage: async (op) => {
+    const ready = await relay<{ generate?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.generate?.available) {
+      return { error: ready?.generate?.reason ?? 'generate-provider-unconfigured' }
+    }
+    const res = await relay<{ url?: string; error?: string }>(
+      '/generate-image',
+      { prompt: op.prompt, aspectRatio: op.aspectRatio, dest: (op as { dest?: string }).dest },
+      { timeout: 600_000 } as RequestInit,
+    )
+    return res ?? { error: '图片生成需要本地中继服务' }
+  },
 
   pickAttachments: async (): Promise<AttachmentAddResult | null> => {
     const input = hiddenInput('*')

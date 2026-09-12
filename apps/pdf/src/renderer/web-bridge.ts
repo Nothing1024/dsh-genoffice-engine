@@ -474,6 +474,10 @@ const pdfApi: PdfApi = {
   exportImages: async () => ({ ok: true, canceled: true }),
 
   imageSearch: async (query, maxResults) => {
+    const ready = await relay<{ imageSearch?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.imageSearch?.available) {
+      return { images: [], method: 'error', error: ready?.imageSearch?.reason ?? 'image-search-unconfigured' }
+    }
     const res = await relay<{
       images: Array<{
         title: string
@@ -499,6 +503,10 @@ const pdfApi: PdfApi = {
   },
 
   generateImage: async (op) => {
+    const ready = await relay<{ generate?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.generate?.available) {
+      return { error: ready?.generate?.reason ?? 'generate-provider-unconfigured' }
+    }
     const res = await relay<{ url?: string; error?: string }>(
       '/generate-image',
       {

@@ -608,9 +608,56 @@ const markdownApi: MarkdownApi = {
     return () => streamListeners.delete(handler)
   },
 
-  imageSearch: async () => ({ images: [], method: 'unsupported', error: '网页版未接入图片搜索' }),
-  fetchImage: async () => null,
-  aiGenerateImage: async () => ({ error: '网页版未接入云端生图通道' }),
+  imageSearch: async (query, maxResults) => {
+    const ready = await fetch(`${RELAY_BASE}/providers/ready`).then((r) => r.json()).catch(() => null)
+    if (!ready?.imageSearch?.available) {
+      return { images: [], method: 'error', error: ready?.imageSearch?.reason ?? 'image-search-unconfigured' }
+    }
+    try {
+      const resp = await fetch(`${RELAY_BASE}/search/image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, maxResults: maxResults ?? 6 }),
+      })
+      const data = (await resp.json()) as { images?: Array<{ title?: string; imageUrl: string; width?: number; height?: number }>; method?: string; error?: string }
+      if (!resp.ok || data.method === 'error') {
+        return { images: [], method: 'error', error: data.error ?? 'image search failed' }
+      }
+      return { images: data.images ?? [], method: data.method ?? 'ok' }
+    } catch (e) {
+      return { images: [], method: 'error', error: e instanceof Error ? e.message : String(e) }
+    }
+  },
+  fetchImage: async (url) => {
+    try {
+      const resp = await fetch(`${RELAY_BASE}/fetch-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      })
+      const data = (await resp.json()) as { base64?: string; mime?: string; error?: string }
+      if (!data.base64) return null
+      return { base64: data.base64, mime: data.mime ?? 'image/png' }
+    } catch {
+      return null
+    }
+  },
+  aiGenerateImage: async (op) => {
+    const ready = await fetch(`${RELAY_BASE}/providers/ready`).then((r) => r.json()).catch(() => null)
+    if (!ready?.generate?.available) {
+      return { error: ready?.generate?.reason ?? 'generate-provider-unconfigured' }
+    }
+    try {
+      const resp = await fetch(`${RELAY_BASE}/generate-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: op.prompt, aspectRatio: op.aspectRatio }),
+      })
+      return (await resp.json()) as { url?: string; error?: string }
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) }
+    }
+  },
   webSearch: async (query, maxResults) => {
     try {
       const resp = await fetch(`${RELAY_BASE}/search/web`, {

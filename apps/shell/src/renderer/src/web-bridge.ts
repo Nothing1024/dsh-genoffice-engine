@@ -457,7 +457,18 @@ const aiOffice: HomeApi = {
     window.open('https://genteam.ai', '_blank', 'noopener')
   },
   openCreditUsage: async () => {
-    console.warn('[web-shell] openCreditUsage is not available in the web version')
+    try {
+      const resp = await fetch('/api/credit/ready')
+      const ready = (await resp.json()) as { available?: boolean; url?: string; reason?: string }
+      if (!ready?.available) {
+        return { ok: false, available: false, error: ready?.reason ?? 'credit-provider-unconfigured' }
+      }
+      const url = ready.url ?? 'https://www.genspark.ai/credit-usage'
+      window.open(url, '_blank', 'noopener')
+      return { ok: true, available: true, url }
+    } catch (e) {
+      return { ok: false, available: false, error: e instanceof Error ? e.message : String(e) }
+    }
   },
   openGitHubRepo: async () => {
     window.open('https://github.com/genspark-ai/genoffice', '_blank', 'noopener')

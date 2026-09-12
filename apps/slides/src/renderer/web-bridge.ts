@@ -2318,6 +2318,10 @@ const slidesApi: SlidesApi = {
   aiGskStatus: async () => ({ loggedIn: false }),
 
   webSearch: async (query, maxResults) => {
+    const ready = await relay<{ search?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.search?.available) {
+      return { results: [], method: 'error', error: ready?.search?.reason ?? 'search-unconfigured' }
+    }
     const res = await relay<{ results: Array<{ title: string; url: string; snippet: string }>; method: string; error?: string }>(
       '/search/web',
       { query, maxResults: maxResults ?? 5 },
@@ -2327,6 +2331,10 @@ const slidesApi: SlidesApi = {
   },
 
   imageSearch: async (query, maxResults) => {
+    const ready = await relay<{ imageSearch?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.imageSearch?.available) {
+      return { images: [], method: 'error', error: ready?.imageSearch?.reason ?? 'image-search-unconfigured' }
+    }
     const res = await relay<{ images: Array<{ title: string; imageUrl: string; sourceUrl: string; width?: number; height?: number }>; method: string; error?: string }>(
       '/search/image',
       { query, maxResults: maxResults ?? 6 },
@@ -2341,6 +2349,10 @@ const slidesApi: SlidesApi = {
   },
 
   generateImage: async (op) => {
+    const ready = await relay<{ generate?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.generate?.available) {
+      return { error: ready?.generate?.reason ?? 'generate-provider-unconfigured' }
+    }
     const res = await relay<{ url?: string; error?: string }>(
       '/generate-image',
       {
@@ -2356,9 +2368,13 @@ const slidesApi: SlidesApi = {
     return res
   },
   analyzeMedia: async (op) => {
+    const ready = await relay<{ analyze?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.analyze?.available) {
+      return { error: ready?.analyze?.reason ?? 'analyze-provider-unconfigured' }
+    }
     const res = await relay<{ text?: string; error?: string }>(
       '/analyze-media',
-      { mediaUrls: op.mediaUrls, requirements: op.requirements },
+      { mediaUrls: op.mediaUrls, requirements: op.requirements, pngBase64: (op as { pngBase64?: string }).pngBase64 },
       600_000,
     )
     if (!res) return { error: '媒体分析需要本地中继服务（npm run web）且已登录 Genspark' }

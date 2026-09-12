@@ -165,7 +165,7 @@ export interface HomeApi {
   /** open the GenTeam community page in the default browser */
   openGenTeam(): Promise<void>
   /** open the Genspark credit-usage page in the default browser */
-  openCreditUsage(): Promise<void>
+  openCreditUsage(): Promise<void | { ok: boolean; available: boolean; url?: string; error?: string }>
   /** open the public GitHub repository in the default browser */
   openGitHubRepo(): Promise<void>
   /** current stargazer count of the public repo (null while offline / rate-limited) */

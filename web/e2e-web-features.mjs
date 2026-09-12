@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
@@ -2911,6 +2911,192 @@ async function runOcr(outDir) {
   }
 }
 
+
+async function runProviders(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-providers')
+  await mkdir(workDir, { recursive: true })
+  const genDest = join(workDir, 'generate-out.png')
+  const missingDest = join(workDir, 'generate-missing.png')
+  const failDest = join(workDir, 'generate-fail.png')
+  for (const file of [genDest, missingDest, failDest]) {
+    if (existsSync(file)) await unlink(file)
+  }
+  const mdFile = join(workDir, 'providers.md')
+  const docsFile = join(ENGINE, 'fixtures/generated/simple.docx')
+  const slidesFile = join(ENGINE, 'fixtures/generated/sample.pptx')
+  await writeFile(mdFile, '# WfcProviders\n')
+  const fixtureEnv = {
+    GENOFFICE_SEARCH_FIXTURE: '1',
+    GENOFFICE_GENERATE_FIXTURE: '1',
+    GENOFFICE_ANALYZE_FIXTURE: '1',
+    GENOFFICE_GSK_DISABLED: '1',
+  }
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port, fixtureEnv)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  let shot = null
+  try {
+    const openApp = async (app, file) => {
+      const page = await browser.newPage()
+      page.on('console', (msg) => logs.push(`[${app}] ${msg.text()}`))
+      page.on('pageerror', (err) => logs.push(`[${app}] PAGEERROR ${err.message}`))
+      const url = file
+        ? `${relay.base}/${app}/?control=1&open=${encodeURIComponent(`path:${file}`)}`
+        : `${relay.base}/`
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      if (file) await waitReady(relay.base, file, 90_000)
+      return page
+    }
+    const readyOk = await fetch(`${relay.base}/api/providers/ready`).then((r) => r.json())
+    const mdPage = await openApp('markdown', mdFile)
+    const images = await mdPage.evaluate(async () => window.markdownApi.imageSearch('WfcSearchKeep', 3))
+    shot = await mdPage.screenshot({ type: 'png' })
+    await mdPage.close()
+
+    const docsPage = await openApp('docs', docsFile)
+    const webSearch = await docsPage.evaluate(async () => window.desktop.webSearch('WfcSearchKeep', 3))
+    const generated = await docsPage.evaluate(async (dest) => window.desktop.aiGenerateImage({ prompt: 'WfcGenKeep', dest }), genDest)
+    const model = await post(relay.base, '/api/model/chat', { messages: [{ role: 'user', content: 'ping' }] })
+    const missingKey = await docsPage.evaluate(async () => {
+      const chunks = []
+      await new Promise((resolve) => {
+        const unsub = window.desktop.onAiStream((chunk) => {
+          chunks.push(chunk)
+          if (chunk.type === 'error' || chunk.type === 'done') {
+            unsub()
+            resolve(chunk)
+          }
+        })
+        void window.desktop.aiStream({
+          requestId: 'e2e-missing-key',
+          settings: { provider: 'openai', providers: { openai: { apiKey: '', model: 'gpt-4o-mini' } } },
+          system: '',
+          messages: [{ role: 'user', content: 'ping' }],
+        })
+      })
+      return chunks
+    })
+    await docsPage.close()
+
+    const pngPage = await browser.newPage()
+    await pngPage.setViewportSize({ width: 900, height: 400 })
+    await pngPage.setContent('<html><body style="margin:0;background:#fff"><div style="padding:80px;font:700 72px Helvetica,sans-serif">WFC OCR KEEP</div></body></html>')
+    const analyzePng = (await pngPage.screenshot({ type: 'png' })).toString('base64')
+    await pngPage.close()
+    const slidesPage = await openApp('slides', slidesFile)
+    const analyzed = await slidesPage.evaluate(async (png) => window.slidesApi.analyzeMedia({
+      mediaUrls: ['https://example.com/wfc.png'],
+      requirements: 'read the text',
+      pngBase64: png,
+    }), analyzePng)
+    await slidesPage.close()
+
+    const home = await openApp('shell')
+    await home.waitForSelector('.quick-card', { timeout: 30_000 }).catch(() => {})
+    const credit = await home.evaluate(async () => window.aiOffice.openCreditUsage())
+    await home.close()
+
+    const apiGen = await post(relay.base, '/api/generate-image', { prompt: 'WfcGenKeep', dest: genDest })
+    const successAssertions = [
+      assertion('providers-ready', readyOk.search?.available === true && readyOk.generate?.available === true && readyOk.analyze?.available === true && readyOk.model?.available === true, true, readyOk),
+      assertion('markdown-image-search', images?.method && images.method !== 'error' && JSON.stringify(images).includes('WfcSearchKeep'), true, images),
+      assertion('docs-web-search', webSearch?.method && webSearch.method !== 'error' && JSON.stringify(webSearch).includes('WfcSearchKeep'), true, webSearch),
+      assertion('generate-dest', existsSync(genDest) && (await readFile(genDest)).subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])), true, { apiGen, generated, exists: existsSync(genDest) }),
+      assertion('model-echo', model?.ok === true && String(model.text ?? '').includes('WfcModelKeep'), true, model),
+      assertion('model-missing-key', missingKey.some((c) => c.type === 'error'), true, missingKey),
+      assertion('analyze-text', typeof analyzed?.text === 'string' && (analyzed.text.includes('WFC') || analyzed.text.includes('WfcMediaKeep')), true, analyzed),
+      assertion('credit-unconfigured', credit?.ok === false && credit?.available === false, false, credit),
+    ]
+
+    const offPort = await freePort(port + 1)
+    const offRelay = await startRelay(offPort, {
+      GENOFFICE_SEARCH_DISABLED: '1',
+      GENOFFICE_MODEL_DISABLED: '1',
+      GENOFFICE_GSK_DISABLED: '1',
+    })
+    try {
+      const offReady = await fetch(`${offRelay.base}/api/providers/ready`).then((r) => r.json())
+      const offMd = await browser.newPage()
+      await offMd.goto(`${offRelay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${mdFile}`)}`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      await waitReady(offRelay.base, mdFile, 90_000)
+      const offImages = await offMd.evaluate(async () => window.markdownApi.imageSearch('WfcSearchKeep', 3))
+      const offGen = await post(offRelay.base, '/api/generate-image', { prompt: 'x', dest: missingDest })
+      const offModel = await post(offRelay.base, '/api/model/chat', { messages: [{ role: 'user', content: 'ping' }] })
+      await offMd.close()
+      const failure1 = [
+        assertion('search-unavailable', offReady.search?.available === false && offImages?.method === 'error', false, { offReady, offImages }),
+        assertion('generate-unavailable', offReady.generate?.available === false && offGen?.available === false && existsSync(missingDest) === false, false, { offReady, offGen }),
+        assertion('model-unavailable', offReady.model?.available === false && offModel?.ok === false, false, offModel),
+      ]
+
+      const failPort = await freePort(offPort + 1)
+      const failRelay = await startRelay(failPort, {
+        GENOFFICE_SEARCH_FIXTURE: '1',
+        GENOFFICE_SEARCH_FAIL: '1',
+        GENOFFICE_GENERATE_FIXTURE: '1',
+        GENOFFICE_GENERATE_FAIL: '1',
+        GENOFFICE_ANALYZE_FIXTURE: '1',
+        GENOFFICE_ANALYZE_FAIL: '1',
+        GENOFFICE_MODEL_FAIL: '1',
+        GENOFFICE_GSK_DISABLED: '1',
+      })
+      try {
+        const failSearch = await post(failRelay.base, '/api/search/web', { query: 'x' })
+        const failGen = await post(failRelay.base, '/api/generate-image', { prompt: 'x', dest: failDest })
+        const failAnalyze = await post(failRelay.base, '/api/analyze-media', { mediaUrls: ['https://example.com/x'], requirements: 'x' })
+        const failModel = await post(failRelay.base, '/api/model/chat', { messages: [{ role: 'user', content: 'ping' }] })
+        const recovered = await post(relay.base, '/api/search/web', { query: 'WfcSearchKeep' })
+        const failure2 = [
+          assertion('search-runtime', failSearch?.method === 'error', 'error', failSearch),
+          assertion('generate-runtime', Boolean(failGen?.error) && existsSync(failDest) === false, false, failGen),
+          assertion('analyze-runtime', Boolean(failAnalyze?.error), true, failAnalyze),
+          assertion('model-runtime', failModel?.ok === false, false, failModel),
+          assertion('search-recovery', recovered?.method && recovered.method !== 'error' && JSON.stringify(recovered).includes('WfcSearchKeep'), true, recovered),
+        ]
+        const success = await writeEvidence(outDir, 'UF-005', 'success', {
+          cases: [{ id: 'providers-configured', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+          console: logs.join('\n'),
+          network: { events: [readyOk, images, webSearch, model], count: 4 },
+          screenshot: shot,
+        })
+        const fail1 = await writeEvidence(outDir, 'UF-005', 'failure-1', {
+          cases: [{ id: 'providers-unconfigured', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+          console: `${logs.join('\n')}\noff=${JSON.stringify({ offReady, offImages, offGen, offModel })}\n`,
+          network: { events: [offReady, offImages, offGen, offModel], count: 4 },
+          screenshot: shot,
+        })
+        const fail2 = await writeEvidence(outDir, 'UF-005', 'failure-2', {
+          cases: [{ id: 'providers-runtime-and-recovery', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+          console: `${logs.join('\n')}\nfail=${JSON.stringify({ failSearch, failGen, failAnalyze, failModel, recovered })}\n`,
+          network: { events: [failSearch, failGen, failAnalyze, failModel, recovered], count: 5 },
+          screenshot: shot,
+        })
+        const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+        const payload = {
+          schema_version: 1,
+          package: 'web-feature-completion',
+          uf: 'UF-005',
+          branch: 'providers',
+          status: ok ? 'passed' : 'failed',
+          results: { success, failure1: fail1, failure2: fail2 },
+        }
+        await mkdir(join(outDir, 'phase-0'), { recursive: true })
+        await writeFile(join(outDir, 'phase-0/task-15.log'), `${JSON.stringify(payload, null, 2)}\n`)
+        console.log(JSON.stringify(payload, null, 2))
+        if (ok === false) throw new Error('providers case failed')
+      } finally {
+        stopRelay(failRelay)
+      }
+    } finally {
+      stopRelay(offRelay)
+    }
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -2970,6 +3156,10 @@ async function main() {
   if (args.caseName === 'ocr' || args.all) {
     await runOcr(evidenceRoot)
     ran.push('ocr')
+  }
+  if (args.caseName === 'providers' || args.all) {
+    await runProviders(evidenceRoot)
+    ran.push('providers')
   }
   if (args.caseName === 'pdf-slides') {
     const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)

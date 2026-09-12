@@ -550,9 +550,42 @@ const desktopApi: DesktopApi = {
     window.open('https://www.genspark.ai', '_blank', 'noopener')
   },
 
-  imageSearch: async () => ({ images: [], method: 'error', error: 'image search is unavailable in the web version' }),
-  generateImage: async () => ({ error: 'image generation is unavailable in the web version' }),
-  fetchImage: async () => null,
+  imageSearch: async (query, maxResults) => {
+    const ready = await relay<{ imageSearch?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.imageSearch?.available) {
+      return { images: [], method: 'error', error: ready?.imageSearch?.reason ?? 'image-search-unconfigured' }
+    }
+    const res = await relay<{
+      images?: Array<{ title?: string; imageUrl: string; sourceUrl?: string; source?: string; width?: number; height?: number }>
+      method?: string
+      error?: string
+    }>('/search/image', { query, maxResults: maxResults ?? 6 })
+    if (!res || res.method === 'error') {
+      return { images: [], method: 'error', error: res?.error ?? 'image search needs the local relay' }
+    }
+    return {
+      images: (res.images ?? []).map((img) => ({
+        title: img.title ?? '',
+        imageUrl: img.imageUrl,
+        sourceUrl: img.sourceUrl ?? '',
+        source: img.source ?? 'bing',
+        ...(img.width ? { width: img.width } : {}),
+        ...(img.height ? { height: img.height } : {}),
+      })),
+      method: res.method ?? 'ok',
+    }
+  },
+  generateImage: async (op) => {
+    const ready = await relay<{ generate?: { available?: boolean; reason?: string } }>('/providers/ready')
+    if (!ready?.generate?.available) {
+      return { error: ready?.generate?.reason ?? 'generate-provider-unconfigured' }
+    }
+    const res = await relay<{ url?: string; error?: string }>('/generate-image', { prompt: op.prompt, aspectRatio: op.aspectRatio })
+    return res ?? { error: 'image generation needs the local relay' }
+  },
+  fetchImage: async (url) => {
+    return await relay<{ base64: string; mime: string }>('/fetch-image', { url })
+  },
 
   webSearch: async (query, maxResults) => {
     const res = await relay<{ results: Array<{ title: string; url: string; snippet: string }>; method: string; error?: string }>(

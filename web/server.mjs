@@ -26,6 +26,9 @@
  *   POST /api/generate-image  { prompt, ... }       → { url } via Genspark gsk (no browser egress)
  *   POST /api/analyze-media   { mediaUrls, requirements } → { text } via Genspark gsk
  *   GET  /api/gsk-status      → { available, email? }
+ *   GET  /api/providers/ready → search/generate/analyze/model/credit
+ *   GET  /api/credit/ready    → { available, url? }
+ *   POST /api/model/chat      { messages } → echo or configured model
  *   GET  /api/fetch-file?url= { url }               → remote file bytes (CORS-free)
  *   GET  /api/files?path=     { path }              → file from GENOFFICE_WEB_FILES_ROOT
  *                                                     (only enabled when the env var is set;
@@ -45,6 +48,7 @@ import { fileURLToPath } from 'node:url'
 import { preflightDest, writeFileAtomic } from './write-atomic.mjs'
 import { printReady, startPrintJob, getPrintJob, cancelPrintJob, waitPrintJob } from './print-service.mjs'
 import { ocrReady, startOcrJob, getOcrJob, cancelOcrJob, waitOcrJob } from './ocr-service.mjs'
+import { providersReady, searchFixture, generateFixture, analyzeFixture, modelChat, modelChatCompletionsSse } from './provider-service.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -248,6 +252,7 @@ function firstItem(v) {
 }
 
 function gskApiKey() {
+  if (process.env.GENOFFICE_GSK_DISABLED === '1') return ''
   if (process.env.GSK_API_KEY) return process.env.GSK_API_KEY
   try {
     const configPath = join(homedir(), '.genspark-tool-cli', 'config.json')
@@ -578,6 +583,7 @@ async function handleApi(req, res, pathname, body, url) {
       executors: executors.size,
       print: printReady(),
       ocr: ocrReady(),
+      providers: providersReady(),
     })
   }
 
@@ -1138,9 +1144,30 @@ async function handleApi(req, res, pathname, body, url) {
     return json(res, 200, { ok: true, base64: entry.bytes.toString('base64'), name: entry.name })
   }
 
+  if (req.method === 'GET' && pathname === '/api/providers/ready') {
+    return json(res, 200, { ok: true, ...providersReady() })
+  }
+  if (req.method === 'GET' && pathname === '/api/credit/ready') {
+    return json(res, 200, { ok: true, ...providersReady().credit })
+  }
+  if (req.method === 'POST' && pathname === '/api/model/chat') {
+    return json(res, 200, modelChat(body ?? {}))
+  }
+  if (req.method === 'POST' && pathname === '/api/model/v1/chat/completions') {
+    const sse = modelChatCompletionsSse(body ?? {})
+    res.writeHead(sse.status, { 'Content-Type': sse.headers?.['Content-Type'] ?? 'application/json' })
+    res.end(sse.body)
+    return
+  }
+
   if (req.method === 'POST' && pathname === '/api/search/web') {
+    const ready = providersReady().search
+    if (!ready.available) return json(res, 200, { results: [], method: 'error', error: ready.reason, available: false })
     const { query, maxResults } = body
     if (!query) return json(res, 400, { results: [], method: 'error', error: 'missing query' })
+    if (process.env.GENOFFICE_SEARCH_FAIL === '1' || process.env.GENOFFICE_SEARCH_FIXTURE === '1') {
+      return json(res, 200, searchFixture('web', query))
+    }
     const n = Math.min(Number(maxResults) || 5, 20)
     try {
       const results = await duckDuckGoSearch(query, n)
@@ -1160,8 +1187,13 @@ async function handleApi(req, res, pathname, body, url) {
   }
 
   if (req.method === 'POST' && pathname === '/api/search/image') {
+    const ready = providersReady().imageSearch
+    if (!ready.available) return json(res, 200, { images: [], method: 'error', error: ready.reason, available: false })
     const { query, maxResults } = body
     if (!query) return json(res, 400, { images: [], method: 'error', error: 'missing query' })
+    if (process.env.GENOFFICE_SEARCH_FAIL === '1' || process.env.GENOFFICE_SEARCH_FIXTURE === '1') {
+      return json(res, 200, searchFixture('image', query))
+    }
     try {
       const images = await bingImageSearch(query, Math.min(Number(maxResults) || 6, 20))
       return json(res, 200, { images, method: 'bing' })
@@ -1190,10 +1222,20 @@ async function handleApi(req, res, pathname, body, url) {
   }
 
   if (req.method === 'POST' && pathname === '/api/generate-image') {
+    const ready = providersReady().generate
+    if (!ready.available) return json(res, 200, { error: ready.reason, available: false })
+    if (process.env.GENOFFICE_GENERATE_FAIL === '1' || process.env.GENOFFICE_GENERATE_FIXTURE === '1' || !gskApiKey()) {
+      return json(res, 200, await generateFixture(body ?? {}))
+    }
     return json(res, 200, await generateImageViaGsk(body))
   }
 
   if (req.method === 'POST' && pathname === '/api/analyze-media') {
+    const ready = providersReady().analyze
+    if (!ready.available) return json(res, 200, { error: ready.reason, available: false })
+    if (process.env.GENOFFICE_ANALYZE_FAIL === '1' || process.env.GENOFFICE_ANALYZE_FIXTURE === '1' || !gskApiKey()) {
+      return json(res, 200, await analyzeFixture(body ?? {}))
+    }
     return json(res, 200, await analyzeMediaViaGsk(body))
   }
 
