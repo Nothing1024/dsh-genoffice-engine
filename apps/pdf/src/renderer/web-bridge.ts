@@ -22,6 +22,7 @@ import type {
   PageImageRef,
   PagePreviewRequest,
   PdfApi,
+  PdfOcrLine,
   SavePdfRequest,
   SavePdfResult,
   TextEditValidation,
@@ -596,11 +597,20 @@ const pdfApi: PdfApi = {
       if (converted.canceled) return { ok: true, canceled: true }
       const stem = (session.name || 'document').replace(/\.pdf$/i, '') || 'document'
       const savedPath = await writeNewSibling(session.path, `${stem}.${format}`, converted.bytes)
+      const warnings = [...converted.warnings]
+      if (converted.scannedDocument) {
+        const ocr = await relay<{ available?: boolean }>('/ocr/ready')
+        warnings.push(
+          ocr?.available
+            ? 'scan-image-fidelity; ocr-available-for-editable-text'
+            : 'scan-image-fidelity; ocr-unavailable',
+        )
+      }
       return {
         ok: true,
         savedPath,
         scannedDocument: converted.scannedDocument,
-        warnings: converted.warnings,
+        warnings,
       }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
@@ -664,7 +674,26 @@ const pdfApi: PdfApi = {
     const printed = await runPrintJob({ app: 'pdf', dest, pdfBase64: btoa(binary) })
     return printed.ok ? { ok: true, path: printed.path ?? dest } : { ok: false, error: printed.error ?? 'print-failed' }
   },
-  ocrPage: async () => null,
+  ocrPage: async (png: string) => {
+    const ready = await relay<{ available?: boolean; reason?: string }>('/ocr/ready')
+    if (!ready?.available) return null
+    if (typeof png !== 'string' || png.length < 8) return []
+    const started = await relay<{ ok?: boolean; jobId?: string; error?: string }>('/ocr/jobs', {
+      app: 'pdf',
+      pngBase64: png,
+    })
+    if (!started?.ok || !started.jobId) return []
+    const done = await relay<{
+      ok?: boolean
+      status?: string
+      lines?: PdfOcrLine[]
+      error?: string
+    }>('/ocr/jobs/wait', { id: started.jobId }, 90_000)
+    if (!done || done.status === 'cancelled' || done.status === 'error' || done.ok !== true) {
+      return []
+    }
+    return Array.isArray(done.lines) ? done.lines : []
+  },
   createDocument: async () => ({ ok: false, error: '网页版暂不支持 create_document' }),
   aiStream: async () => {},
   aiStreamCancel: async () => {},

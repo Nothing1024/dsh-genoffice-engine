@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
@@ -121,7 +121,9 @@ async function runInventory(outDir) {
   const stubs = rows.filter((r) => r.status === 'stub' || r.status === 'not-product-available' || r.status === 'compiled-only')
   push('stubs-owned', stubs.length > 0 && stubs.every((r) => Number(r.implementation_task) >= 2), 'owned stubs', stubs.length)
   push('html-not-claimed-available', rows.filter((r) => r.app === 'html').every((r) => r.status !== 'available'), 'html not available', rows.filter((r) => r.app === 'html').map((r) => r.status))
-  push('ocr-not-claimed-available', rows.filter((r) => r.entry.includes('ocr')).every((r) => r.status !== 'available'), 'ocr not available', deps.ocrWebNull)
+  const ocrRows = rows.filter((r) => r.entry.includes('ocr'))
+  const ocrClaimed = ocrRows.length > 0 && ocrRows.every((r) => r.status === 'available')
+  push('ocr-inventory-matches-bridge', ocrClaimed === (deps.ocrWebNull === false), 'ocr inventory matches bridge', { ocrClaimed, ocrWebNull: deps.ocrWebNull })
   push('isolated-head', Boolean(deps.isolatedHead), 'sha', deps.isolatedHead)
   push('html-present-no-web-build', deps.htmlPresent && !deps.htmlWebBuild, 'compiled-only', { htmlPresent: deps.htmlPresent, htmlWebBuild: deps.htmlWebBuild })
   push('inventory-hash', true, 'sha256', sha(INVENTORY))
@@ -2707,6 +2709,208 @@ async function runPrintExport(outDir) {
   }
 }
 
+
+function ocrNormalized(text) {
+  return String(text ?? '').replace(/\s+/g, '').toLowerCase()
+}
+
+function ocrHit(text) {
+  const n = ocrNormalized(text)
+  return n.includes('wfcocrkeep') || (n.includes('wfc') && n.includes('ocr') && n.includes('keep'))
+}
+
+async function buildScanPdf(file, phrase, browser) {
+  const page = await browser.newPage()
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.setContent(`<!doctype html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;background:#ffffff">
+  <div style="padding:180px 80px;font:700 120px Helvetica,Arial,sans-serif;letter-spacing:6px;color:#111">${phrase}</div>
+</body></html>`)
+  const png = await page.screenshot({ type: 'png' })
+  await page.close()
+  const doc = await PDFDocument.create()
+  const image = await doc.embedPng(png)
+  const pdfPage = doc.addPage([612, 792])
+  const scale = Math.min(580 / image.width, 700 / image.height)
+  const w = image.width * scale
+  const h = image.height * scale
+  pdfPage.drawImage(image, { x: (612 - w) / 2, y: (792 - h) / 2, width: w, height: h })
+  await writeFile(file, Buffer.from(await doc.save()))
+  return png.toString('base64')
+}
+
+async function runOcr(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-ocr')
+  await mkdir(workDir, { recursive: true })
+  const scanFile = join(workDir, 'scan-source.pdf')
+  const destMd = join(workDir, 'ocr-out.md')
+  const missingDest = join(workDir, 'ocr-missing.md')
+  const failDest = join(workDir, 'ocr-fail.md')
+  const cancelDest = join(workDir, 'ocr-cancel.md')
+  for (const file of [destMd, missingDest, failDest, cancelDest]) {
+    if (existsSync(file)) await unlink(file)
+  }
+  const phrase = 'WFC OCR KEEP'
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const pngBase64 = await buildScanPdf(scanFile, phrase, browser)
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[pdf] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[pdf] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${scanFile}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, scanFile, 90_000)
+    const readyOk = await fetch(`${relay.base}/api/ocr/ready`).then((r) => r.json())
+    const apiLines = await page.evaluate(async (png) => window.pdfApi.ocrPage(png), pngBase64)
+    let overlayText = ''
+    try {
+      overlayText = await page.waitForFunction(() => {
+        const el = document.querySelector('.pdf-ocr-layer')
+        return el && el.textContent && el.textContent.trim().length > 0 ? el.textContent : null
+      }, { timeout: 90_000 }).then((handle) => handle.jsonValue())
+    } catch {
+      overlayText = await page.evaluate(() => document.querySelector('.pdf-ocr-layer')?.textContent ?? '')
+    }
+    shot = await page.screenshot({ type: 'png' })
+    const job = await post(relay.base, '/api/ocr/jobs', { pngBase64, dest: destMd })
+    const waited = await post(relay.base, '/api/ocr/jobs/wait', { id: job.jobId })
+    const destText = existsSync(destMd) ? await readFile(destMd, 'utf8') : ''
+    let reopen = null
+    if (destText) {
+      const md = await browser.newPage()
+      await md.goto(`${relay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${destMd}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      reopen = await waitReady(relay.base, destMd, 90_000)
+      const mdBody = await md.evaluate(() => document.body?.innerText ?? '')
+      reopen = { ...reopen, body: mdBody }
+      await md.close()
+    }
+    const converted = await page.evaluate(async () => {
+      try { return await window.pdfApi.convertOffice('docx') }
+      catch (error) { return { ok: false, error: String(error) } }
+    })
+    const convertPath = converted?.savedPath
+    const convertHasPhrase = convertPath && existsSync(convertPath) ? await zipHasText(convertPath, 'WFC OCR KEEP') : false
+    const convertHasImage = convertPath && existsSync(convertPath)
+      ? (await JSZip.loadAsync(await readFile(convertPath))).file(/word\/media\//).length > 0
+      : false
+    await page.close()
+
+    const successAssertions = [
+      assertion('ocr-ready', readyOk.available === true, true, readyOk),
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened.readiness),
+      assertion('ocrPage-lines', Array.isArray(apiLines) && apiLines.some((line) => ocrHit(line.text)), true, apiLines),
+      assertion('overlay-or-api', ocrHit(overlayText) || (Array.isArray(apiLines) && apiLines.some((line) => ocrHit(line.text))), true, overlayText),
+      assertion('dest-written', existsSync(destMd) && ocrHit(destText), true, destText.slice(0, 200)),
+      assertion('dest-reopen', reopen?.readiness === 'ready' && ocrHit(reopen?.body), 'ready+text', { readiness: reopen?.readiness, body: String(reopen?.body ?? '').slice(0, 200) }),
+      assertion('convert-image-fidelity', converted?.ok === true && convertHasPhrase === false && convertHasImage === true, true, { converted, convertHasPhrase, convertHasImage }),
+      assertion('job-ok', waited?.ok === true && ocrHit(waited?.text), true, { status: waited?.status, text: waited?.text }),
+    ]
+
+    const offPort = await freePort(port + 1)
+    const offRelay = await startRelay(offPort, { GENOFFICE_OCR_DISABLED: '1' })
+    try {
+      const offReady = await fetch(`${offRelay.base}/api/ocr/ready`).then((r) => r.json())
+      const offPage = await browser.newPage()
+      const ocrPosts = []
+      offPage.on('request', (req) => {
+        if (req.method() === 'POST' && req.url().includes('/api/ocr/jobs')) ocrPosts.push(req.url())
+      })
+      await offPage.goto(`${offRelay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${scanFile}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      await waitReady(offRelay.base, scanFile, 90_000)
+      const missing = await offPage.evaluate(async (png) => window.pdfApi.ocrPage(png), pngBase64)
+      const startedDisabled = await post(offRelay.base, '/api/ocr/jobs', { pngBase64, dest: missingDest })
+      await offPage.close()
+      const failure1 = [
+        assertion('ready-unavailable', offReady.available === false, false, offReady),
+        assertion('ocrPage-null', missing === null, null, missing),
+        assertion('unconfigured-no-post', ocrPosts.length === 0, 0, ocrPosts),
+        assertion('unconfigured-no-dest', existsSync(missingDest) === false && startedDisabled?.ok !== true, false, { exists: existsSync(missingDest), startedDisabled }),
+      ]
+
+      const failPort = await freePort(offPort + 1)
+      const failRelay = await startRelay(failPort, { GENOFFICE_OCR_FAIL: '1' })
+      const holdPort = await freePort(failPort + 1)
+      const holdRelay = await startRelay(holdPort, { GENOFFICE_OCR_HOLD_MS: '2500' })
+      try {
+        const failPage = await browser.newPage()
+        await failPage.goto(`${failRelay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${scanFile}`)}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60_000,
+        })
+        await waitReady(failRelay.base, scanFile, 90_000)
+        const failed = await failPage.evaluate(async (png) => window.pdfApi.ocrPage(png), pngBase64)
+        const failJob = await post(failRelay.base, '/api/ocr/jobs', { pngBase64, dest: failDest })
+        const failWait = await post(failRelay.base, '/api/ocr/jobs/wait', { id: failJob.jobId })
+        await failPage.close()
+        const cancel = await post(holdRelay.base, '/api/ocr/jobs', { pngBase64, dest: cancelDest })
+        const cancelled = await post(holdRelay.base, '/api/ocr/jobs/cancel', { id: cancel.jobId })
+        const cancelWait = await post(holdRelay.base, '/api/ocr/jobs/wait', { id: cancel.jobId })
+        const failure2 = [
+          assertion('runtime-empty', Array.isArray(failed) && failed.length === 0, [], failed),
+          assertion('runtime-no-dest', existsSync(failDest) === false && failWait?.ok !== true, false, { exists: existsSync(failDest), failWait }),
+          assertion('cancel-ok', cancelled?.ok === true || cancelWait?.status === 'cancelled', true, { cancelled, cancelWait }),
+          assertion('cancel-no-dest', existsSync(cancelDest) === false, false, { exists: existsSync(cancelDest), cancelWait }),
+        ]
+        const success = await writeEvidence(outDir, 'UF-005', 'success', {
+          cases: [{ id: 'ocr-scan-to-editor', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+          console: logs.join('\n'),
+          network: { events: networkEvents.slice(0, 40), count: networkEvents.length },
+          screenshot: shot,
+        })
+        const fail1 = await writeEvidence(outDir, 'UF-005', 'failure-1', {
+          cases: [{ id: 'ocr-unconfigured', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+          console: `${logs.join('\n')}\nmissing=${JSON.stringify(missing)}\n`,
+          network: { events: [offReady, startedDisabled], count: 2 },
+          screenshot: shot,
+        })
+        const fail2 = await writeEvidence(outDir, 'UF-005', 'failure-2', {
+          cases: [{ id: 'ocr-runtime-and-cancel', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+          console: `${logs.join('\n')}\nfailWait=${JSON.stringify(failWait)}\ncancelWait=${JSON.stringify(cancelWait)}\n`,
+          network: { events: [failJob, failWait, cancel, cancelWait], count: 4 },
+          screenshot: shot,
+        })
+        const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+        const payload = {
+          schema_version: 1,
+          package: 'web-feature-completion',
+          uf: 'UF-005',
+          branch: 'ocr',
+          status: ok ? 'passed' : 'failed',
+          results: { success, failure1: fail1, failure2: fail2, destMd, converted },
+        }
+        await mkdir(join(outDir, 'phase-0'), { recursive: true })
+        await writeFile(join(outDir, 'phase-0/task-14.log'), `${JSON.stringify(payload, null, 2)}\n`)
+        console.log(JSON.stringify(payload, null, 2))
+        if (ok === false) throw new Error('ocr case failed')
+      } finally {
+        stopRelay(failRelay)
+        stopRelay(holdRelay)
+      }
+    } finally {
+      stopRelay(offRelay)
+    }
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -2762,6 +2966,10 @@ async function main() {
   if (args.caseName === 'print-export' || args.all) {
     await runPrintExport(evidenceRoot)
     ran.push('print-export')
+  }
+  if (args.caseName === 'ocr' || args.all) {
+    await runOcr(evidenceRoot)
+    ran.push('ocr')
   }
   if (args.caseName === 'pdf-slides') {
     const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)

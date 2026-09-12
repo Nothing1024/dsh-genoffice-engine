@@ -11,6 +11,11 @@
  *   GET  /api/print/jobs?id=  → job status
  *   POST /api/print/jobs/wait { id } → finished job
  *   POST /api/print/jobs/cancel { id } → cancel
+ *   GET  /api/ocr/ready       → { available, reason? }
+ *   POST /api/ocr/jobs        { pngBase64, dest? } → job
+ *   GET  /api/ocr/jobs?id=    → job status
+ *   POST /api/ocr/jobs/wait   { id } → finished job
+ *   POST /api/ocr/jobs/cancel { id } → cancel
  *   GET  /api/dir?path=       → directory listing { ok, path, parent, entries }
  *                              (defaults to the user's home; same security
  *                              policy as /api/file — loopback-only by default,
@@ -39,6 +44,7 @@ import { extname, dirname, isAbsolute, join, normalize, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url'
 import { preflightDest, writeFileAtomic } from './write-atomic.mjs'
 import { printReady, startPrintJob, getPrintJob, cancelPrintJob, waitPrintJob } from './print-service.mjs'
+import { ocrReady, startOcrJob, getOcrJob, cancelOcrJob, waitOcrJob } from './ocr-service.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -571,6 +577,7 @@ async function handleApi(req, res, pathname, body, url) {
       roots: live.map((r) => r.app),
       executors: executors.size,
       print: printReady(),
+      ocr: ocrReady(),
     })
   }
 
@@ -592,6 +599,26 @@ async function handleApi(req, res, pathname, body, url) {
   if (req.method === 'POST' && pathname === '/api/print/jobs/cancel') {
     if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
     return json(res, 200, cancelPrintJob(body?.id))
+  }
+
+  if (req.method === 'GET' && pathname === '/api/ocr/ready') {
+    return json(res, 200, { ok: true, ...ocrReady() })
+  }
+  if (req.method === 'POST' && pathname === '/api/ocr/jobs') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, startOcrJob(body ?? {}))
+  }
+  if (req.method === 'GET' && pathname === '/api/ocr/jobs') {
+    const job = getOcrJob(url.searchParams.get('id'))
+    return json(res, 200, job ?? { ok: false, error: 'unknown job' })
+  }
+  if (req.method === 'POST' && pathname === '/api/ocr/jobs/wait') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, await waitOcrJob(body?.id))
+  }
+  if (req.method === 'POST' && pathname === '/api/ocr/jobs/cancel') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, cancelOcrJob(body?.id))
   }
 
   // remote file proxy: /docs/?open=https://… opens files from any CORS-free host
