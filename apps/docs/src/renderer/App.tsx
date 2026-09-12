@@ -1556,7 +1556,10 @@ export function App() {
     const res = await window.desktop.openDocxDecrypt(docPwdPrompt.path, docPwdPrompt.value)
     if (res.ok) {
       setDocPwdPrompt(null)
-      await loadFile(res.result)
+      const outcome = await loadFile(res.result)
+      if (CONTROL_PATH) {
+        applyControlReady(outcome === 'ok' ? 'ready' : 'error', outcome === 'ok' ? undefined : { error: 'decrypt-open-failed' })
+      }
       return
     }
     setDocPwdPrompt({
@@ -1569,6 +1572,10 @@ export function App() {
 
   const cancelDocPwd = () => {
     setDocPwdPrompt(null)
+    if (CONTROL_PATH && !fileCtxRef.current.doc) {
+      applyControlReady('error', { error: 'password-canceled' })
+      return
+    }
     // canceling a boot-time open leaves no document: land on blank, not "Opening…"
     if (!fileCtxRef.current.doc) void newFile()
   }

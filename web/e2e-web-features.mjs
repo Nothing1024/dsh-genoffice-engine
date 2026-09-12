@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
@@ -3097,6 +3097,253 @@ async function runProviders(outDir) {
   }
 }
 
+async function writeKeepDocx(file, phrase) {
+  const zip = await JSZip.loadAsync(await readFile(join(ENGINE, 'fixtures/generated/simple.docx')))
+  const xml = await zip.file('word/document.xml').async('string')
+  zip.file('word/document.xml', xml.replaceAll('W4-save-2', phrase).replaceAll('第一段。', phrase))
+  await writeFile(file, await zip.generateAsync({ type: 'nodebuffer' }))
+}
+
+function isCfb(buf) {
+  return buf.length >= 8 && buf[0] === 0xd0 && buf[1] === 0xcf && buf[2] === 0x11 && buf[3] === 0xe0
+}
+
+async function runDocsMarkdown(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-docs-markdown')
+  await mkdir(workDir, { recursive: true })
+  const plainDocx = join(workDir, 'plain-keep.docx')
+  const encDocx = join(workDir, 'encrypted-keep.docx')
+  const encOut = join(workDir, 'protected-out.docx')
+  const exportOut = join(workDir, 'docs-export.docx')
+  const mdFile = join(workDir, 'markdown-keep.md')
+  const badMd = join(workDir, 'invalid-utf8.md')
+  const attachPdf = join(workDir, 'attach-keep.pdf')
+  const missingDest = join(workDir, 'crypto-missing.docx')
+  const failDest = join(workDir, 'crypto-fail.docx')
+  for (const file of [encDocx, encOut, exportOut, missingDest, failDest]) {
+    if (existsSync(file)) await unlink(file)
+  }
+  await writeKeepDocx(plainDocx, 'WfcEncKeep')
+  await writeFile(mdFile, '# WfcMdKeep\n')
+  await writeFile(badMd, Buffer.from([0xff, 0xfe, 0x00, 0x80]))
+  const pdf = await PDFDocument.create()
+  const font = await pdf.embedFont(StandardFonts.Helvetica)
+  const page = pdf.addPage([400, 200])
+  page.drawText('WfcAttachKeep', { x: 40, y: 120, size: 24, font })
+  await writeFile(attachPdf, Buffer.from(await pdf.save()))
+  const pngB64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  const attachPdfB64 = (await readFile(attachPdf)).toString('base64')
+  const beforeEnc = existsSync(encDocx) ? sha256(await readFile(encDocx)) : null
+  const beforeBadMd = sha256(await readFile(badMd))
+
+  const rows = parseCsv(readFileSync(INVENTORY, 'utf8'))
+  const task16 = rows.filter((row) => Number(row.implementation_task) === 16)
+  const leftoverUnowned = rows.filter((row) => (row.app === 'docs' || row.app === 'markdown') && (row.status === 'stub' || row.status === 'not-product-available'))
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  let shot = null
+  try {
+    const encrypted = await post(relay.base, '/api/docs/encrypt', { path: plainDocx, password: 'WfcPwd1', dest: encDocx })
+    const beforeSha = sha256(await readFile(encDocx))
+
+    const docsPage = await browser.newPage()
+    docsPage.on('console', (msg) => logs.push(`[docs] ${msg.text()}`))
+    docsPage.on('pageerror', (err) => logs.push(`[docs] PAGEERROR ${err.message}`))
+    await docsPage.goto(`${relay.base}/docs/?control=1&open=${encodeURIComponent(`path:${encDocx}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    await docsPage.waitForSelector('input[type=password]', { timeout: 30_000 })
+    const loading = await post(relay.base, '/api/control/open', { path: encDocx })
+    await docsPage.fill('input[type=password]', 'wrong-password')
+    await docsPage.click('button.btn-primary')
+    await docsPage.waitForFunction(() => /不正确|incorrect/i.test(document.body.innerText), null, { timeout: 20_000 })
+    const afterWrong = await post(relay.base, '/api/control/open', { path: encDocx })
+    const wrongSha = sha256(await readFile(encDocx))
+    shot = await docsPage.screenshot({ type: 'png' })
+
+    await docsPage.fill('input[type=password]', 'WfcPwd1')
+    await docsPage.click('button.btn-primary')
+    const opened = await waitReady(relay.base, encDocx, 90_000)
+    const bodyText = await docsPage.locator('.doc-page').innerText().catch(() => '')
+    const context = await post(relay.base, `/api/control/docs/${docIdFor(encDocx)}/context`, {})
+    const exported = await post(relay.base, `/api/control/docs/${docIdFor(encDocx)}/export`, { saveAs: exportOut })
+
+    const attachments = await docsPage.evaluate(async ({ txt, pdfB64 }) => {
+      const textFile = new File([txt], 'keep.txt', { type: 'text/plain' })
+      const textPath = window.desktop.getPathForFile(textFile)
+      const textRead = await window.desktop.readAttachment(textPath, 0, 200)
+      const pdfBytes = Uint8Array.from(atob(pdfB64), (c) => c.charCodeAt(0))
+      const pdfFile = new File([pdfBytes], 'keep.pdf', { type: 'application/pdf' })
+      const pdfPath = window.desktop.getPathForFile(pdfFile)
+      const pdfRead = await window.desktop.readAttachment(pdfPath, 0, 400)
+      const badFile = new File([new Uint8Array([1, 2, 3, 4])], 'bad.pdf', { type: 'application/pdf' })
+      const badPath = window.desktop.getPathForFile(badFile)
+      const badRead = await window.desktop.readAttachment(badPath, 0, 200)
+      return { textRead, pdfRead, badRead }
+    }, { txt: 'WfcAttachKeep', pdfB64: attachPdfB64 })
+
+    const exportZip = existsSync(exportOut) ? await JSZip.loadAsync(await readFile(exportOut)).catch(() => null) : null
+    const exportXml = exportZip ? await exportZip.file('word/document.xml')?.async('string') : ''
+    const protect = await docsPage.evaluate(async ({ dest, pwd, b64 }) => {
+      const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer
+      const set = await window.desktop.setDocPassword(dest, pwd)
+      const saved = await window.desktop.saveDocx(dest, raw)
+      return { set, saved }
+    }, { dest: encOut, pwd: 'WfcPwd1', b64: existsSync(exportOut) ? (await readFile(exportOut)).toString('base64') : '' })
+    await docsPage.close()
+
+    const encOutBuf = existsSync(encOut) ? await readFile(encOut) : Buffer.alloc(0)
+    const decryptedOut = encOutBuf.length
+      ? await post(relay.base, '/api/docs/decrypt', { path: encOut, password: 'WfcPwd1' })
+      : { ok: false }
+    const decryptedZip = decryptedOut?.base64 ? await JSZip.loadAsync(Buffer.from(decryptedOut.base64, 'base64')).catch(() => null) : null
+    const decryptedXml = decryptedZip ? await decryptedZip.file('word/document.xml')?.async('string') : ''
+
+    const mdPage = await browser.newPage()
+    mdPage.on('console', (msg) => logs.push(`[md] ${msg.text()}`))
+    await mdPage.goto(`${relay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${mdFile}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const mdReady = await waitReady(relay.base, mdFile, 90_000)
+    const mdExport = join(workDir, 'markdown-export.md')
+    const mdSaved = await post(relay.base, `/api/control/markdown/${docIdFor(mdFile)}/export`, { saveAs: mdExport })
+    const asset = await mdPage.evaluate(async (b64) => window.markdownApi.saveImage({ base64: b64, ext: 'png' }), pngB64)
+    const image = asset ? await mdPage.evaluate(async (src) => window.markdownApi.readImage(src), asset) : null
+    const untitledImage = await mdPage.evaluate(async () => {
+      const prev = window.markdownApi
+      return prev.saveImage({ base64: 'aaaa', ext: 'exe' })
+    })
+    await mdPage.close()
+
+    const badPage = await browser.newPage()
+    await badPage.goto(`${relay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${badMd}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const badReady = await waitReady(relay.base, badMd, 60_000)
+    const afterBadMd = sha256(await readFile(badMd))
+    await badPage.close()
+
+    const successAssertions = [
+      assertion('task16-rows-available', task16.length >= 4 && task16.every((row) => row.status === 'available'), true, task16.map((row) => `${row.app}:${row.entry}:${row.status}`)),
+      assertion('leftover-unowned-zero', leftoverUnowned.length === 0, 0, leftoverUnowned.map((row) => `${row.app}:${row.entry}`)),
+      assertion('encrypt-dest', encrypted?.ok === true && existsSync(encDocx) && isCfb(await readFile(encDocx)), true, { ok: encrypted?.ok, exists: existsSync(encDocx) }),
+      assertion('encrypted-stays-loading', loading.readiness === 'loading' || loading.readiness === null, 'loading', loading),
+      assertion('wrong-password-no-ready', afterWrong.readiness !== 'ready' && wrongSha === beforeSha, true, { readiness: afterWrong.readiness, sha: wrongSha }),
+      assertion('decrypt-ready-keep', opened.readiness === 'ready' && (String(bodyText).includes('WfcEncKeep') || JSON.stringify(context).includes('WfcEncKeep')), true, { opened, bodyText, context }),
+      assertion('docs-open-save-export', exported?.ok === true && String(exportXml).includes('WfcEncKeep'), true, { exported, hasXml: Boolean(exportXml) }),
+      assertion('attachment-text', attachments.textRead?.ok === true && String(attachments.textRead.text).includes('WfcAttachKeep'), true, attachments.textRead),
+      assertion('attachment-pdf', attachments.pdfRead?.ok === true && String(attachments.pdfRead.text).includes('WfcAttachKeep'), true, attachments.pdfRead),
+      assertion('attachment-corrupt', attachments.badRead?.ok === false, false, attachments.badRead),
+      assertion('protect-save-encrypted', protect?.set?.ok === true && protect?.saved?.ok === true && isCfb(encOutBuf) && String(decryptedXml).includes('WfcEncKeep'), true, { protect, cfb: isCfb(encOutBuf) }),
+      assertion('markdown-open-save', mdReady.readiness === 'ready' && mdSaved?.ok === true && existsSync(mdExport) && (await readFile(mdExport, 'utf8')).includes('WfcMdKeep'), true, { mdReady, mdSaved }),
+      assertion('markdown-assets', typeof asset === 'string' && asset.startsWith('assets/') && image?.mime === 'image/png' && existsSync(join(workDir, asset)), true, { asset, image }),
+      assertion('markdown-invalid-utf8', badReady.readiness === 'error' && afterBadMd === beforeBadMd, 'error', { badReady, kept: afterBadMd === beforeBadMd }),
+    ]
+
+    const offPort = await freePort(port + 1)
+    const offRelay = await startRelay(offPort, {
+      GENOFFICE_DOCS_CRYPTO_DISABLED: '1',
+      GENOFFICE_DOCS_EXTRACT_DISABLED: '1',
+      GENOFFICE_MARKDOWN_ASSETS_DISABLED: '1',
+    })
+    try {
+      const offReady = await fetch(`${offRelay.base}/api/docs/crypto/ready`).then((r) => r.json())
+      const offExtract = await fetch(`${offRelay.base}/api/docs/extract/ready`).then((r) => r.json())
+      const offAssets = await fetch(`${offRelay.base}/api/markdown/assets/ready`).then((r) => r.json())
+      const offDecrypt = await post(offRelay.base, '/api/docs/decrypt', { path: encDocx, password: 'WfcPwd1', dest: missingDest })
+      const offPage = await browser.newPage()
+      await offPage.goto(`${offRelay.base}/docs/?control=1&open=${encodeURIComponent(`path:${encDocx}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      await offPage.waitForSelector('input[type=password]', { timeout: 30_000 })
+      await offPage.fill('input[type=password]', 'WfcPwd1')
+      await offPage.click('button.btn-primary')
+      await offPage.waitForFunction(() => /不受支持|不支持|unsupported|unavailable|disabled/i.test(document.body.innerText), null, { timeout: 20_000 }).catch(() => {})
+      const offOpen = await post(offRelay.base, '/api/control/open', { path: encDocx })
+      const offSha = sha256(await readFile(encDocx))
+      await offPage.close()
+      const failure1 = [
+        assertion('crypto-unavailable', offReady.available === false && offDecrypt?.available === false && existsSync(missingDest) === false, false, { offReady, offDecrypt }),
+        assertion('extract-unavailable', offExtract.available === false, false, offExtract),
+        assertion('assets-unavailable', offAssets.available === false, false, offAssets),
+        assertion('disabled-no-overwrite', offOpen.readiness !== 'ready' && offSha === beforeSha, true, { offOpen, offSha }),
+      ]
+
+      const failPort = await freePort(offPort + 1)
+      const failRelay = await startRelay(failPort, {
+        GENOFFICE_DOCS_CRYPTO_FAIL: '1',
+        GENOFFICE_DOCS_EXTRACT_FAIL: '1',
+        GENOFFICE_MARKDOWN_ASSETS_FAIL: '1',
+      })
+      try {
+        const failDecrypt = await post(failRelay.base, '/api/docs/decrypt', { path: encDocx, password: 'WfcPwd1', dest: failDest })
+        const failExtract = await post(failRelay.base, '/api/docs/extract', { bytesBase64: attachPdfB64, name: 'keep.pdf' })
+        const failAsset = await post(failRelay.base, '/api/markdown/assets', {
+          documentPath: mdFile,
+          bytesBase64: pngB64,
+          ext: 'png',
+          name: 'image.png',
+        })
+        const recovered = await post(relay.base, '/api/docs/decrypt', { path: encDocx, password: 'WfcPwd1' })
+        const recoveredZip = recovered?.base64 ? await JSZip.loadAsync(Buffer.from(recovered.base64, 'base64')).catch(() => null) : null
+        const recoveredXml = recoveredZip ? await recoveredZip.file('word/document.xml')?.async('string') : ''
+        const failure2 = [
+          assertion('crypto-runtime', failDecrypt?.ok === false && existsSync(failDest) === false, false, failDecrypt),
+          assertion('extract-runtime', failExtract?.ok === false, false, failExtract),
+          assertion('assets-runtime', failAsset?.ok === false, false, failAsset),
+          assertion('crypto-recovery', recovered?.ok === true && String(recoveredXml).includes('WfcEncKeep'), true, { ok: recovered?.ok }),
+        ]
+        const success = await writeEvidence(outDir, 'UF-001', 'success', {
+          cases: [{ id: 'docs-markdown-success', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+          console: logs.join('\n'),
+          network: { events: [encrypted, opened, exported, attachments, protect, mdSaved], count: 6 },
+          screenshot: shot,
+        })
+        const fail1 = await writeEvidence(outDir, 'UF-001', 'failure-1', {
+          cases: [{ id: 'docs-markdown-unconfigured', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+          console: `${logs.join('\n')}\noff=${JSON.stringify({ offReady, offExtract, offAssets, offDecrypt, offOpen })}\n`,
+          network: { events: [offReady, offExtract, offAssets, offDecrypt, offOpen], count: 5 },
+          screenshot: shot,
+        })
+        const fail2 = await writeEvidence(outDir, 'UF-001', 'failure-2', {
+          cases: [{ id: 'docs-markdown-runtime-and-recovery', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+          console: `${logs.join('\n')}\nfail=${JSON.stringify({ failDecrypt, failExtract, failAsset, recovered: { ok: recovered?.ok } })}\n`,
+          network: { events: [failDecrypt, failExtract, failAsset, { ok: recovered?.ok }], count: 4 },
+          screenshot: shot,
+        })
+        const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+        const payload = {
+          schema_version: 1,
+          package: 'web-feature-completion',
+          uf: 'UF-001',
+          branch: 'docs-markdown',
+          status: ok ? 'passed' : 'failed',
+          results: { success, failure1: fail1, failure2: fail2 },
+        }
+        await mkdir(join(outDir, 'phase-0'), { recursive: true })
+        await writeFile(join(outDir, 'phase-0/task-16.log'), `${JSON.stringify(payload, null, 2)}\n`)
+        console.log(JSON.stringify(payload, null, 2))
+        if (ok === false) throw new Error('docs-markdown case failed')
+      } finally {
+        stopRelay(failRelay)
+      }
+    } finally {
+      stopRelay(offRelay)
+    }
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -3160,6 +3407,10 @@ async function main() {
   if (args.caseName === 'providers' || args.all) {
     await runProviders(evidenceRoot)
     ran.push('providers')
+  }
+  if (args.caseName === 'docs-markdown' || args.all) {
+    await runDocsMarkdown(evidenceRoot)
+    ran.push('docs-markdown')
   }
   if (args.caseName === 'pdf-slides') {
     const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)

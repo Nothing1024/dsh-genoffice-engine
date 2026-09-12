@@ -212,7 +212,48 @@ async function openRecordBytes(path: string): Promise<{ name: string; data: Arra
   return null
 }
 
+function isAbsFsPath(path: string): boolean {
+  return path.startsWith('/') && !path.startsWith('/webdoc/')
+}
+
+function abToB64(data: ArrayBuffer): string {
+  const u = new Uint8Array(data)
+  let s = ''
+  const chunk = 0x8000
+  for (let i = 0; i < u.length; i += chunk) {
+    s += String.fromCharCode(...u.subarray(i, i + chunk))
+  }
+  return btoa(s)
+}
+
+async function writeAbsFile(path: string, data: ArrayBuffer): Promise<boolean> {
+  try {
+    const resp = await fetch(`${RELAY_BASE}/file`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, base64: abToB64(data), overwrite: true }),
+    })
+    const json = (await resp.json()) as { ok?: boolean }
+    return json.ok === true
+  } catch {
+    return false
+  }
+}
+
 async function writeRecord(path: string, data: ArrayBuffer): Promise<boolean> {
+  if (isAbsFsPath(path)) {
+    const ok = await writeAbsFile(path, data)
+    if (ok) {
+      await idbPut(STORE_HANDLES, path, {
+        name: path.split('/').pop() ?? 'document.md',
+        kind: 'bytes',
+        bytes: data,
+        mtime: Date.now(),
+        accessedAt: Date.now(),
+      })
+      return true
+    }
+  }
   const rec = await idbGet<WebFileRecord>(STORE_HANDLES, path)
   if (rec?.kind === 'fs' && rec.handle) {
     try {
@@ -419,7 +460,8 @@ async function openTarget(target: string): Promise<string | null> {
   if (!remote.name.toLowerCase().endsWith('.md') && !remote.name.toLowerCase().endsWith('.markdown')) {
     return null
   }
-  const path = newPath(remote.name)
+  const pathHint = target.startsWith('path:') ? target.slice('path:'.length) : ''
+  const path = target.startsWith('path:') && isAbsFsPath(pathHint) ? pathHint : newPath(remote.name)
   await idbPut(STORE_HANDLES, path, {
     name: remote.name,
     kind: 'bytes',
@@ -487,13 +529,64 @@ const markdownApi: MarkdownApi = {
   onFileRenamed: () => () => {},
 
   pickImage: async () => {
-    // browser has no "document directory" to copy images into
-    return null
+    if (!currentPath || !isAbsFsPath(currentPath)) return null
+    const file = await new Promise<File | null>((resolve) => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = 'image/png,image/jpeg,image/gif'
+      input.style.display = 'none'
+      document.body.appendChild(input)
+      input.onchange = () => {
+        const picked = input.files?.[0] ?? null
+        input.remove()
+        resolve(picked)
+      }
+      input.oncancel = () => {
+        input.remove()
+        resolve(null)
+      }
+      input.click()
+    })
+    if (!file) return null
+    const ext = (file.name.split('.').pop() ?? '').toLowerCase()
+    const buf = new Uint8Array(await file.arrayBuffer())
+    let binary = ''
+    const chunk = 0x8000
+    for (let i = 0; i < buf.length; i += chunk) binary += String.fromCharCode(...buf.subarray(i, i + chunk))
+    return await markdownApi.saveImage({ base64: btoa(binary), ext })
   },
 
-  saveImage: async () => null,
+  saveImage: async (data) => {
+    if (!currentPath || !isAbsFsPath(currentPath)) return null
+    const ready = await relay<{ available?: boolean; reason?: string }>('/markdown/assets/ready')
+    if (!ready?.available) return null
+    const res = await relay<{ ok?: boolean; relative?: string; error?: string }>('/markdown/assets', {
+      documentPath: currentPath,
+      bytesBase64: data.base64,
+      ext: data.ext,
+      name: `image.${data.ext}`,
+    })
+    return res?.ok && res.relative ? res.relative : null
+  },
 
-  readImage: async (): Promise<ImageData | null> => null,
+  readImage: async (src): Promise<ImageData | null> => {
+    if (!currentPath || !isAbsFsPath(currentPath) || typeof src !== 'string') return null
+    if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.includes('..') || src.startsWith('/') || src.startsWith('\\')) return null
+    const docDir = currentPath.replace(/[/\\][^/\\]+$/, '')
+    const abs = `${docDir}/${src}`
+    try {
+      const resp = await fetch(`${RELAY_BASE}/file?path=${encodeURIComponent(abs)}`)
+      const json = (await resp.json()) as { ok?: boolean; base64?: string; name?: string }
+      if (!json.ok || !json.base64) return null
+      const ext = (json.name ?? abs).split('.').pop()?.toLowerCase() ?? ''
+      const mime =
+        ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : null
+      if (!mime) return null
+      return { base64: json.base64, mime }
+    } catch {
+      return null
+    }
+  },
 
   onExportRequest: () => () => {},
   onPrintRequest: () => () => {},

@@ -40,9 +40,11 @@ import type {
   AttachmentMeta,
   AttachmentReadResult,
   AutoSaveDefault,
+  DecryptOpenResult,
   DesktopApi,
   DocsTabInfo,
   MenuCommand,
+  OpenDocxResult,
   OpenFileResult,
   PickImageResult,
   UiTheme,
@@ -85,6 +87,162 @@ function fileName(path: string): string {
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', data)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+
+function isAbsFsPath(path: string): boolean {
+  return path.startsWith('/') && !path.startsWith('/webdoc/')
+}
+
+const CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1] as const
+
+function isEncryptedDocxBytes(data: ArrayBuffer): boolean {
+  const bytes = new Uint8Array(data)
+  if (bytes.length < 8) return false
+  for (let i = 0; i < 8; i++) {
+    if (bytes[i] !== CFB_MAGIC[i]) return false
+  }
+  const name = 'EncryptedPackage'
+  const needle = new Uint8Array(name.length * 2)
+  for (let i = 0; i < name.length; i++) {
+    needle[i * 2] = name.charCodeAt(i)
+    needle[i * 2 + 1] = 0
+  }
+  outer: for (let i = 0; i <= bytes.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (bytes[i + j] !== needle[j]) continue outer
+    }
+    return true
+  }
+  return false
+}
+
+function abToB64(data: ArrayBuffer): string {
+  const u = new Uint8Array(data)
+  let s = ''
+  const chunk = 0x8000
+  for (let i = 0; i < u.length; i += chunk) {
+    s += String.fromCharCode(...u.subarray(i, i + chunk))
+  }
+  return btoa(s)
+}
+
+function b64ToAb(b64: string): ArrayBuffer {
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out.buffer
+}
+
+const diskPasswords = new Map<string, string>()
+const desiredPasswords = new Map<string, { password: string | null; revision: number }>()
+let pendingNewPassword: { password: string | null; revision: number } | null = null
+let nextIntentRevision = 1
+
+function passwordForSave(path: string | null): string | null {
+  if (path) {
+    const intent = desiredPasswords.get(path)
+    if (intent && 'password' in intent) return intent.password
+    return diskPasswords.get(path) ?? null
+  }
+  return pendingNewPassword?.password ?? null
+}
+
+async function persistOpenedBytes(path: string, name: string, data: ArrayBuffer): Promise<void> {
+  await persistRecord(path, {
+    name,
+    kind: 'bytes',
+    bytes: data,
+    mtime: Date.now(),
+    accessedAt: Date.now(),
+  })
+}
+
+async function resultFromBytes(
+  path: string,
+  name: string,
+  data: ArrayBuffer,
+  persist = true,
+): Promise<OpenDocxResult> {
+  if (persist) await persistOpenedBytes(path, name, data)
+  if (isEncryptedDocxBytes(data) && !diskPasswords.has(path)) {
+    return { needsPassword: true, path, name }
+  }
+  if (isEncryptedDocxBytes(data) && diskPasswords.has(path)) {
+    const decrypted = await decryptViaRelay(data, diskPasswords.get(path) ?? '')
+    if (!decrypted.ok || !decrypted.data) return { needsPassword: true, path, name }
+    return {
+      path,
+      name,
+      data: decrypted.data,
+      hash: await sha256Hex(data),
+      encrypted: true,
+    }
+  }
+  return { path, name, data, hash: await sha256Hex(data) }
+}
+
+async function decryptViaRelay(
+  data: ArrayBuffer,
+  password: string,
+): Promise<{ ok: true; data: ArrayBuffer } | { ok: false; reason: 'wrong-password' | 'unsupported' | 'error'; error?: string }> {
+  const ready = await relay<{ available?: boolean; reason?: string }>('/docs/crypto/ready')
+  if (!ready?.available) {
+    return { ok: false, reason: 'unsupported', error: ready?.reason ?? 'docs-crypto-unavailable' }
+  }
+  const res = await relay<{ ok?: boolean; base64?: string; reason?: string; error?: string }>('/docs/decrypt', {
+    bytesBase64: abToB64(data),
+    password,
+  })
+  if (!res?.ok || !res.base64) {
+    const reason =
+      res?.reason === 'wrong-password' || res?.reason === 'unsupported' ? res.reason : 'error'
+    return { ok: false, reason, error: res?.error ?? 'decrypt-failed' }
+  }
+  return { ok: true, data: b64ToAb(res.base64) }
+}
+
+async function encryptViaRelay(
+  data: ArrayBuffer,
+  password: string,
+): Promise<{ ok: true; data: ArrayBuffer } | { ok: false; error: string }> {
+  const ready = await relay<{ available?: boolean; reason?: string }>('/docs/crypto/ready')
+  if (!ready?.available) {
+    return { ok: false, error: ready?.reason ?? 'docs-crypto-unavailable' }
+  }
+  const res = await relay<{ ok?: boolean; base64?: string; error?: string }>('/docs/encrypt', {
+    bytesBase64: abToB64(data),
+    password,
+  })
+  if (!res?.ok || !res.base64) return { ok: false, error: res?.error ?? 'encrypt-failed' }
+  return { ok: true, data: b64ToAb(res.base64) }
+}
+
+async function prepareSaveBytes(
+  path: string | null,
+  data: ArrayBuffer,
+): Promise<{ ok: true; data: ArrayBuffer } | { ok: false; error: string }> {
+  const password = passwordForSave(path)
+  if (!password) return { ok: true, data }
+  const encrypted = await encryptViaRelay(data, password)
+  if (!encrypted.ok) return encrypted
+  if (path) diskPasswords.set(path, password)
+  return encrypted
+}
+
+async function writeAbsFile(path: string, data: ArrayBuffer): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const resp = await fetch(`${RELAY_BASE}/file`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, base64: abToB64(data), overwrite: true }),
+    })
+    const json = (await resp.json()) as { ok?: boolean; error?: string }
+    if (!json.ok) return { ok: false, error: json.error ?? `HTTP ${resp.status}` }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 function downloadBytes(data: ArrayBuffer, name: string): void {
@@ -308,7 +466,7 @@ async function openRecordBytes(path: string): Promise<{ name: string; data: Arra
   return null
 }
 
-async function loadHandle(handle: WebFileSystemHandle): Promise<OpenFileResult | null> {
+async function loadHandle(handle: WebFileSystemHandle): Promise<OpenDocxResult> {
   try {
     const file = await handle.getFile()
     if (!file.name.toLowerCase().endsWith('.docx')) return null
@@ -321,8 +479,7 @@ async function loadHandle(handle: WebFileSystemHandle): Promise<OpenFileResult |
       mtime: file.lastModified,
       accessedAt: Date.now(),
     })
-    const hash = await sha256Hex(data)
-    return { path, name: file.name, data, hash }
+    return await resultFromBytes(path, file.name, data, false)
   } catch {
     return null
   }
@@ -495,7 +652,16 @@ async function extractAttachmentText(file: File): Promise<{ ok: boolean; text?: 
       return { ok: true, text: await xlsxToText(new Uint8Array(await file.arrayBuffer())) }
     }
     if (ext === 'pdf') {
-      return { ok: false, error: '网页版暂不支持 PDF 附件文本提取，请使用桌面版或转成 txt/md' }
+      const ready = await relay<{ available?: boolean; reason?: string }>('/docs/extract/ready')
+      if (!ready?.available) {
+        return { ok: false, error: ready?.reason ?? 'docs-extract-unavailable' }
+      }
+      const res = await relay<{ ok?: boolean; text?: string; error?: string }>('/docs/extract', {
+        bytesBase64: await fileToBase64(file),
+        name: file.name,
+      })
+      if (!res?.ok) return { ok: false, error: res?.error ?? 'extract-failed' }
+      return { ok: true, text: res.text ?? '' }
     }
     return { ok: false, error: `不支持解析 .${ext} 附件` }
   } catch (e) {
@@ -508,7 +674,7 @@ async function extractAttachmentText(file: File): Promise<{ ok: boolean; text?: 
 // ────────────────────────────────────────────────────────────
 
 const menuListeners = new Set<(command: MenuCommand, payload?: string) => void>()
-const openListeners = new Set<(result: OpenFileResult) => void>()
+const openListeners = new Set<(result: Exclude<OpenDocxResult, null>) => void>()
 const renamedListeners = new Set<(paths: { oldPath: string; newPath: string }) => void>()
 const closeCheckListeners = new Set<() => void>()
 const closeSaveRequestListeners = new Set<() => void>()
@@ -554,38 +720,70 @@ const desktop: DesktopApi = {
     if (!file) return null
     const data = await file.arrayBuffer()
     const path = newPath(file.name)
-    await persistRecord(path, {
-      name: file.name,
-      kind: 'bytes',
-      bytes: data,
-      mtime: file.lastModified,
-      accessedAt: Date.now(),
-    })
-    const hash = await sha256Hex(data)
-    return { path, name: file.name, data, hash }
+    return await resultFromBytes(path, file.name, data)
   },
 
   openDocxPath: async (path) => {
     const opened = await openRecordBytes(path)
-    if (!opened) return null
-    const rec = await loadRecord(path)
-    if (rec) await persistRecord(path, { ...rec, accessedAt: Date.now() })
-    return { path, name: opened.name, data: opened.data, hash: await sha256Hex(opened.data) }
+    if (opened) {
+      const rec = await loadRecord(path)
+      if (rec) await persistRecord(path, { ...rec, accessedAt: Date.now() })
+      return await resultFromBytes(path, opened.name, opened.data, false)
+    }
+    if (!isAbsFsPath(path)) return null
+    const remote = await bytesFromRemote(`path:${path}`)
+    if (!remote) return null
+    return await resultFromBytes(path, remote.name, remote.data)
   },
 
-  openDocxDecrypt: async () => {
-    console.warn('[web-docs] openDocxDecrypt is not supported in the web version')
-    return { ok: false as const, reason: 'unsupported' as const, error: '网页版不支持打开加密文档' }
+  openDocxDecrypt: async (path, password) => {
+    const ready = await relay<{ available?: boolean; reason?: string }>('/docs/crypto/ready')
+    if (!ready?.available) {
+      return { ok: false as const, reason: 'unsupported' as const, error: ready?.reason ?? 'docs-crypto-unavailable' }
+    }
+    let opened = await openRecordBytes(path)
+    if (!opened && isAbsFsPath(path)) {
+      const remote = await bytesFromRemote(`path:${path}`)
+      if (remote) {
+        opened = { name: remote.name, data: remote.data }
+        await persistOpenedBytes(path, remote.name, remote.data)
+      }
+    }
+    if (!opened) return { ok: false as const, reason: 'error' as const, error: 'file-not-found' }
+    const decrypted = await decryptViaRelay(opened.data, password)
+    if (!decrypted.ok) {
+      return { ok: false as const, reason: decrypted.reason, error: decrypted.error }
+    }
+    diskPasswords.set(path, password)
+    return {
+      ok: true as const,
+      result: {
+        path,
+        name: opened.name,
+        data: decrypted.data,
+        hash: await sha256Hex(opened.data),
+        encrypted: true,
+      },
+    }
   },
 
-  setDocPassword: async () => {
-    console.warn('[web-docs] setDocPassword is not supported in the web version')
-    return { ok: false }
+  setDocPassword: async (filePath, password) => {
+    const intent = { password, revision: nextIntentRevision++ }
+    if (filePath) desiredPasswords.set(filePath, intent)
+    else pendingNewPassword = intent
+    return { ok: true }
   },
 
-  docPasswordIntentRevision: async () => 0,
+  docPasswordIntentRevision: async () => nextIntentRevision - 1,
 
-  discardDocPasswordIntents: async () => ({ ok: true }),
+  discardDocPasswordIntents: async (throughRevision) => {
+    const cutoff = throughRevision ?? Number.MAX_SAFE_INTEGER
+    for (const [path, intent] of desiredPasswords) {
+      if (intent.revision <= cutoff) desiredPasswords.delete(path)
+    }
+    if (pendingNewPassword && pendingNewPassword.revision <= cutoff) pendingNewPassword = null
+    return { ok: true }
+  },
 
   consumePendingOpenDocx: async () => {
     return await consumePendingOpenDocxImpl()
@@ -614,6 +812,15 @@ const desktop: DesktopApi = {
   },
 
   saveDocx: async (path, data) => {
+    const prepared = await prepareSaveBytes(path, data)
+    if (!prepared.ok) return { ok: false, error: prepared.error }
+    data = prepared.data
+    if (isAbsFsPath(path)) {
+      const written = await writeAbsFile(path, data)
+      if (!written.ok) return { ok: false, error: written.error }
+      await persistOpenedBytes(path, fileName(path), data)
+      return { ok: true }
+    }
     const rec = await loadRecord(path)
     if (rec?.kind === 'fs' && rec.handle) {
       try {
@@ -649,7 +856,10 @@ const desktop: DesktopApi = {
 
   respellKick: async () => {},
 
-  saveDocxAs: async (defaultName, data) => {
+  saveDocxAs: async (defaultName, data, sourcePath) => {
+    const prepared = await prepareSaveBytes(sourcePath ?? null, data)
+    if (!prepared.ok) return { ok: false, error: prepared.error }
+    data = prepared.data
     if (typeof window.showSaveFilePicker === 'function') {
       try {
         const handle = await window.showSaveFilePicker({
@@ -687,8 +897,9 @@ const desktop: DesktopApi = {
   },
 
   saveDocxNew: async (defaultName, data) => {
-    // no silent default folder in the browser — use the save dialog (or download)
-    return await desktop.saveDocxAs(defaultName, data)
+    const prepared = await prepareSaveBytes(null, data)
+    if (!prepared.ok) return { ok: false, error: prepared.error }
+    return await desktop.saveDocxAs(defaultName, prepared.data)
   },
 
   getRecentFiles: async () => {
@@ -1198,15 +1409,14 @@ async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; nam
   }
 }
 
-async function openTarget(target: string): Promise<OpenFileResult | null> {
+async function openTarget(target: string): Promise<OpenDocxResult> {
   // synthetic id → local file (handle/bytes in IndexedDB)
   if (target.startsWith('/webdoc/')) {
-    const result = await desktop.openDocxPath(target)
-    if (!result || 'needsPassword' in result) return null
-    return result
+    return await desktop.openDocxPath(target)
   }
   // remote / data: / server: → pull bytes through the relay and open as a
-  // local (bytes) document
+  // local (bytes) document. path: keeps the original filesystem path so
+  // decrypt/save write back to the same file.
   const remote = await bytesFromRemote(target)
   if (!remote) {
     if (target.startsWith('path:')) throw new Error('load-error: empty result for path target')
@@ -1216,23 +1426,13 @@ async function openTarget(target: string): Promise<OpenFileResult | null> {
   const looksDocx =
     remote.name.toLowerCase().endsWith('.docx') || pathHint.toLowerCase().endsWith('.docx')
   if (!looksDocx) return null
-  const path = newPath(remote.name.toLowerCase().endsWith('.docx') ? remote.name : pathHint.split(/[\\/]/).pop() ?? remote.name)
-  await idbPut(STORE_HANDLES, path, {
-    name: remote.name,
-    kind: 'bytes',
-    bytes: remote.data,
-    mtime: Date.now(),
-    accessedAt: Date.now(),
-  })
-  return {
-    path,
-    name: remote.name,
-    data: remote.data,
-    hash: await sha256Hex(remote.data),
-  }
+  const path = target.startsWith('path:') && isAbsFsPath(pathHint)
+    ? pathHint
+    : newPath(remote.name.toLowerCase().endsWith('.docx') ? remote.name : pathHint.split(/[\\/]/).pop() ?? remote.name)
+  return await resultFromBytes(path, remote.name, remote.data)
 }
 
-async function consumePendingOpenDocxImpl(): Promise<OpenFileResult | null> {
+async function consumePendingOpenDocxImpl(): Promise<OpenDocxResult> {
   if (pendingOpenConsumed) return null
   pendingOpenConsumed = true
   const target = parseOpenTarget() ?? INITIAL_OPEN_TARGET

@@ -16,6 +16,13 @@
  *   GET  /api/ocr/jobs?id=    → job status
  *   POST /api/ocr/jobs/wait   { id } → finished job
  *   POST /api/ocr/jobs/cancel { id } → cancel
+ *   GET  /api/docs/crypto/ready → { available }
+ *   POST /api/docs/decrypt    { bytesBase64|path, password, dest? }
+ *   POST /api/docs/encrypt    { bytesBase64|path, password, dest? }
+ *   GET  /api/docs/extract/ready → { available }
+ *   POST /api/docs/extract    { bytesBase64, name } → attachment text
+ *   GET  /api/markdown/assets/ready → { available }
+ *   POST /api/markdown/assets { documentPath, bytesBase64, name|ext }
  *   GET  /api/dir?path=       → directory listing { ok, path, parent, entries }
  *                              (defaults to the user's home; same security
  *                              policy as /api/file — loopback-only by default,
@@ -49,6 +56,9 @@ import { preflightDest, writeFileAtomic } from './write-atomic.mjs'
 import { printReady, startPrintJob, getPrintJob, cancelPrintJob, waitPrintJob } from './print-service.mjs'
 import { ocrReady, startOcrJob, getOcrJob, cancelOcrJob, waitOcrJob } from './ocr-service.mjs'
 import { providersReady, searchFixture, generateFixture, analyzeFixture, modelChat, modelChatCompletionsSse } from './provider-service.mjs'
+import { cryptoReady, decryptDocxRequest, encryptDocxRequest } from './docs-crypto.mjs'
+import { extractReady, extractAttachmentRequest } from './docs-extract.mjs'
+import { assetsReady, saveMarkdownAsset } from './markdown-assets.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -584,6 +594,9 @@ async function handleApi(req, res, pathname, body, url) {
       print: printReady(),
       ocr: ocrReady(),
       providers: providersReady(),
+      docsCrypto: cryptoReady(),
+      docsExtract: extractReady(),
+      markdownAssets: assetsReady(),
     })
   }
 
@@ -625,6 +638,32 @@ async function handleApi(req, res, pathname, body, url) {
   if (req.method === 'POST' && pathname === '/api/ocr/jobs/cancel') {
     if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
     return json(res, 200, cancelOcrJob(body?.id))
+  }
+
+  if (req.method === 'GET' && pathname === '/api/docs/crypto/ready') {
+    return json(res, 200, { ok: true, ...cryptoReady() })
+  }
+  if (req.method === 'POST' && pathname === '/api/docs/decrypt') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, await decryptDocxRequest(body ?? {}))
+  }
+  if (req.method === 'POST' && pathname === '/api/docs/encrypt') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, await encryptDocxRequest(body ?? {}))
+  }
+  if (req.method === 'GET' && pathname === '/api/docs/extract/ready') {
+    return json(res, 200, { ok: true, ...extractReady() })
+  }
+  if (req.method === 'POST' && pathname === '/api/docs/extract') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, await extractAttachmentRequest(body ?? {}))
+  }
+  if (req.method === 'GET' && pathname === '/api/markdown/assets/ready') {
+    return json(res, 200, { ok: true, ...assetsReady() })
+  }
+  if (req.method === 'POST' && pathname === '/api/markdown/assets') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, await saveMarkdownAsset(body ?? {}))
   }
 
   // remote file proxy: /docs/?open=https://… opens files from any CORS-free host
