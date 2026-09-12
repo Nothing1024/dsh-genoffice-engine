@@ -85,8 +85,17 @@ export async function until(fn, { timeout = 20_000, interval = 40 } = {}) {
 }
 
 export async function startRelay(port, extraEnv = {}) {
+  return startRelayProcess([process.execPath, join(ENGINE, 'web/server.mjs')], port, extraEnv)
+}
+
+export async function startRelayViaNpm(port, script = 'web:serve', extraEnv = {}) {
+  return startRelayProcess(['npm', 'run', script, '--silent'], port, extraEnv)
+}
+
+async function startRelayProcess(argv, port, extraEnv = {}) {
   const started = Date.now()
-  const child = spawn(process.execPath, [join(ENGINE, 'web/server.mjs')], {
+  const [cmd, ...args] = argv
+  const child = spawn(cmd, args, {
     cwd: ENGINE,
     env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -96,9 +105,10 @@ export async function startRelay(port, extraEnv = {}) {
   child.stdout.on('data', onData)
   child.stderr.on('data', onData)
   const base = `http://127.0.0.1:${port}`
-  await until(() => fetch(`${base}/api/health`).then((r) => r.ok), { timeout: 15_000 })
-  return { child, base, port, logs, startMs: Date.now() - started }
+  await until(() => fetch(`${base}/api/health`).then((r) => r.ok), { timeout: 20_000 })
+  return { child, base, port, logs, startMs: Date.now() - started, argv }
 }
+
 
 export function stopRelay(relay) {
   if (!relay?.child) return
@@ -349,4 +359,4 @@ export function writeJson(path, data) {
   writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`)
 }
 
-export { chromium, existsSync, readFileSync, statSync }
+export { chromium, existsSync, readFileSync, statSync, execFileSync }

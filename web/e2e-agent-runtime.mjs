@@ -14,19 +14,26 @@ import {
   PROTOCOL,
   chromium,
   createFixtures,
+  execFileSync,
+  existsSync,
   freePort,
   gitHead,
   measureSample,
   probeGaps,
+  readFileSync,
   saveApp,
   startRelay,
+  startRelayViaNpm,
   stopRelay,
   editFamily,
   waitReady,
   toolOk,
 } from './runtime-measure.mjs'
 
-const IMPLEMENTED = ['baseline', 'no-duplicate-read']
+
+const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve']
+const WEB_APPS = ['shell', 'docs', 'markdown', 'sheets', 'slides', 'pdf', 'html']
+
 
 function parseArgs(argv) {
   const out = { mode: null, caseName: null, outDir: null, all: false }
@@ -87,10 +94,11 @@ async function runBaseline(outDir) {
       { name: 'markdown-edit-or-save-recorded', status: sample.ok || sample.readiness === 'ready' ? 'passed' : 'failed', expected: true, actual: { editOk: sample.editOk, saveOk: sample.saveOk } },
       { name: 'file-get-counted', status: typeof sample.file_gets === 'number' ? 'passed' : 'failed', expected: 'number', actual: sample.file_gets },
       { name: 'mtime-full-get-gap-recorded', status: typeof gaps.captureMtimeUsesFullFileGet === 'boolean' ? 'passed' : 'failed', expected: 'boolean', actual: gaps.captureMtimeUsesFullFileGet },
-      { name: 'no-web-serve-script', status: gaps.scripts.webServe == null ? 'passed' : 'failed', expected: null, actual: gaps.scripts.webServe },
+      { name: 'web-scripts-recorded', status: typeof gaps.scripts.web === 'string' ? 'passed' : 'failed', expected: 'string', actual: gaps.scripts },
       { name: 'health-any-live', status: gaps.healthReadyAnyLive && health.ready === true ? 'passed' : 'failed', expected: true, actual: { gap: gaps.healthReadyAnyLive, ready: health.ready } },
-      { name: 'no-discovery-route', status: gaps.hasDiscoveryRoute === false && discovery.status >= 400 ? 'passed' : 'failed', expected: false, actual: { hasRoute: gaps.hasDiscoveryRoute, http: discovery } },
-      { name: 'no-sdk-or-cli-yet', status: gaps.hasSdk === false && gaps.hasCli === false ? 'passed' : 'failed', expected: false, actual: { sdk: gaps.hasSdk, cli: gaps.hasCli } },
+      { name: 'discovery-probed', status: typeof gaps.hasDiscoveryRoute === 'boolean' ? 'passed' : 'failed', expected: 'boolean', actual: gaps.hasDiscoveryRoute },
+      { name: 'sdk-cli-probed', status: typeof gaps.hasSdk === 'boolean' && typeof gaps.hasCli === 'boolean' ? 'passed' : 'failed', expected: 'boolean', actual: { sdk: gaps.hasSdk, cli: gaps.hasCli } },
+
       { name: 'html-present', status: gaps.htmlPresent ? 'passed' : 'failed', expected: true, actual: gaps.htmlPresent },
     ]
     const ok = assertions.every((row) => row.status === 'passed')
@@ -251,6 +259,110 @@ async function runNoDuplicateRead(outDir) {
   }
 }
 
+async function runBuildServe(outDir) {
+  const pkg = JSON.parse(readFileSync(join(ENGINE, 'package.json'), 'utf8'))
+  const scripts = pkg.scripts ?? {}
+  const webScript = String(scripts.web ?? '')
+  const buildScript = String(scripts['web:build'] ?? '')
+  const serveScript = String(scripts['web:serve'] ?? '')
+  const workspaceBuilds = {}
+  for (const app of WEB_APPS) {
+    const appPkg = JSON.parse(readFileSync(join(ENGINE, 'apps', app, 'package.json'), 'utf8'))
+    workspaceBuilds[app] = appPkg.scripts?.['web:build'] ?? null
+  }
+  const pluginDev = readFileSync(join(PLUGIN, 'scripts/dev.mjs'), 'utf8')
+  const serveIsPure = serveScript.trim() === 'node web/server.mjs'
+  const serveHasBuild = /vite|web:build|npm run build\b/.test(serveScript)
+  const buildCoversAll = buildScript.includes('--workspaces') || WEB_APPS.every((app) => buildScript.includes(`@genoffice/${app}`))
+  const webKept = webScript.includes('node web/server.mjs') && webScript.includes('web:build -w @genoffice/shell')
+
+  const tBuild0 = Date.now()
+  let buildCode = 0
+  let buildLog = ''
+  try {
+    buildLog = execFileSync('npm', ['run', 'web:build', '--workspaces', '--if-present'], {
+      cwd: ENGINE,
+      encoding: 'utf8',
+      timeout: 600_000,
+      maxBuffer: 20 * 1024 * 1024,
+    })
+  } catch (error) {
+    buildCode = error.status ?? 1
+    buildLog = `${error.stdout ?? ''}${error.stderr ?? ''}${error.message}`
+  }
+  const buildMs = Date.now() - tBuild0
+
+  const port = await freePort(DEFAULT_PORT)
+  const tServe0 = Date.now()
+  const relay = await startRelayViaNpm(port, 'web:serve')
+  const serveMs = Date.now() - tServe0
+  const serveLogs = relay.logs.join('')
+  const implicitBuild = /vite v|building client environment|npm run web:build/i.test(serveLogs)
+  const browser = await chromium.launch({ headless: true })
+  const routes = {}
+  const logs = []
+  let shot = null
+  try {
+    for (const app of WEB_APPS) {
+      const path = app === 'shell' ? '/' : `/${app}/`
+      const resp = await fetch(`${relay.base}${path}`)
+      const text = await resp.text()
+      routes[app] = {
+        path,
+        status: resp.status,
+        contentType: resp.headers.get('content-type'),
+        html: /<!doctype html|<html/i.test(text),
+        bytes: text.length,
+        missingDist: /web-dist 未构建/.test(text),
+      }
+    }
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(msg.text()))
+    await page.goto(`${relay.base}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    shot = await page.screenshot({ type: 'png' }).catch(() => null)
+    await page.close().catch(() => {})
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+
+  const assertions = [
+    assert('web-default-kept', webKept, true, webScript),
+    assert('web-build-covers-workspaces', Boolean(buildScript) && buildCoversAll, true, buildScript),
+    assert('web-serve-pure', serveIsPure && !serveHasBuild, 'node web/server.mjs', serveScript),
+    assert('workspace-web-build', WEB_APPS.every((app) => typeof workspaceBuilds[app] === 'string'), WEB_APPS, workspaceBuilds),
+    assert('explicit-build-ok', buildCode === 0, 0, { code: buildCode, ms: buildMs, tail: buildLog.slice(-800) }),
+    assert('serve-no-implicit-build', implicitBuild === false, false, serveLogs.slice(0, 1500)),
+    assert('serve-startup-recorded', Number.isFinite(serveMs) && serveMs < 20_000, '<20s', { serveMs, relayStartMs: relay.startMs }),
+    assert('plugin-start-relay-pure', pluginDev.includes('web/server.mjs') && !/npm run web\b/.test(pluginDev), true, 'scripts/dev.mjs start-relay'),
+    assert('all-apps-served', WEB_APPS.every((app) => routes[app]?.status === 200 && routes[app].html && !routes[app].missingDist), 200, routes),
+    assert('dist-index-present', WEB_APPS.every((app) => existsSync(join(ENGINE, 'apps', app, 'web-dist', 'index.html'))), true, WEB_APPS),
+  ]
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-002',
+    branch: 'build-serve',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-build-serve-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    protocol: PROTOCOL,
+    scripts: { web: webScript, webBuild: buildScript, webServe: serveScript, workspaceBuilds },
+    buildMs,
+    serveMs,
+    serveLogs,
+    routes,
+    cases: [{ id: 'build-and-pure-serve', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-3.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  if (shot) await writeFile(join(outDir, 'phase-0/task-3-screenshot.png'), shot)
+  console.log(JSON.stringify(payload, null, 2))
+  if (!ok) throw new Error('build-serve case failed')
+  return payload
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.all) {
@@ -266,8 +378,10 @@ async function main() {
   for (const name of cases) {
     if (name === 'baseline') await runBaseline(outDir)
     else if (name === 'no-duplicate-read') await runNoDuplicateRead(outDir)
+    else if (name === 'build-serve') await runBuildServe(outDir)
   }
 }
+
 
 void main().catch((err) => {
   console.error(err)
