@@ -8,7 +8,7 @@
  *   - open via URL  `/sheets/?open=path:<abs>` → relay `/api/file` bytes →
  *     browser xlsx parse (web-xlsx.ts) → `WorkbookFile` (lazy model intact)
  *   - home `/webdoc/...` targets reuse the shared IndexedDB store (no sidecar spawn)
- *   - range/formula reads → in-memory parsed store (sidecar stays on relay / Task 4)
+ *   - range/formula reads → in-memory parsed store (shared formulas + names/hidden/tables/filters/protection)
  *   - save → the renderer's edit journal applied to the ORIGINAL archive via
  *     the gateway's pure-JSZip pipeline (only touched entries change — BR-009)
  *   - theme / language / AI settings → localStorage

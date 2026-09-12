@@ -20,7 +20,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
 function parseArgs(argv) {
@@ -678,6 +678,327 @@ async function runEntryMatrix(outDir) {
 }
 
 
+
+async function buildSemanticsFixture() {
+  const zip = new JSZip()
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`)
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`)
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Data" sheetId="1" r:id="rId1"/>
+    <sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/>
+    <sheet name="Locked" sheetId="3" r:id="rId3"/>
+  </sheets>
+  <definedNames>
+    <definedName name="Revenue">Data!$A$2</definedName>
+  </definedNames>
+</workbook>`)
+  zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`)
+  zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:G3"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>Item</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>Rel</t></is></c>
+      <c r="C1" t="inlineStr"><is><t>Mix</t></is></c>
+      <c r="D1" t="inlineStr"><is><t>Abs</t></is></c>
+      <c r="E1" t="inlineStr"><is><t>Col</t></is></c>
+      <c r="F1" t="inlineStr"><is><t>ColF</t></is></c>
+      <c r="G1" t="inlineStr"><is><t>Name</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2"><v>10</v></c>
+      <c r="B2"><f t="shared" ref="B2:B3" si="0">A2*2</f><v>20</v></c>
+      <c r="C2"><f t="shared" ref="C2:C3" si="1">$A2+B$2</f><v>30</v></c>
+      <c r="D2"><f t="shared" ref="D2:D3" si="2">$A$2+A2</f><v>20</v></c>
+      <c r="E2"><f t="shared" ref="E2:F2" si="3">A2</f><v>10</v></c>
+      <c r="F2"><f t="shared" si="3"/><v>20</v></c>
+      <c r="G2" t="inlineStr"><is><t>Ada</t></is></c>
+    </row>
+    <row r="3">
+      <c r="A3"><v>20</v></c>
+      <c r="B3"><f t="shared" si="0"/><v>40</v></c>
+      <c r="C3"><f t="shared" si="1"/><v>50</v></c>
+      <c r="D3"><f t="shared" si="2"/><v>30</v></c>
+      <c r="G3" t="inlineStr"><is><t>Bob</t></is></c>
+    </row>
+  </sheetData>
+  <autoFilter ref="G1:G3"/>
+  <tableParts count="1"><tablePart r:id="rId1"/></tableParts>
+</worksheet>`)
+  zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Target="../tables/table1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table"/>
+</Relationships>`)
+  zip.file('xl/tables/table1.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="TableSales" displayName="TableSales" ref="A1:C3" headerRowCount="1">
+  <autoFilter ref="A1:C3"/>
+  <tableColumns count="3">
+    <tableColumn id="1" name="Item"/>
+    <tableColumn id="2" name="Rel"/>
+    <tableColumn id="3" name="Mix"/>
+  </tableColumns>
+  <tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/>
+</table>`)
+  zip.file('xl/worksheets/sheet2.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1"/>
+  <sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>HiddenKeep</t></is></c></row></sheetData>
+</worksheet>`)
+  zip.file('xl/worksheets/sheet3.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1"/>
+  <sheetProtection password="CA3E" sheet="1" objects="1" scenarios="1"/>
+  <sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>LockedKeep</t></is></c></row></sheetData>
+</worksheet>`)
+  zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders>
+  <cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf/></cellXfs>
+</styleSheet>`)
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}
+
+async function inspectWorkbookFeatures(bytes) {
+  const zip = await JSZip.loadAsync(bytes)
+  const workbook = await zip.file('xl/workbook.xml')?.async('string') ?? ''
+  const sheet1 = await zip.file('xl/worksheets/sheet1.xml')?.async('string') ?? ''
+  const sheet3 = await zip.file('xl/worksheets/sheet3.xml')?.async('string') ?? ''
+  const table = await zip.file('xl/tables/table1.xml')?.async('string') ?? ''
+  let keepMarker = false
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir) continue
+    const part = await entry.async('string')
+    if (part.includes('WfcSemanticsKeep')) { keepMarker = true; break }
+  }
+  return {
+    revenue: workbook.includes('name="Revenue"') && workbook.includes('Data!$A$2'),
+    hidden: /name="Hidden"[^>]*state="hidden"/.test(workbook),
+    shared: sheet1.includes('t="shared"') && sheet1.includes('si="0"'),
+    autoFilter: sheet1.includes('autoFilter') && sheet1.includes('G1:G3'),
+    table: table.includes('TableSales') && table.includes('A1:C3'),
+    protection: sheet3.includes('sheetProtection') && /password=|hashValue=/.test(sheet3),
+    keepMarker,
+  }
+}
+
+async function runSheetsSemantics(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-sheets-semantics')
+  await mkdir(workDir, { recursive: true })
+  const file = join(workDir, 'sheets-semantics.xlsx')
+  const bytes = await buildSemanticsFixture()
+  await writeFile(file, bytes)
+  const beforeSha = sha256(await readFile(file))
+  const beforeFeat = await inspectWorkbookFeatures(await readFile(file))
+  const missing = join(workDir, 'missing-semantics.xlsx')
+  const corrupt = join(workDir, 'corrupt-semantics.xlsx')
+  await writeFile(corrupt, 'not-a-zip')
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[sheets] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[sheets] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, file)
+    const context = await contextApp(relay.base, file)
+    const contextText = toolOutput(context)
+    const dataId = contextText.match(/Data \(id=([^,\s)]+)/)?.[1] || 'sheet-1'
+    const hiddenId = contextText.match(/Hidden \(id=([^,\s)]+)/)?.[1] || 'sheet-2'
+    const lockedId = contextText.match(/Locked \(id=([^,\s)]+)/)?.[1] || 'sheet-3'
+
+    const formulas = await callTool(relay.base, file, 'read_cells', {
+      addresses: ['B2', 'B3', 'C2', 'C3', 'D2', 'D3', 'E2', 'F2'],
+      sheetId: dataId,
+    })
+    const formulaText = toolOutput(formulas)
+    const dataFeatures = await callTool(relay.base, file, 'read_sheet_features', { sheetId: dataId })
+    const hiddenFeatures = await callTool(relay.base, file, 'read_sheet_features', { sheetId: hiddenId })
+    const lockedFeatures = await callTool(relay.base, file, 'read_sheet_features', { sheetId: lockedId })
+    const dataFeatText = toolOutput(dataFeatures)
+    const hiddenFeatText = toolOutput(hiddenFeatures)
+    const lockedFeatText = toolOutput(lockedFeatures)
+
+    const protectFail = await callTool(relay.base, file, 'propose_operations', {
+      summary: 'unprotect locked sheet',
+      operations: [{ op: 'protect_sheet', sheetId: lockedId, protected: false }],
+    })
+    const afterProtectSha = sha256(await readFile(file))
+    const protectFailed = toolOk(protectFail) === false
+    const protectMsg = toolOutput(protectFail)
+
+    const lockedWrite = await callTool(relay.base, file, 'propose_operations', {
+      summary: 'write locked cell',
+      operations: [{ op: 'set_cell', sheetId: lockedId, address: 'A1', value: 'ShouldNotLand' }],
+    })
+    const afterLockedWriteSha = sha256(await readFile(file))
+
+    const edited = await callTool(relay.base, file, 'propose_operations', {
+      summary: 'write unrelated keep cell',
+      operations: [{ op: 'set_cell', sheetId: dataId, address: 'Z1', value: 'WfcSemanticsKeep' }],
+    })
+    const afterEditSha = sha256(await readFile(file))
+    const saved = await saveApp(relay.base, file)
+    const savedSha = sha256(await readFile(file))
+    const savedFeat = await inspectWorkbookFeatures(await readFile(file))
+
+    await page.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const reopened = await waitReady(relay.base, file)
+    const reContext = await contextApp(relay.base, file)
+    const reDataId = toolOutput(reContext).match(/Data \(id=([^,\s)]+)/)?.[1] || dataId
+    const reHiddenId = toolOutput(reContext).match(/Hidden \(id=([^,\s)]+)/)?.[1] || hiddenId
+    const reLockedId = toolOutput(reContext).match(/Locked \(id=([^,\s)]+)/)?.[1] || lockedId
+    const reFormulas = await callTool(relay.base, file, 'read_cells', {
+      addresses: ['B2', 'B3', 'C2', 'C3', 'D2', 'D3', 'E2', 'F2', 'Z1'],
+      sheetId: reDataId,
+    })
+    const reFormulaText = toolOutput(reFormulas)
+    const reDataFeat = toolOutput(await callTool(relay.base, file, 'read_sheet_features', { sheetId: reDataId }))
+    const reHiddenFeat = toolOutput(await callTool(relay.base, file, 'read_sheet_features', { sheetId: reHiddenId }))
+    const reLockedFeat = toolOutput(await callTool(relay.base, file, 'read_sheet_features', { sheetId: reLockedId }))
+    shot = await page.screenshot({ type: 'png' })
+    await page.close()
+
+    const missPage = await browser.newPage()
+    await missPage.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${missing}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const missingReady = await waitReady(relay.base, missing)
+    await missPage.close()
+    const badPage = await browser.newPage()
+    await badPage.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${corrupt}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const corruptReady = await waitReady(relay.base, corrupt)
+    await badPage.close()
+
+    const successAssertions = [
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened.readiness),
+      assertion('fixture-features-present', beforeFeat.revenue && beforeFeat.hidden && beforeFeat.shared && beforeFeat.autoFilter && beforeFeat.table && beforeFeat.protection, true, beforeFeat),
+      assertion('shared-relative-master', /B2:.*A2\*2/.test(formulaText), 'B2 =A2*2', formulaText),
+      assertion('shared-relative-follower', /B3:.*A3\*2/.test(formulaText), 'B3 =A3*2', formulaText),
+      assertion('shared-mixed-master', /C2:.*\$A2\+B\$2/.test(formulaText), 'C2 =$A2+B$2', formulaText),
+      assertion('shared-mixed-follower', /C3:.*\$A3\+B\$2/.test(formulaText), 'C3 =$A3+B$2', formulaText),
+      assertion('shared-abs-follower', /D3:.*\$A\$2\+A3/.test(formulaText), 'D3 =$A$2+A3', formulaText),
+      assertion('shared-col-follower', /F2:.*B2/.test(formulaText), 'F2 =B2', formulaText),
+      assertion('defined-name-revenue', /Revenue/.test(dataFeatText) && /Data!\$A\$2/.test(dataFeatText), 'Revenue=Data!$A$2', dataFeatText),
+      assertion('autofilter-present', /AutoFilter:.*G1:G3/i.test(dataFeatText), 'G1:G3', dataFeatText),
+      assertion('hidden-sheet', /hidden/i.test(hiddenFeatText) && /Hidden/.test(contextText), 'hidden', hiddenFeatText),
+      assertion('protected-sheet', /protected/i.test(lockedFeatText), 'protected', lockedFeatText),
+      assertion('unrelated-edit-ok', toolOk(edited), true, edited),
+      assertion('disk-unchanged-until-save', afterEditSha === beforeSha && afterProtectSha === beforeSha, beforeSha, { afterEditSha, afterProtectSha }),
+      assertion('save-ok', saved.ok === true, true, saved),
+      assertion('disk-changed-after-save', savedSha !== beforeSha, 'changed', { beforeSha, savedSha }),
+      assertion('reopen-ready', reopened.readiness === 'ready', 'ready', reopened.readiness),
+      assertion('reopen-keep-edit', /WfcSemanticsKeep/.test(reFormulaText) || savedFeat.keepMarker, 'WfcSemanticsKeep', reFormulaText.slice(0, 400)),
+      assertion('reopen-shared-follower', /B3:.*A3\*2/.test(reFormulaText), 'B3 =A3*2', reFormulaText),
+      assertion('reopen-name', /Revenue/.test(reDataFeat), 'Revenue', reDataFeat),
+      assertion('reopen-filter', /AutoFilter:.*G1:G3/i.test(reDataFeat), 'G1:G3', reDataFeat),
+      assertion('reopen-hidden', /hidden/i.test(reHiddenFeat), 'hidden', reHiddenFeat),
+      assertion('reopen-protected', /protected/i.test(reLockedFeat), 'protected', reLockedFeat),
+      assertion('reopen-ooxml-features', savedFeat.revenue && savedFeat.hidden && savedFeat.autoFilter && savedFeat.table && savedFeat.protection, true, savedFeat),
+    ]
+    const cancelAssertions = [
+      assertion('unprotect-password-rejected', protectFailed, true, { protectFailed, protectMsg }),
+      assertion('unprotect-does-not-write-disk', afterProtectSha === beforeSha, beforeSha, afterProtectSha),
+      assertion('locked-write-does-not-write-disk', afterLockedWriteSha === beforeSha, beforeSha, afterLockedWriteSha),
+    ]
+    const failAssertions = [
+      assertion('missing-file-error', missingReady.readiness === 'error', 'error', missingReady),
+      assertion('corrupt-file-error', corruptReady.readiness === 'error', 'error', corruptReady),
+    ]
+
+    const success = await writeEvidence(outDir, 'UF-002', 'success', {
+      cases: [{
+        id: 'sheets-semantics-read-save',
+        status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: successAssertions,
+      }],
+      console: logs.join('\n'),
+      network: { events: networkEvents.slice(0, 80), count: networkEvents.length },
+      screenshot: shot,
+    })
+    const failure1 = await writeEvidence(outDir, 'UF-002', 'failure-1', {
+      cases: [{
+        id: 'sheets-semantics-protected-write',
+        status: cancelAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: cancelAssertions,
+      }],
+      console: `${logs.join('\n')}\nprotect=${JSON.stringify(protectFail)}\nlockedWrite=${JSON.stringify(lockedWrite)}\n`,
+      network: { events: [protectFail, lockedWrite], count: 2 },
+      screenshot: shot,
+    })
+    const failure2 = await writeEvidence(outDir, 'UF-002', 'failure-2', {
+      cases: [{
+        id: 'sheets-semantics-missing-or-corrupt',
+        status: failAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: failAssertions,
+      }],
+      console: logs.join('\n'),
+      network: { events: [missingReady, corruptReady], count: 2 },
+      screenshot: shot,
+    })
+    const ok = [success, failure1, failure2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-002',
+      branch: 'sheets-semantics',
+      status: ok ? 'passed' : 'failed',
+      results: { success, failure1, failure2 },
+      formulaText,
+      dataFeatText,
+      hiddenFeatText,
+      lockedFeatText,
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-4.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (!ok) throw new Error('sheets-semantics case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -695,6 +1016,9 @@ async function main() {
   }
   if (args.caseName === 'entry-matrix' || args.all) {
     await runEntryMatrix(evidenceRoot)
+  }
+  if (args.caseName === 'sheets-semantics' || args.all) {
+    await runSheetsSemantics(evidenceRoot)
   }
 }
 

@@ -37,6 +37,7 @@ import {
 import type { CellEdit, SheetStructuralOps } from '../gateway/xlsx-gateway'
 import type { SheetEditPlan } from '../gateway/xlsx-sheets'
 import { columnIndex } from '../domain/cell-address'
+import { translateSharedFormula } from '../gateway/xlsx-structure'
 
 /** One record of workbookRangeResultSchema.cells (no exported type name). */
 interface WebRangeCell {
@@ -126,6 +127,16 @@ export interface WebSheetStore {
   showGridLines: boolean
   showFormulas: boolean
   worksheetPath: string
+  autoFilter: { startRow: number; endRow: number; startColumn: number; endColumn: number } | null
+  sheetProtection: { protected: boolean; hasPassword: boolean } | null
+  tables: Array<{
+    range: { startRow: number; endRow: number; startColumn: number; endColumn: number }
+    headerRowCount: number
+    showRowStripes: boolean
+    showColumnStripes: boolean
+    name?: string
+    columns?: string[]
+  }>
 }
 
 export interface ParsedWorkbook {
@@ -134,10 +145,9 @@ export interface ParsedWorkbook {
   styles: WorkbookCellStyle[]
   entryCount: number
   sha256: string
+  definedNames: Array<{ name: string; formula: string; sheetIndex?: number }>
 }
 
-const DEFAULT_ROW_COUNT = 1048576
-const DEFAULT_COLUMN_COUNT = 16384
 const MINIMUM_ROW_COUNT = 100
 const MINIMUM_COLUMN_COUNT = 26
 
@@ -283,8 +293,8 @@ async function parseWorksheet(
   const store: WebSheetStore = {
     id,
     name,
-    rowCount: DEFAULT_ROW_COUNT,
-    columnCount: DEFAULT_COLUMN_COUNT,
+    rowCount: 0,
+    columnCount: 0,
     cells: new Map(),
     merges: [],
     columnWidths: [],
@@ -296,6 +306,9 @@ async function parseWorksheet(
     showGridLines: true,
     showFormulas: false,
     worksheetPath,
+    autoFilter: null,
+    sheetProtection: null,
+    tables: [],
   }
   // <dimension ref="A1:C10"/> — the declared used range (absent in some files)
   const dimension = xml.match(/<dimension\b[^>]*\/>/)
@@ -370,6 +383,8 @@ async function parseWorksheet(
     })
   }
   // cells
+  const sharedMasters = new Map<string, { formula: string; row: number; column: number }>()
+  const sharedFollowers: Array<{ si: string; row: number; column: number; cell: WebSheetCell }> = []
   const cellPattern = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g
   let match: RegExpExecArray | null
   while ((match = cellPattern.exec(xml)) !== null) {
@@ -381,7 +396,7 @@ async function parseWorksheet(
     const body = match[2] ?? ''
     const styleIndexRaw = readXmlAttribute(attributes, 's')
     const styleIndex = styleIndexRaw === null ? undefined : Number(styleIndexRaw)
-    const formulaMatch = /<f(?:\s[^>]*[^/>])?>([\s\S]*?)<\/f>/.exec(body)
+    const formulaMatch = /<f\b([^>]*?)(?:\/>|>([\s\S]*?)<\/f>)/.exec(body)
     const valueMatch = /<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/.exec(body)
     let value: string | number | boolean | null = null
     const type = readXmlAttribute(attributes, 't')
@@ -406,12 +421,57 @@ async function parseWorksheet(
     }
     const cell: WebSheetCell = { value }
     if (formulaMatch) {
-      cell.formula = `=${decodeXmlText(formulaMatch[1] ?? '')}`
+      const fAttrs = formulaMatch[1] ?? ''
+      const fBody = decodeXmlText(formulaMatch[2] ?? '')
+      const fType = readXmlAttribute(fAttrs, 't')
+      const si = readXmlAttribute(fAttrs, 'si')
+      if (fType === 'shared' && si !== null) {
+        if (fBody) {
+          cell.formula = fBody.startsWith('=') ? fBody : `=${fBody}`
+          sharedMasters.set(si, { formula: cell.formula, row, column })
+        } else {
+          sharedFollowers.push({ si, row, column, cell })
+        }
+      } else if (fBody) {
+        cell.formula = fBody.startsWith('=') ? fBody : `=${fBody}`
+      }
     }
     if (styleIndex !== undefined) cell.styleIndex = styleIndex
     store.cells.set(`${row}:${column}`, cell)
     if (row + 1 > store.rowCount) store.rowCount = row + 1
     if (column + 1 > store.columnCount) store.columnCount = column + 1
+  }
+  for (const follower of sharedFollowers) {
+    const master = sharedMasters.get(follower.si)
+    if (!master) continue
+    const shifted = translateSharedFormula(
+      master.formula.startsWith('=') ? master.formula.slice(1) : master.formula,
+      follower.row - master.row,
+      follower.column - master.column,
+    )
+    if (!shifted) continue
+    follower.cell.formula = shifted.startsWith('=') ? shifted : `=${shifted}`
+  }
+  const filter = xml.match(/<autoFilter\b[^>]*ref="([^"]+)"/)
+  if (filter?.[1]) {
+    const [from, to] = filter[1].split(':')
+    const a = addressToRowCol(from ?? '')
+    const b = addressToRowCol(to ?? from ?? '')
+    if (a.row >= 0 && a.column >= 0 && b.row >= 0 && b.column >= 0) {
+      store.autoFilter = {
+        startRow: Math.min(a.row, b.row),
+        endRow: Math.max(a.row, b.row),
+        startColumn: Math.min(a.column, b.column),
+        endColumn: Math.max(a.column, b.column),
+      }
+    }
+  }
+  const protection = xml.match(/<sheetProtection\b[^>]*\/?>/)
+  if (protection) {
+    store.sheetProtection = {
+      protected: true,
+      hasPassword: /password=|hashValue=/.test(protection[0]),
+    }
   }
   store.rowCount = Math.max(MINIMUM_ROW_COUNT, store.rowCount)
   store.columnCount = Math.max(MINIMUM_COLUMN_COUNT, store.columnCount)
@@ -472,15 +532,17 @@ export async function parseXlsxWorkbook(
     const path = rels.get(rid)
     if (!path) continue
     const id = `sheet-${sheetNumber}`
-    sheets.push(
-      await parseWorksheet(
-        zip,
-        path,
-        id,
-        decodeXmlText(sheetName),
-        sharedStrings,
-      ),
+    const sheet = await parseWorksheet(
+      zip,
+      path,
+      id,
+      decodeXmlText(sheetName),
+      sharedStrings,
     )
+    const state = readXmlAttribute(attributes, 'state')
+    sheet.hidden = state === 'hidden' || state === 'veryHidden'
+    sheet.tables = await parseWorksheetTables(zip, path)
+    sheets.push(sheet)
   }
   if (sheets.length === 0) throw new Error('Workbook contains no readable worksheets.')
   const sha256 = await sha256Hex(bytes)
@@ -509,7 +571,7 @@ export async function parseXlsxWorkbook(
       tabColor: sheet.tabColor,
       showGridLines: sheet.showGridLines,
       ...(sheet.showFormulas ? { showFormulas: true } : {}),
-      tables: [],
+      tables: sheet.tables,
       comments: [],
       pivotRanges: [],
       pivotTables: [],
@@ -520,10 +582,82 @@ export async function parseXlsxWorkbook(
     styles,
     dxfStyles: [],
     visuals: [],
-    definedNames: [],
+    definedNames: parseDefinedNames(workbookXml),
     readOnly: false,
   }
-  return { file, store: { name, sheets, styles, entryCount: file.entryCount, sha256 } }
+  return { file, store: { name, sheets, styles, entryCount: file.entryCount, sha256, definedNames: file.definedNames } }
+}
+
+function parseDefinedNames(workbookXml: string): Array<{ name: string; formula: string; sheetIndex?: number }> {
+  const names: Array<{ name: string; formula: string; sheetIndex?: number }> = []
+  const block = workbookXml.match(/<definedNames>([\s\S]*?)<\/definedNames>/)?.[1] ?? ''
+  for (const m of block.matchAll(/<definedName\b([^>]*)>([\s\S]*?)<\/definedName>/g)) {
+    const name = readXmlAttribute(m[1] ?? '', 'name')
+    const formula = decodeXmlText(m[2] ?? '').trim()
+    if (!name || !formula) continue
+    const local = readXmlAttribute(m[1] ?? '', 'localSheetId')
+    names.push({
+      name,
+      formula,
+      ...(local === null ? {} : { sheetIndex: Number(local) }),
+    })
+  }
+  return names
+}
+
+async function parseWorksheetTables(
+  zip: JSZip,
+  worksheetPath: string,
+): Promise<WebSheetStore['tables']> {
+  const relsPath = worksheetPath.replace(/^(.*)\/([^/]+)$/, '$1/_rels/$2.rels')
+  const relsXml = await zip.file(relsPath)?.async('text')
+  if (!relsXml) return []
+  const tables: WebSheetStore['tables'] = []
+  for (const m of relsXml.matchAll(/<Relationship\b[^>]*\/?>/g)) {
+    const type = readXmlAttribute(m[0], 'Type') ?? ''
+    if (!type.includes('/table')) continue
+    const target = readXmlAttribute(m[0], 'Target')
+    if (!target) continue
+    const part = resolveZipTarget(worksheetPath, target)
+    const xml = await zip.file(part)?.async('text')
+    if (!xml) continue
+    const ref = xml.match(/<table\b[^>]*ref="([^"]+)"/)?.[1]
+    if (!ref) continue
+    const [from, to] = ref.split(':')
+    const a = addressToRowCol(from ?? '')
+    const b = addressToRowCol(to ?? from ?? '')
+    if (a.row < 0 || a.column < 0) continue
+    const displayName = xml.match(/<table\b[^>]*displayName="([^"]+)"/)?.[1]
+    const name = displayName ?? xml.match(/<table\b[^>]*name="([^"]+)"/)?.[1]
+    const headerRowCount = Number(xml.match(/headerRowCount="(\d+)"/)?.[1] ?? '1')
+    const columns = [...xml.matchAll(/<tableColumn\b[^>]*name="([^"]+)"/g)].map((col) => decodeXmlText(col[1] ?? ''))
+    tables.push({
+      range: {
+        startRow: Math.min(a.row, b.row),
+        endRow: Math.max(a.row, b.row),
+        startColumn: Math.min(a.column, b.column),
+        endColumn: Math.max(a.column, b.column),
+      },
+      headerRowCount,
+      showRowStripes: /showRowStripes="1"/.test(xml),
+      showColumnStripes: /showColumnStripes="1"/.test(xml),
+      ...(name ? { name: decodeXmlText(name) } : {}),
+      ...(columns.length > 0 ? { columns } : {}),
+    })
+  }
+  return tables
+}
+
+
+function resolveZipTarget(fromPath: string, target: string): string {
+  if (target.startsWith('/')) return target.replace(/^\/+/, '')
+  const parts = fromPath.split('/').slice(0, -1)
+  for (const part of target.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return parts.join('/')
 }
 
 // ── range / formula readers (renderer lazy model) ───────────────────────
@@ -565,10 +699,10 @@ export function buildRangeResult(
     merges,
     hyperlinks: [],
     conditionalRules: [],
-    autoFilter: null,
+    autoFilter: sheet?.autoFilter ?? null,
     autoFilterColumns: [],
     dataValidations: [],
-    sheetProtection: null,
+    sheetProtection: sheet?.sheetProtection ?? null,
     rowBreaks: [],
     colBreaks: [],
     pageSetup: null,
