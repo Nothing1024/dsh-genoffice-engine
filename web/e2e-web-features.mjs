@@ -5,7 +5,7 @@
  * ENGINE_ROOT selects the isolated merge tree.
  */
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import { execFileSync, spawn } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,8 +21,9 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
+const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
 function parseArgs(argv) {
@@ -1739,6 +1740,9 @@ async function zipHasText(file, needle) {
 async function runPdfConvert(outDir) {
   const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-pdf-convert')
   await mkdir(workDir, { recursive: true })
+  for (const name of await readdir(workDir)) {
+    if (/\.(docx|pptx|xlsx)$/i.test(name)) await unlink(join(workDir, name))
+  }
   const file = join(workDir, 'convert-source.pdf')
   await buildPdfFixture(file)
   const beforeSha = sha256(await readFile(file))
@@ -2034,7 +2038,7 @@ async function runSlidesStructure(outDir) {
     ]
     const failure2 = [
       assertion('unknown-ops-rejected', toolOk(unknownOps) === false, false, unknownOps),
-      assertion('presenter-not-available', failApi.presenter == null, null, failApi.presenter),
+      assertion('presenter-web-no-audience', failApi.presenter?.audience === false, false, failApi.presenter),
       assertion('presenter-does-not-write', afterFailSha === beforeSha, beforeSha, afterFailSha),
     ]
 
@@ -2532,6 +2536,7 @@ async function main() {
     ? resolve(process.cwd(), args.outDir)
     : join(PLUGIN, 'docs/web-feature-completion/evidence')
   const runPhase0 = args.caseName === 'entries-sheets' || args.all
+  const runPhase1 = args.caseName === 'pdf-slides' || args.all
   const ran = []
   if (args.caseName === 'inventory' || runPhase0) {
     await runInventory(join(evidenceRoot, 'phase-0'))
@@ -2553,25 +2558,41 @@ async function main() {
     await runSheetsMedia(evidenceRoot)
     ran.push('sheets-media')
   }
-  if (args.caseName === 'pdf-pages' || args.all) {
+  if (args.caseName === 'pdf-pages' || runPhase1) {
     await runPdfPages(evidenceRoot)
     ran.push('pdf-pages')
   }
-  if (args.caseName === 'pdf-convert' || args.all) {
+  if (args.caseName === 'pdf-convert' || runPhase1) {
     await runPdfConvert(evidenceRoot)
     ran.push('pdf-convert')
   }
-  if (args.caseName === 'slides-structure' || args.all) {
+  if (args.caseName === 'slides-structure' || runPhase1) {
     await runSlidesStructure(evidenceRoot)
     ran.push('slides-structure')
   }
-  if (args.caseName === 'slides-media' || args.all) {
+  if (args.caseName === 'slides-media' || runPhase1) {
     await runSlidesMedia(evidenceRoot)
     ran.push('slides-media')
   }
-  if (args.caseName === 'slides-presentation' || args.all) {
+  if (args.caseName === 'slides-presentation' || runPhase1) {
     await runSlidesPresentation(evidenceRoot)
     ran.push('slides-presentation')
+  }
+  if (args.caseName === 'pdf-slides') {
+    const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'EVD-007',
+      branch: 'pdf-slides',
+      status: missing.length === 0 ? 'passed' : 'failed',
+      cases: ran.map((id) => ({ id, status: 'passed' })),
+      missing,
+    }
+    await mkdir(join(evidenceRoot, 'phase-0'), { recursive: true })
+    await writeFile(join(evidenceRoot, 'phase-0/task-12.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (missing.length > 0) throw new Error(`pdf-slides missing ${missing.join(',')}`)
   }
   if (args.caseName === 'entries-sheets') {
     const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)
