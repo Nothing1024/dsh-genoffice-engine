@@ -74,6 +74,43 @@ export class WebBuffer extends Uint8Array {
   toJSON(): { type: 'Buffer'; data: number[] } {
     return { type: 'Buffer', data: [...this] }
   }
+
+  writeUInt32BE(value: number, offset = 0): number {
+    this[offset] = (value >>> 24) & 0xff
+    this[offset + 1] = (value >>> 16) & 0xff
+    this[offset + 2] = (value >>> 8) & 0xff
+    this[offset + 3] = value & 0xff
+    return offset + 4
+  }
+
+  writeUInt32LE(value: number, offset = 0): number {
+    this[offset] = value & 0xff
+    this[offset + 1] = (value >>> 8) & 0xff
+    this[offset + 2] = (value >>> 16) & 0xff
+    this[offset + 3] = (value >>> 24) & 0xff
+    return offset + 4
+  }
+
+  writeUInt16LE(value: number, offset = 0): number {
+    this[offset] = value & 0xff
+    this[offset + 1] = (value >>> 8) & 0xff
+    return offset + 2
+  }
+
+  write(str: string, offsetOrEnc?: unknown, lengthOrEnc?: unknown, encoding?: string): number {
+    let offset = 0
+    let enc = 'utf8'
+    if (typeof offsetOrEnc === 'string') enc = offsetOrEnc
+    else if (typeof offsetOrEnc === 'number') {
+      offset = offsetOrEnc
+      if (typeof lengthOrEnc === 'string') enc = lengthOrEnc
+      else if (typeof encoding === 'string') enc = encoding
+    }
+    const bytes = encodeString(str, enc === 'ascii' ? 'utf8' : enc)
+    const max = typeof lengthOrEnc === 'number' ? lengthOrEnc : bytes.length
+    this.set(bytes.subarray(0, max), offset)
+    return Math.min(bytes.length, max)
+  }
 }
 
 function encodeString(value: string, encoding: string): Uint8Array {
@@ -231,8 +268,59 @@ export const dirname = (p: string): string => p.replace(/[\\/][^\\/]*$/, '')
 export const join = (...parts: string[]): string => parts.join('/')
 export const resolve = (p: string): string => p
 export const tmpdir = (): string => '/tmp'
-export const deflateSync = (): never => nodeOnly('zlib.deflateSync')
-export const deflateRawSync = (): never => nodeOnly('zlib.deflateRawSync')
+function adler32(bytes: Uint8Array): number {
+  let a = 1
+  let b = 0
+  for (let i = 0; i < bytes.length; i++) {
+    a = (a + bytes[i]!) % 65521
+    b = (b + a) % 65521
+  }
+  return ((b << 16) | a) >>> 0
+}
+
+function asDeflateBytes(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+  }
+  if (typeof value === 'string') return encodeString(value, 'utf8')
+  throw new Error('deflateSync: unsupported input')
+}
+
+/** Stored-block zlib/raw-deflate: enough for PNG IDAT poster frames in addMedia. */
+function deflateStored(input: Uint8Array, raw: boolean): WebBuffer {
+  const blocks: Uint8Array[] = []
+  if (!raw) blocks.push(new Uint8Array([0x78, 0x01]))
+  let offset = 0
+  do {
+    const len = Math.min(65535, input.length - offset)
+    const block = new Uint8Array(5 + len)
+    block[0] = offset + len >= input.length ? 1 : 0
+    block[1] = len & 0xff
+    block[2] = (len >>> 8) & 0xff
+    const nlen = ~len & 0xffff
+    block[3] = nlen & 0xff
+    block[4] = (nlen >>> 8) & 0xff
+    if (len) block.set(input.subarray(offset, offset + len), 5)
+    blocks.push(block)
+    offset += len
+  } while (offset < input.length)
+  if (!raw) {
+    const sum = adler32(input)
+    blocks.push(
+      new Uint8Array([(sum >>> 24) & 0xff, (sum >>> 16) & 0xff, (sum >>> 8) & 0xff, sum & 0xff]),
+    )
+  }
+  return WebBuffer.concat(blocks)
+}
+
+export function deflateSync(value: unknown): WebBuffer {
+  return deflateStored(asDeflateBytes(value), false)
+}
+export function deflateRawSync(value: unknown): WebBuffer {
+  return deflateStored(asDeflateBytes(value), true)
+}
 export const randomUUID = (): string => crypto.randomUUID()
 
 export const fsPromisesShim = { open, readFile, rename, rm, writeFile, mkdir, mkdtemp }

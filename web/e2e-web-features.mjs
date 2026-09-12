@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
@@ -2075,6 +2075,248 @@ async function runSlidesStructure(outDir) {
   }
 }
 
+
+function tinyWav() {
+  const samples = 441
+  const dataSize = samples * 2
+  const buf = Buffer.alloc(44 + dataSize)
+  buf.write('RIFF', 0)
+  buf.writeUInt32LE(36 + dataSize, 4)
+  buf.write('WAVE', 8)
+  buf.write('fmt ', 12)
+  buf.writeUInt32LE(16, 16)
+  buf.writeUInt16LE(1, 20)
+  buf.writeUInt16LE(1, 22)
+  buf.writeUInt32LE(44100, 24)
+  buf.writeUInt32LE(88200, 28)
+  buf.writeUInt16LE(2, 32)
+  buf.writeUInt16LE(16, 34)
+  buf.write('data', 36)
+  buf.writeUInt32LE(dataSize, 40)
+  return buf
+}
+
+const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+async function runSlidesMedia(outDir) {
+  const fixture = join(ENGINE, 'fixtures/generated/sample.pptx')
+  if (!existsSync(fixture)) throw new Error(`missing slides fixture ${fixture}`)
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-slides-media')
+  await mkdir(workDir, { recursive: true })
+  const file = join(workDir, 'media-source.pptx')
+  await copyFile(fixture, file)
+  const exportDir = join(workDir, `export-images-${Date.now()}`)
+  await mkdir(exportDir, { recursive: true })
+  const beforeSha = sha256(await readFile(file))
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[slides] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[slides] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, file, 90_000)
+    const wavB64 = tinyWav().toString('base64')
+
+    const failApi = await page.evaluate(async ({ wavB64, tinyPng }) => {
+      const api = window.slidesApi
+      const badExt = await api.addMediaBytes({
+        slideIndex: 0,
+        kind: 'audio',
+        base64: wavB64,
+        ext: 'exe',
+        fitWidthPx: 960,
+        name: 'bad',
+      })
+      const badLink = await api.setLink({
+        slideIndex: 0,
+        sourceId: 'missing-el',
+        target: { kind: 'url', url: 'https://example.com' },
+      })
+      const badExport = await api.exportImages({ dir: 'relative', baseName: 'x', pngsBase64: [tinyPng] })
+      const badUrl = await api.insertImageUrl({
+        slideIndex: 0,
+        url: 'file:///etc/passwd',
+        xPx: 10,
+        yPx: 10,
+        wPx: 40,
+        hPx: 40,
+        fitWidthPx: 960,
+      })
+      const slides = await api.getRenderSlides()
+      return { badExt, badLink, badExport, badUrl, slideCount: slides?.length ?? 0 }
+    }, { wavB64, tinyPng: TINY_PNG })
+    const afterFailSha = sha256(await readFile(file))
+
+    const menu = await page.evaluate(async ({ wavB64, tinyPng, exportDir }) => {
+      const api = window.slidesApi
+      const media = await api.addMediaBytes({
+        slideIndex: 0,
+        kind: 'audio',
+        base64: wavB64,
+        ext: 'wav',
+        fitWidthPx: 960,
+        name: 'WfcAudio',
+      })
+      const slidesAfterMedia = await api.getRenderSlides()
+      const linkNode = slidesAfterMedia?.[0]?.nodes?.find((n) => {
+        const id = n.durableId || n.sourceId
+        return id && id !== media?.sourceId
+      }) ?? slidesAfterMedia?.[0]?.nodes?.[0]
+      const sourceId = linkNode?.durableId || linkNode?.sourceId
+      const linked = sourceId
+        ? await api.setLink({
+            slideIndex: 0,
+            sourceId,
+            target: { kind: 'url', url: 'https://example.com/wfc-menu' },
+          })
+        : null
+      const got = sourceId ? await api.getLink(0, sourceId) : null
+      const hf = await api.applyHeaderFooter({
+        footer: 'WfcFooter',
+        slideNum: true,
+        date: '2026-01-01',
+        fitWidthPx: 960,
+      })
+      const afterHf = await api.getRenderSlides()
+      const persistNode = afterHf?.[0]?.nodes?.find((n) => n.durableId === sourceId || n.sourceId === sourceId)
+        ?? afterHf?.[0]?.nodes?.find((n) => (n.durableId || n.sourceId) && (n.durableId || n.sourceId) !== media?.sourceId)
+      const persistId = persistNode?.durableId || persistNode?.sourceId || sourceId
+      const exported = await api.exportImages({
+        dir: exportDir,
+        baseName: 'slide',
+        pngsBase64: [tinyPng],
+      })
+      const mediaData = media?.sourceId ? await api.getMediaData(0, media.sourceId) : null
+      return {
+        mediaId: media?.sourceId ?? null,
+        sourceId: persistId,
+        link: persistId ? await api.getLink(0, persistId) : got,
+        hfCount: hf?.length ?? 0,
+        exported,
+        mediaKind: mediaData?.kind ?? null,
+        mediaHasData: Boolean(mediaData?.dataUrl?.startsWith('data:audio')),
+        linked: Boolean(linked),
+      }
+    }, { wavB64, tinyPng: TINY_PNG, exportDir })
+
+    const toolHf = await callSlidesTool(relay.base, file, 'apply_ops', {
+      ops: [{ op: 'applyHeaderFooter', settings: { footer: 'WfcToolFooter', slideNum: true, date: '2026-01-02' } }],
+    })
+    const toolLink = menu.sourceId
+      ? await callSlidesTool(relay.base, file, 'apply_ops', {
+          ops: [{
+            op: 'setLink',
+            target: { slide: 0, el: menu.sourceId },
+            link: { kind: 'url', url: 'https://example.com/wfc-tool' },
+          }],
+        })
+      : { ok: false, error: 'no sourceId' }
+    const undone = await page.evaluate(async () => Boolean(await window.slidesApi.undo()))
+    const redone = await page.evaluate(async () => Boolean(await window.slidesApi.redo()))
+    const saved = await saveSlides(relay.base, file)
+    const savedInspect = await inspectPptx(file)
+    const zip = await JSZip.loadAsync(await readFile(file))
+    const names = Object.keys(zip.files)
+    const hasWav = names.some((name) => /\.wav$/i.test(name))
+    const rels = (await zip.file('ppt/slides/_rels/slide1.xml.rels')?.async('string')) ?? ''
+    const slideXml = (await zip.file('ppt/slides/slide1.xml')?.async('string')) ?? ''
+    const savedSha = sha256(await readFile(file))
+    await page.close()
+
+    const reopenPage = await browser.newPage()
+    await reopenPage.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const reopened = await waitReady(relay.base, file, 90_000)
+    const reopenState = await reopenPage.evaluate(async (sourceId) => {
+      const api = window.slidesApi
+      const hf = await api.getHeaderFooter(0)
+      const link = sourceId ? await api.getLink(0, sourceId) : null
+      const slides = await api.getRenderSlides()
+      return { hf, link, slideCount: slides?.length ?? 0 }
+    }, menu.sourceId)
+    shot = await reopenPage.screenshot({ type: 'png' })
+    await reopenPage.close()
+
+    const exportPath = join(exportDir, 'slide-01.png')
+    const successAssertions = [
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened.readiness),
+      assertion('menu-media', Boolean(menu.mediaId) && menu.mediaHasData, true, menu),
+      assertion('menu-link', menu.link?.kind === 'url' && /wfc-menu/.test(menu.link.url ?? ''), 'wfc-menu', menu.link),
+      assertion('menu-hf', menu.hfCount === 1, 1, menu.hfCount),
+      assertion('menu-export', menu.exported?.ok === true && existsSync(exportPath), true, menu.exported),
+      assertion('tool-hf', toolOk(toolHf), true, toolHf),
+      assertion('tool-link', toolOk(toolLink), true, toolLink),
+      assertion('undo-redo', undone && redone, true, { undone, redone }),
+      assertion('save-ok', saved.ok === true, true, saved),
+      assertion('disk-changed', savedSha !== beforeSha, 'changed', { beforeSha, savedSha }),
+      assertion('persist-wav', hasWav, true, names.filter((n) => n.includes('media'))),
+      assertion('persist-link', /wfc-tool/.test(rels) || /wfc-tool/.test(slideXml), true, rels.slice(0, 400)),
+      assertion('persist-footer', /WfcToolFooter/.test(slideXml), true, slideXml.includes('Wfc')),
+      assertion('reopen-ready', reopened.readiness === 'ready', 'ready', reopened.readiness),
+      assertion('reopen-hf', reopenState.hf?.footer === 'WfcToolFooter', 'WfcToolFooter', reopenState.hf),
+    ]
+    const failure1 = [
+      assertion('bad-ext-rejected', failApi.badExt == null, null, failApi.badExt),
+      assertion('bad-link-rejected', failApi.badLink == null, null, failApi.badLink),
+      assertion('bad-export-rejected', failApi.badExport?.ok === false, false, failApi.badExport),
+      assertion('invalid-keeps-disk', afterFailSha === beforeSha, beforeSha, afterFailSha),
+    ]
+    const failure2 = [
+      assertion('file-url-rejected', failApi.badUrl == null, null, failApi.badUrl),
+      assertion('file-url-keeps-disk', afterFailSha === beforeSha, beforeSha, afterFailSha),
+    ]
+
+    const success = await writeEvidence(outDir, 'UF-004', 'success', {
+      cases: [{ id: 'slides-media-link-hf-export', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+      console: logs.join('\n'),
+      network: { events: networkEvents.slice(0, 80), count: networkEvents.length },
+      screenshot: shot,
+    })
+    const fail1 = await writeEvidence(outDir, 'UF-004', 'failure-1', {
+      cases: [{ id: 'slides-media-invalid-object', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+      console: `${logs.join('\n')}\nfailApi=${JSON.stringify(failApi)}\n`,
+      network: { events: [failApi], count: 1 },
+      screenshot: shot,
+    })
+    const fail2 = await writeEvidence(outDir, 'UF-004', 'failure-2', {
+      cases: [{ id: 'slides-media-illegal-url', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+      console: `${logs.join('\n')}\nbadUrl=${JSON.stringify(failApi.badUrl)}\n`,
+      network: { events: [failApi.badUrl], count: 1 },
+      screenshot: shot,
+    })
+    const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-004',
+      branch: 'slides-media',
+      status: ok ? 'passed' : 'failed',
+      results: { success, failure1: fail1, failure2: fail2, menu, savedInspect, reopenState, hasWav },
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-10.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (ok === false) throw new Error('slides-media case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -2117,6 +2359,10 @@ async function main() {
   if (args.caseName === 'slides-structure' || args.all) {
     await runSlidesStructure(evidenceRoot)
     ran.push('slides-structure')
+  }
+  if (args.caseName === 'slides-media' || args.all) {
+    await runSlidesMedia(evidenceRoot)
+    ran.push('slides-media')
   }
   if (args.caseName === 'entries-sheets') {
     const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)

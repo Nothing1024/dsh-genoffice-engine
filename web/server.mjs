@@ -977,11 +977,13 @@ async function handleApi(req, res, pathname, body, url) {
       return json(res, 413, { ok: false, error: 'file too large' })
     }
     const destExists = existsSync(target)
-    if (destExists && parsed.expectedRevision == null && parsed.expectedMtimeMs == null) {
+    const overwrite = parsed.overwrite === true
+    if (destExists && !overwrite && parsed.expectedRevision == null && parsed.expectedMtimeMs == null) {
       return json(res, 200, { ok: false, error: 'conflict' })
     }
     const written = await writeFileAtomic(target, buf, parsed.expectedMtimeMs, {
       expectedRevision: parsed.expectedRevision,
+      overwrite,
     })
     if (!written.ok) return json(res, 200, written)
     let mtimeMs = null

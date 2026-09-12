@@ -26,8 +26,11 @@ import type {
   AddSmartArtOp,
   AddSlideOp,
   AddBlankSlideOp,
+  AddMediaBytesOp,
   AddTableOp,
   ApplyEditScriptOp,
+  ExportImagesOp,
+  HeaderFooterOp,
   ApplyThemeOp,
   ApplyTxnOp,
   ApplyTxnResult,
@@ -40,6 +43,7 @@ import type {
   RenameSectionOp,
   SetSlideHiddenOp,
   SetSlideLayoutOp,
+  SetLinkOp,
   SetSlideSizeOp,
   DesktopFilesApi,
   EditBackgroundOp,
@@ -105,7 +109,11 @@ import {
   TABLE_STYLE_PRESETS,
   ungroupElement,
   updateConnectorsForMoved,
+  getElementLink,
+  getRunLinks,
+  getSlideLinks,
   getSections,
+  readHeaderFooter,
   reparseDeck,
   listSlideLayouts,
   shouldOfferBuiltinLayouts,
@@ -118,7 +126,7 @@ import {
   type TableStructureOp,
   type TableStyleEdit,
 } from '@genoffice/pptx-engine'
-import { matchesElementRef } from '@genoffice/pptx-engine/identity'
+import { elementDurableId, matchesElementRef } from '@genoffice/pptx-engine/identity'
 import {
   beginHistoryBatch,
   EMU_PER_PT,
@@ -466,6 +474,112 @@ function base64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
   return out
+}
+
+const AV_MIME: Record<string, string> = {
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  mov: 'video/mp4',
+  webm: 'video/webm',
+  avi: 'video/x-msvideo',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  ogg: 'audio/ogg',
+}
+
+function mediaOffset(session: NonNullable<ReturnType<typeof getWebSession>>) {
+  const deckSize = session.opened.deck.size
+  const cx = Math.round(deckSize.cx * 0.6)
+  const cy = Math.round((cx * 9) / 16)
+  return {
+    x: Math.round((deckSize.cx - cx) / 2),
+    y: Math.round((deckSize.cy - cy) / 2),
+    cx,
+    cy,
+  }
+}
+
+async function pickMediaFile(kind: 'video' | 'audio'): Promise<{ bytes: Uint8Array; ext: string; name: string } | null> {
+  const accept =
+    kind === 'video'
+      ? { 'video/*': ['.mp4', '.m4v', '.mov', '.webm', '.avi'] }
+      : { 'audio/*': ['.mp3', '.wav', '.m4a', '.aac', '.ogg'] }
+  try {
+    if (typeof window.showOpenFilePicker === 'function') {
+      const handles = (await window.showOpenFilePicker({
+        types: [{ description: kind, accept }],
+        multiple: false,
+      })) as FileSystemFileHandle[]
+      const file = await handles[0]?.getFile()
+      if (!file) return null
+      return {
+        bytes: new Uint8Array(await file.arrayBuffer()),
+        ext: (file.name.split('.').pop() ?? (kind === 'video' ? 'mp4' : 'mp3')).toLowerCase(),
+        name: file.name,
+      }
+    }
+  } catch (e) {
+    if ((e as { name?: string }).name === 'AbortError') return null
+  }
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = kind === 'video' ? 'video/mp4,video/webm,video/quicktime' : 'audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/ogg'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      input.remove()
+      if (!file) {
+        resolve(null)
+        return
+      }
+      resolve({
+        bytes: new Uint8Array(await file.arrayBuffer()),
+        ext: (file.name.split('.').pop() ?? (kind === 'video' ? 'mp4' : 'mp3')).toLowerCase(),
+        name: file.name,
+      })
+    }
+    input.oncancel = () => {
+      input.remove()
+      resolve(null)
+    }
+    input.click()
+  })
+}
+
+function addMediaFromBytes(
+  slideIndex: number,
+  kind: 'video' | 'audio',
+  bytes: Uint8Array,
+  ext: string,
+  fitWidthPx: number,
+  name?: string,
+) {
+  const session = getWebSession()
+  if (!session || !session.opened.deck.slides[slideIndex]) return null
+  const txn = webTxn([
+    {
+      op: 'addMedia',
+      target: { slide: slideIndex },
+      kind,
+      bytes,
+      ext,
+      offset: mediaOffset(session),
+      ...(name ? { name } : {}),
+    },
+  ])
+  if (!txn || txn.failed) return null
+  txn.session.fitWidthPx = fitWidthPx
+  const rebuilt = rebuildSlide(txn.session, slideIndex)
+  const created = txn.r.records?.[0]?.created?.[0]
+  const el = created
+    ? txn.session.opened.deck.slides[slideIndex]?.elements.find((item) =>
+        matchesElementRef(item, created),
+      )
+    : undefined
+  const sourceId = (el && elementDurableId(el)) || created
+  return rebuilt && sourceId ? { slide: rebuilt, sourceId } : null
 }
 
 function extFromMime(mime: string): string {
@@ -1492,9 +1606,41 @@ const slidesApi: SlidesApi = {
     }
     return rebuildSlide(session, op.slideIndex)
   },
-  insertMedia: async () => notAvailable('insertMedia'),
-  addMediaBytes: async () => notAvailable('addMediaBytes'),
-  getMediaData: async () => notAvailable('getMediaData'),
+  insertMedia: async (slideIndex: number, kind: 'video' | 'audio', fitWidthPx: number) => {
+    const picked = await pickMediaFile(kind)
+    if (!picked) return null
+    return addMediaFromBytes(slideIndex, kind, picked.bytes, picked.ext, fitWidthPx, picked.name)
+  },
+  addMediaBytes: async (op: AddMediaBytesOp) =>
+    addMediaFromBytes(
+      op.slideIndex,
+      op.kind,
+      base64ToBytes(op.base64),
+      op.ext,
+      op.fitWidthPx,
+      op.name,
+    ),
+  getMediaData: async (slideIndex: number, sourceId: string) => {
+    const session = getWebSession()
+    const slide = session?.opened.deck.slides[slideIndex]
+    if (!session || !slide) return null
+    const el = slide.elements.find((item) => matchesElementRef(item, sourceId))
+    if (!el || el.type !== 'picture') return null
+    const media = (
+      el as { media?: { kind: 'video' | 'audio'; target?: string; external?: boolean } }
+    ).media
+    if (!media?.target) return null
+    if (media.external) return { kind: media.kind, dataUrl: media.target }
+    const bytes = session.opened.archive.readBytes(media.target)
+    if (!bytes) return null
+    const ext = media.target.split('.').pop()?.toLowerCase() ?? ''
+    const mime = AV_MIME[ext] ?? (media.kind === 'video' ? 'video/mp4' : 'audio/mpeg')
+    let bin = ''
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+    }
+    return { kind: media.kind, dataUrl: `data:${mime};base64,${btoa(bin)}` }
+  },
   insertModel3d: async () => notAvailable('insertModel3d'),
   insertImageUrl: async (op) => {
     const session = getWebSession()
@@ -1550,12 +1696,57 @@ const slidesApi: SlidesApi = {
     }
     return rebuildSlide(session, op.slideIndex)
   },
-  setLink: async () => notAvailable('setLink'),
-  getLink: async () => notAvailable('getLink'),
-  getRunLinks: async () => [],
-  getSlideLinks: async () => [],
-  getHeaderFooter: async () => notAvailable('getHeaderFooter'),
-  applyHeaderFooter: async () => notAvailable('applyHeaderFooter'),
+  setLink: async (op: SetLinkOp) => {
+    const txn = webTxn([
+      { op: 'setLink', target: { slide: op.slideIndex, el: op.sourceId }, link: op.target },
+    ])
+    if (!txn || txn.failed) return null
+    return rebuildSlide(txn.session, op.slideIndex)
+  },
+  getLink: async (slideIndex: number, sourceId: string) => {
+    const session = getWebSession()
+    const slide = session?.opened.deck.slides[slideIndex]
+    const el = slide?.elements.find((item) => matchesElementRef(item, sourceId))
+    if (!session || !el) return null
+    return getElementLink(session.opened, slideIndex, el.id)
+  },
+  getRunLinks: async (slideIndex: number) => {
+    const session = getWebSession()
+    if (!session) return []
+    return getRunLinks(session.opened, slideIndex).map(({ elementId, ...rest }) => ({
+      sourceId: elementId,
+      ...rest,
+    }))
+  },
+  getSlideLinks: async (slideIndex: number) => {
+    const session = getWebSession()
+    if (!session) return []
+    return getSlideLinks(session.opened, slideIndex).map(({ elementId, target }) => ({
+      sourceId: elementId,
+      target,
+    }))
+  },
+  getHeaderFooter: async (slideIndex: number) => {
+    const session = getWebSession()
+    const slide = session?.opened.deck.slides[slideIndex]
+    return slide ? readHeaderFooter(slide) : { footer: null, slideNum: false, date: null }
+  },
+  applyHeaderFooter: async (op: HeaderFooterOp) => {
+    const txn = webTxn([
+      {
+        op: 'applyHeaderFooter',
+        settings: {
+          footer: op.footer ?? null,
+          slideNum: !!op.slideNum,
+          date: op.date ?? null,
+          ...(op.dateAuto ? { dateAuto: true } : {}),
+        },
+      },
+    ])
+    if (!txn || txn.failed) return null
+    txn.session.fitWidthPx = op.fitWidthPx
+    return buildAllRenderSlides(txn.session.opened, op.fitWidthPx)
+  },
 
   setNotes: async (op: SetNotesOp) => {
     const session = getWebSession()
@@ -1750,7 +1941,24 @@ const slidesApi: SlidesApi = {
   },
 
   printSlides: async () => notAvailable('printSlides'),
-  exportImages: async () => notAvailable('exportImages'),
+  exportImages: async (op: ExportImagesOp) => {
+    if (!op.dir || !op.dir.startsWith('/') || !Array.isArray(op.pngsBase64) || op.pngsBase64.length === 0) {
+      return { ok: false, error: 'exportImages needs an absolute dir and at least one PNG' }
+    }
+    const pad = op.pngsBase64.length >= 100 ? 3 : 2
+    const paths: string[] = []
+    for (let i = 0; i < op.pngsBase64.length; i++) {
+      const dest = `${op.dir.replace(/\/$/, '')}/${op.baseName}-${String(i + 1).padStart(pad, '0')}.png`
+      const written = await relay<{ ok?: boolean; error?: string; path?: string }>('/file', {
+        path: dest,
+        base64: op.pngsBase64[i],
+        overwrite: true,
+      })
+      if (!written?.ok) return { ok: false, error: written?.error ?? `failed to write ${dest}` }
+      paths.push(written.path ?? dest)
+    }
+    return { ok: true, paths }
+  },
   exportPdf: async () => notAvailable('exportPdf'),
   pickExportDir: async () => null,
   pickExportPdfPath: async () => null,

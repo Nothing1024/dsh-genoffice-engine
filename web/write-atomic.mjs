@@ -80,7 +80,7 @@ async function writeFileAtomicUnqueued(absPath, buf, expectedMtimeMs, opts = {})
       }
       return { ok: true }
     }
-    if (existsSync(absPath)) {
+    if (existsSync(absPath) && opts.overwrite !== true) {
       let st = null
       try {
         st = statSync(absPath)
