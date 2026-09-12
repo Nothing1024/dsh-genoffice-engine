@@ -7,7 +7,8 @@
  *
  *   - open via URL  `/sheets/?open=path:<abs>` → relay `/api/file` bytes →
  *     browser xlsx parse (web-xlsx.ts) → `WorkbookFile` (lazy model intact)
- *   - range/formula reads → in-memory parsed store
+ *   - home `/webdoc/...` targets reuse the shared IndexedDB store (no sidecar spawn)
+ *   - range/formula reads → in-memory parsed store (sidecar stays on relay / Task 4)
  *   - save → the renderer's edit journal applied to the ORIGINAL archive via
  *     the gateway's pure-JSZip pipeline (only touched entries change — BR-009)
  *   - theme / language / AI settings → localStorage
@@ -112,7 +113,55 @@ interface WebWorkbookState {
 
 let opened: WebWorkbookState | null = null
 let blankConsumed = false
-/** synthetic path → bytes for files opened without a path: (unused for now) */
+
+const DB_NAME = 'genoffice-web'
+const DB_VERSION = 1
+const STORE_HANDLES = 'handles'
+
+interface WebFileRecord {
+  name: string
+  kind: 'fs' | 'bytes'
+  handle?: FileSystemFileHandle
+  bytes?: ArrayBuffer
+  mtime: number
+  accessedAt: number
+}
+
+let dbPromise: Promise<IDBDatabase> | null = null
+
+function openDb(): Promise<IDBDatabase> {
+  if (dbPromise) return dbPromise
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(STORE_HANDLES)) db.createObjectStore(STORE_HANDLES)
+    }
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+  return dbPromise
+}
+
+async function idbGet<T>(store: string, key: string): Promise<T | undefined> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly')
+    const req = tx.objectStore(store).get(key)
+    req.onsuccess = () => resolve(req.result as T | undefined)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+async function idbPut(store: string, key: string, value: unknown): Promise<void> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite')
+    tx.objectStore(store).put(value, key)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
 
 // ── relay helpers ───────────────────────────────────────────────────────
 
@@ -134,41 +183,91 @@ async function relay<T>(path: string, body?: unknown): Promise<T | null> {
   }
 }
 
-/** absolute-path open target from the URL (`?open=path:…` / `?file=…`) */
-function openPathFromUrl(): string | null {
+/** URL open target (`?open=` / `?file=`), captured before the address bar is rewritten. */
+function parseOpenTarget(): string | null {
   const params = new URLSearchParams(location.search)
   for (const key of ['open', 'file']) {
     const v = params.get(key)
-    if (v?.startsWith('path:')) return v.slice('path:'.length)
+    if (v) return v
   }
   return null
 }
 
-async function fetchPathBytes(path: string): Promise<{ bytes: Uint8Array; name: string; mtimeMs: number | null } | null> {
+const INITIAL_OPEN_TARGET = parseOpenTarget()
+
+async function fetchPathBytes(path: string): Promise<{ bytes: Uint8Array; name: string; mtimeMs: number | null }> {
   const res = await relay<{ ok: boolean; base64?: string; name?: string; mtimeMs?: number | null; error?: string }>(
     `/file?path=${encodeURIComponent(path)}`,
   )
-  if (!res?.ok || !res.base64) return null
+  if (!res?.ok || !res.base64) {
+    throw new Error(`load-error: ${res?.error ?? 'empty result for path target'}`)
+  }
   const bin = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0))
   return { bytes: bin, name: res.name ?? path.split('/').pop() ?? 'workbook.xlsx', mtimeMs: res.mtimeMs ?? null }
 }
 
-async function openPath(path: string): Promise<WorkbookFile | null> {
-  const fetched = await fetchPathBytes(path)
-  if (!fetched) return null
-  const parsed = await parseXlsxWorkbook(fetched.bytes, fetched.name)
+async function adoptWorkbook(
+  path: string,
+  name: string,
+  bytes: Uint8Array,
+  mtimeMs: number | null,
+): Promise<WorkbookFile> {
+  const parsed = await parseXlsxWorkbook(bytes, name)
   opened = {
     path,
-    name: fetched.name,
-    originalBytes: fetched.bytes,
-    latestBytes: fetched.bytes,
+    name,
+    originalBytes: bytes,
+    latestBytes: bytes,
     store: parsed.store,
     file: parsed.file,
-    mtimeMs: fetched.mtimeMs,
+    mtimeMs,
     lastRead: Date.now(),
   }
   clearOpenTarget()
   return parsed.file
+}
+
+async function openPath(path: string): Promise<WorkbookFile> {
+  const fetched = await fetchPathBytes(path)
+  return adoptWorkbook(path, fetched.name, fetched.bytes, fetched.mtimeMs)
+}
+
+async function openWebdoc(path: string): Promise<WorkbookFile> {
+  const rec = await idbGet<WebFileRecord>(STORE_HANDLES, path)
+  if (!rec) throw new Error('load-error: missing browser file record')
+  let bytes: Uint8Array
+  let name = rec.name
+  let mtimeMs = rec.mtime ?? null
+  if (rec.kind === 'fs' && rec.handle) {
+    const file = await rec.handle.getFile()
+    bytes = new Uint8Array(await file.arrayBuffer())
+    name = file.name
+    mtimeMs = file.lastModified
+  } else if (rec.bytes) {
+    bytes = rec.bytes instanceof Uint8Array ? rec.bytes : new Uint8Array(rec.bytes)
+  } else {
+    throw new Error('load-error: empty browser file record')
+  }
+  return adoptWorkbook(path, name, bytes, mtimeMs)
+}
+
+/** Persist browser-owned files only. Disk `path:` writes stay on the control export path. */
+async function persistOpened(): Promise<void> {
+  if (!opened || !opened.path.startsWith('/webdoc/')) return
+  const rec = await idbGet<WebFileRecord>(STORE_HANDLES, opened.path)
+  if (rec?.handle && typeof rec.handle.createWritable === 'function') {
+    const writable = await rec.handle.createWritable()
+    await writable.write(opened.latestBytes)
+    await writable.close()
+  }
+  await idbPut(STORE_HANDLES, opened.path, {
+    name: opened.name,
+    kind: rec?.handle ? 'fs' : 'bytes',
+    handle: rec?.handle,
+    bytes: rec?.handle ? undefined : opened.latestBytes.buffer,
+    mtime: Date.now(),
+    accessedAt: Date.now(),
+  })
 }
 
 /** control-mode export: the CURRENT workbook bytes (BR-008 — export is the
@@ -204,16 +303,14 @@ const desktopApi: DesktopApi = {
   onAiPanelPrefsChanged: () => () => {},
 
   selectWorkbook: async () => {
-    // control-mode / URL-driven open: `?open=path:` wins; otherwise fall back
-    // to a file picker (non-control browser semantics)
-    const target = openPathFromUrl()
-    if (target) {
-      try {
-        return await openPath(target)
-      } catch (e) {
-        console.error('[web-sheets] open failed:', e)
-        return null
-      }
+    // control-mode / URL-driven open: `?open=path:` and home `/webdoc/` win;
+    // otherwise fall back to a file picker (non-control browser semantics)
+    const target = parseOpenTarget() ?? INITIAL_OPEN_TARGET
+    if (target?.startsWith('path:')) {
+      return openPath(target.slice('path:'.length))
+    }
+    if (target?.startsWith('/webdoc/')) {
+      return openWebdoc(target)
     }
     if (typeof window.showOpenFilePicker === 'function') {
       try {
@@ -297,6 +394,7 @@ const desktopApi: DesktopApi = {
       file: applied.file,
       lastRead: Date.now(),
     }
+    await persistOpened()
     return { canceled: false, file: applied.file, touchedEntries: [...applied.touchedEntries] }
   },
 
@@ -348,7 +446,7 @@ const desktopApi: DesktopApi = {
 
   hasQueuedWorkbook: async () => {
     // URL-driven open: report once so the mount flow pulls the workbook
-    const target = openPathFromUrl()
+    const target = parseOpenTarget() ?? INITIAL_OPEN_TARGET
     if (!target || opened) return false
     return true
   },

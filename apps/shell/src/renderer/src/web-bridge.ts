@@ -142,6 +142,8 @@ function appForExt(ext: string): string | null {
     case 'md':
     case 'markdown':
       return 'markdown'
+    case 'xlsx':
+      return 'sheets'
     default:
       return null
   }
@@ -149,13 +151,14 @@ function appForExt(ext: string): string | null {
 
 function notifyUnsupported(ext: string): void {
   const names: Record<string, string> = {
-    xlsx: 'Excel 表格',
     pptx: 'PPT 演示文稿',
     pdf: 'PDF 文档',
+    xlsm: 'Excel 宏工作簿',
+    xls: 'Excel 旧版工作簿',
   }
   const name = names[ext] ?? `.${ext} 文件`
   // eslint-disable-next-line no-alert
-  alert(`网页版暂不支持打开 ${name}（仅桌面版可用）。\n当前支持：Word 文档 (.docx)、Markdown (.md)`)
+  alert(`网页版暂不支持打开 ${name}（仅桌面版可用）。\n当前支持：Word 文档 (.docx)、Excel 表格 (.xlsx)、Markdown (.md)`)
 }
 
 function openWebApp(app: string, query?: string): void {
@@ -261,6 +264,7 @@ const aiOffice: HomeApi = {
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': [
                   '.docx',
                 ],
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
               },
             },
           ],
@@ -291,7 +295,7 @@ const aiOffice: HomeApi = {
   },
 
   newDoc: async () => openWebApp('docs'),
-  newSheet: async () => notifyUnsupported('xlsx'),
+  newSheet: async () => openWebApp('sheets'),
   newSlide: async () => notifyUnsupported('pptx'),
   newMarkdown: async () => openWebApp('markdown'),
   newHtml: async () => openWebApp('html'),

@@ -3883,12 +3883,21 @@ export function App(): React.JSX.Element {
       const selected = await window.desktopApi.selectWorkbook()
       if (!selected) {
         setMessage(t('appOpenCanceled'))
+        if (CONTROL_PATH) {
+          controlRef.current?.setReadiness('error', {
+            error: 'load-error: empty result for path target',
+          })
+        }
         return
       }
       openLazyWorkbook(selected)
       setMessage(t('appOpened', { name: selected.name }))
     } catch (error: unknown) {
-      setMessage(error instanceof Error ? error.message : t('appOpenFailed'))
+      const message = error instanceof Error ? error.message : t('appOpenFailed')
+      setMessage(message)
+      if (CONTROL_PATH) {
+        controlRef.current?.setReadiness('error', { error: message || 'load failed' })
+      }
     } finally {
       workbookOpeningRef.current = false
     }
