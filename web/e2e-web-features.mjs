@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
@@ -232,6 +232,42 @@ async function callPdfTool(base, path, name, input = {}) {
   return post(base, `/api/control/pdf/${docIdFor(path)}/tool`, {
     call: { id: randomUUID(), name, input },
   })
+}
+
+
+async function callSlidesTool(base, path, name, input = {}) {
+  return post(base, `/api/control/slides/${docIdFor(path)}/tool`, {
+    call: { id: randomUUID(), name, input },
+  })
+}
+
+async function saveSlides(base, path) {
+  return post(base, `/api/control/slides/${docIdFor(path)}/export`, { path })
+}
+
+async function inspectPptx(file) {
+  const zip = await JSZip.loadAsync(await readFile(file))
+  const names = Object.keys(zip.files)
+  const pres = (await zip.file('ppt/presentation.xml')?.async('string')) ?? ''
+  const theme = (await zip.file('ppt/theme/theme1.xml')?.async('string')) ?? ''
+  let slideXml = ''
+  for (const name of names) {
+    if (/^ppt\/slides\/slide\d+\.xml$/i.test(name)) {
+      slideXml += await zip.file(name).async('string')
+    }
+  }
+  const size = /<p:sldSz[^>]*cx="(\d+)"[^>]*cy="(\d+)"/.exec(pres)
+  return {
+    slideCount: names.filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name)).length,
+    cx: Number(size?.[1] ?? 0),
+    cy: Number(size?.[2] ?? 0),
+    hasKeep: slideXml.includes('StructureKeep'),
+    hasTool: slideXml.includes('StructureTool'),
+    hasOld: slideXml.includes('日志验证'),
+    hidden: /show="0"/.test(slideXml),
+    section: /sectionLst/.test(pres) && /WfcRenamed/.test(pres),
+    themeEmber: /Ember/.test(theme) || /C43E1C/.test(theme),
+  }
 }
 
 async function buildPdfFixture(file) {
@@ -1809,6 +1845,236 @@ async function runPdfConvert(outDir) {
   }
 }
 
+
+const EMBER_COLORS = {
+  dk1: '2B1B14',
+  lt1: 'FFFFFF',
+  dk2: '632B1A',
+  lt2: 'F7EBE6',
+  accent1: 'C43E1C',
+  accent2: 'E97132',
+  accent3: 'FFC000',
+  accent4: '8A3B12',
+  accent5: 'D98F73',
+  accent6: 'A33517',
+  hlink: 'C43E1C',
+  folHlink: '954F72',
+}
+
+async function runSlidesStructure(outDir) {
+  const fixture = join(ENGINE, 'fixtures/generated/sample.pptx')
+  if (!existsSync(fixture)) throw new Error(`missing slides fixture ${fixture}`)
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-slides-structure')
+  await mkdir(workDir, { recursive: true })
+  const file = join(workDir, 'structure-source.pptx')
+  await copyFile(fixture, file)
+  const beforeSha = sha256(await readFile(file))
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[slides] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[slides] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, file, 90_000)
+
+    const failApi = await page.evaluate(async () => {
+      const api = window.slidesApi
+      const beforeSize = await api.getSlideSize()
+      const badSize = await api.setSlideSize({ cx: 0, cy: -1 })
+      const badMove = await api.moveSlide({ fromIndex: 99, toIndex: 0 })
+      const afterSize = await api.getSlideSize()
+      const presenter = await api.presenterStart()
+      return { beforeSize, badSize, badMove, afterSize, presenter }
+    })
+    const badOps = await callSlidesTool(relay.base, file, 'apply_ops', {
+      ops: [{ op: 'setSlideSize', cx: 0, cy: 100 }],
+    })
+    const unknownOps = await callSlidesTool(relay.base, file, 'apply_ops', {
+      ops: [{ op: 'notARealOp' }],
+    })
+    const afterFailSha = sha256(await readFile(file))
+    const afterFailInspect = await inspectPptx(file)
+
+    const menu = await page.evaluate(async (ember) => {
+      const api = window.slidesApi
+      const added = await api.addSlide({ sourceIndex: 0, fitWidthPx: 960 })
+      const replaced = await api.findReplace({ find: '日志验证', replace: 'StructureKeep' })
+      const layouts = await api.getLayouts()
+      const builtin = (layouts?.layouts ?? []).find((item) => String(item.path ?? '').startsWith('builtin:'))
+      const layout = builtin
+        ? await api.setSlideLayout({ slideIndex: 0, layoutPath: builtin.path })
+        : null
+      const sized = await api.setSlideSize({ cx: 9144000, cy: 6858000 })
+      const theme = await api.applyTheme({
+        name: 'Ember',
+        colors: ember,
+        majorFont: 'Trebuchet MS',
+        minorFont: 'Calibri',
+        fitWidthPx: 960,
+      })
+      const hidden = await api.setSlideHidden({ slideIndex: 1, hidden: true })
+      const sections = await api.addSection({ atSlideIndex: 0, name: 'WfcSection' })
+      const renamed = sections?.[0]?.id
+        ? await api.renameSection({ id: sections[0].id, name: 'WfcRenamed' })
+        : null
+      const moved = await api.moveSlide({ fromIndex: 0, toIndex: 1 })
+      const slides = await api.getRenderSlides()
+      const blob = JSON.stringify(slides ?? [])
+      return {
+        addedCount: added?.slides?.length ?? 0,
+        replaceCount: replaced?.count ?? 0,
+        layoutId: layout?.nodes ? true : Boolean(layout),
+        layoutPath: builtin?.path ?? null,
+        size: await api.getSlideSize(),
+        themeError: theme && !Array.isArray(theme) ? theme.error : null,
+        themeCount: Array.isArray(theme) ? theme.length : 0,
+        hidden: Boolean(hidden?.hidden),
+        sectionNames: (renamed ?? sections ?? []).map((s) => s.name),
+        movedCount: moved?.slides?.length ?? 0,
+        hasKeep: blob.includes('StructureKeep'),
+        hasOld: blob.includes('日志验证'),
+        slides: (slides ?? []).map((slide) => ({
+          hidden: Boolean(slide.hidden),
+          hasKeep: JSON.stringify(slide).includes('StructureKeep'),
+        })),
+        sections: await api.getSections(),
+      }
+    }, EMBER_COLORS)
+
+    const toolReplace = await callSlidesTool(relay.base, file, 'apply_ops', {
+      ops: [{ op: 'findReplace', find: 'StructureKeep', replace: 'StructureTool' }],
+    })
+    const readAfterTool = await callSlidesTool(relay.base, file, 'read_slide', { slideIndex: 0 })
+    const readAfterTool1 = await callSlidesTool(relay.base, file, 'read_slide', { slideIndex: 1 })
+    const undone = await page.evaluate(async () => {
+      const slides = await window.slidesApi.undo()
+      return (slides ?? []).map((slide) => ({
+        hidden: Boolean(slide.hidden),
+        text: JSON.stringify(slide).includes('StructureTool'),
+        keep: JSON.stringify(slide).includes('StructureKeep'),
+      }))
+    })
+    const redone = await page.evaluate(async () => {
+      const slides = await window.slidesApi.redo()
+      return (slides ?? []).map((slide) => ({
+        hidden: Boolean(slide.hidden),
+        text: JSON.stringify(slide).includes('StructureTool'),
+        keep: JSON.stringify(slide).includes('StructureKeep'),
+      }))
+    })
+    const saved = await saveSlides(relay.base, file)
+    const savedInspect = await inspectPptx(file)
+    const savedSha = sha256(await readFile(file))
+    await page.close()
+
+    const reopenPage = await browser.newPage()
+    await reopenPage.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const reopened = await waitReady(relay.base, file, 90_000)
+    const reopenState = await reopenPage.evaluate(async () => {
+      const api = window.slidesApi
+      const slides = await api.getRenderSlides()
+      return {
+        size: await api.getSlideSize(),
+        sections: await api.getSections(),
+        slides: (slides ?? []).map((slide) => ({
+          hidden: Boolean(slide.hidden),
+          hasTool: JSON.stringify(slide).includes('StructureTool'),
+          hasKeep: JSON.stringify(slide).includes('StructureKeep'),
+        })),
+      }
+    })
+    shot = await reopenPage.screenshot({ type: 'png' })
+    await reopenPage.close()
+
+    const toolSawTool = /StructureTool/.test(toolOutput(readAfterTool) + toolOutput(readAfterTool1))
+    const successAssertions = [
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened.readiness),
+      assertion('menu-add-slide', menu.addedCount === 2, 2, menu.addedCount),
+      assertion('menu-find-replace', menu.replaceCount > 0 && menu.hasKeep === true, true, { count: menu.replaceCount, hasKeep: menu.hasKeep, hasOld: menu.hasOld }),
+      assertion('menu-layout', Boolean(menu.layoutPath) && menu.layoutId, true, menu.layoutPath),
+      assertion('menu-size', menu.size?.cx === 9144000 && menu.size?.cy === 6858000, '9144000x6858000', menu.size),
+      assertion('menu-theme', menu.themeCount === 2 && !menu.themeError, true, { themeCount: menu.themeCount, themeError: menu.themeError }),
+      assertion('menu-hidden', (menu.slides ?? []).some((s) => s.hidden), true, menu.slides),
+      assertion('menu-sections', (menu.sectionNames ?? []).includes('WfcRenamed'), 'WfcRenamed', menu.sectionNames),
+      assertion('menu-move', menu.movedCount === 2, 2, menu.movedCount),
+      assertion('tool-read-same-text', toolOk(toolReplace) && /findReplace/.test(toolOutput(toolReplace)), true, toolOutput(toolReplace)),
+      assertion('tool-apply-ops-replace', toolOk(toolReplace) && toolSawTool, true, { toolReplace, after: toolOutput(readAfterTool).slice(0, 400) }),
+      assertion('undo-restores-keep', undone.some((s) => s.keep) && undone.every((s) => s.text === false), true, undone),
+      assertion('redo-restores-tool', redone.some((s) => s.text), true, redone),
+      assertion('save-ok', saved.ok === true, true, saved),
+      assertion('disk-changed', savedSha !== beforeSha, 'changed', { beforeSha, savedSha }),
+      assertion('reopen-ready', reopened.readiness === 'ready', 'ready', reopened.readiness),
+      assertion('persist-text', savedInspect.hasTool && reopenState.slides.some((s) => s.hasTool), true, savedInspect),
+      assertion('persist-size', savedInspect.cx === 9144000 && savedInspect.cy === 6858000 && reopenState.size?.cy === 6858000, '4:3', { savedInspect, reopen: reopenState.size }),
+      assertion('persist-theme', savedInspect.themeEmber, true, savedInspect),
+      assertion('persist-hidden', savedInspect.hidden && reopenState.slides.some((s) => s.hidden), true, { savedInspect, reopen: reopenState.slides }),
+      assertion('persist-section', savedInspect.section && (reopenState.sections ?? []).some((s) => s.name === 'WfcRenamed'), true, reopenState.sections),
+    ]
+    const failure1 = [
+      assertion('invalid-size-rejected', failApi.badSize == null, null, failApi.badSize),
+      assertion('invalid-move-rejected', failApi.badMove == null, null, failApi.badMove),
+      assertion('invalid-ops-rejected', toolOk(badOps) === false, false, badOps),
+      assertion('invalid-keeps-size', failApi.afterSize?.cx === failApi.beforeSize?.cx && failApi.afterSize?.cy === failApi.beforeSize?.cy, failApi.beforeSize, failApi.afterSize),
+      assertion('invalid-keeps-disk', afterFailSha === beforeSha && afterFailInspect.hasOld && !afterFailInspect.hasKeep, beforeSha, { afterFailSha, afterFailInspect }),
+    ]
+    const failure2 = [
+      assertion('unknown-ops-rejected', toolOk(unknownOps) === false, false, unknownOps),
+      assertion('presenter-not-available', failApi.presenter == null, null, failApi.presenter),
+      assertion('presenter-does-not-write', afterFailSha === beforeSha, beforeSha, afterFailSha),
+    ]
+
+    const success = await writeEvidence(outDir, 'UF-004', 'success', {
+      cases: [{ id: 'slides-structure-menu-tool-undo-reopen', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+      console: logs.join('\n'),
+      network: { events: networkEvents.slice(0, 80), count: networkEvents.length },
+      screenshot: shot,
+    })
+    const fail1 = await writeEvidence(outDir, 'UF-004', 'failure-1', {
+      cases: [{ id: 'slides-structure-invalid-object-size', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+      console: `${logs.join('\n')}\nfailApi=${JSON.stringify(failApi)}\nbadOps=${JSON.stringify(badOps)}\n`,
+      network: { events: [badOps], count: 1 },
+      screenshot: shot,
+    })
+    const fail2 = await writeEvidence(outDir, 'UF-004', 'failure-2', {
+      cases: [{ id: 'slides-structure-unknown-op-presenter', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+      console: `${logs.join('\n')}\nunknown=${JSON.stringify(unknownOps)}\npresenter=${JSON.stringify(failApi.presenter)}\n`,
+      network: { events: [unknownOps], count: 1 },
+      screenshot: shot,
+    })
+    const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-004',
+      branch: 'slides-structure',
+      status: ok ? 'passed' : 'failed',
+      results: { success, failure1: fail1, failure2: fail2, menu, savedInspect, reopenState },
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-9.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (ok === false) throw new Error('slides-structure case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -1847,6 +2113,10 @@ async function main() {
   if (args.caseName === 'pdf-convert' || args.all) {
     await runPdfConvert(evidenceRoot)
     ran.push('pdf-convert')
+  }
+  if (args.caseName === 'slides-structure' || args.all) {
+    await runSlidesStructure(evidenceRoot)
+    ran.push('slides-structure')
   }
   if (args.caseName === 'entries-sheets') {
     const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)

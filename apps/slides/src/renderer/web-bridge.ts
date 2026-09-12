@@ -15,7 +15,7 @@
  *     BYOK aiStream (no Genspark cloud page gen)
  *   - NOT implemented (explicit `console.warn` + null/default — never silent):
  *     presenter/audience, PDF/image export, print, master view, cloud gen,
- *     clipboard, animations, comments, sections, find-replace
+ *     clipboard, animations, comments, media/links/header-footer
  *   - generateImage / analyzeMedia → localhost relay (no browser net egress)
  */
 import './web-node-shims'
@@ -28,9 +28,19 @@ import type {
   AddBlankSlideOp,
   AddTableOp,
   ApplyEditScriptOp,
+  ApplyThemeOp,
   ApplyTxnOp,
   ApplyTxnResult,
+  AddSectionOp,
   BatchEditTransformOp,
+  FindReplaceOp,
+  MoveSectionOp,
+  MoveSlideOp,
+  RemoveSectionOp,
+  RenameSectionOp,
+  SetSlideHiddenOp,
+  SetSlideLayoutOp,
+  SetSlideSizeOp,
   DesktopFilesApi,
   EditBackgroundOp,
   EditChartOp,
@@ -95,7 +105,15 @@ import {
   TABLE_STYLE_PRESETS,
   ungroupElement,
   updateConnectorsForMoved,
+  getSections,
+  reparseDeck,
+  listSlideLayouts,
+  shouldOfferBuiltinLayouts,
+  builtinLayoutInfos,
+  ensureBuiltinLayout,
+  BUILTIN_LAYOUT_PREFIX,
   type OpenedPptx,
+  type SectionInfo,
   type Paragraph,
   type TableStructureOp,
   type TableStyleEdit,
@@ -406,6 +424,35 @@ async function imageDimsForSpec(
 function notAvailable(method: string): Promise<never> {
   console.warn(`[web-slides] ${method} is not available in the web version (documented subset)`)
   return Promise.resolve(null as never)
+}
+
+type TxnOp = Parameters<typeof runTxn>[1]['ops'][number]
+
+function webTxn(ops: TxnOp[]) {
+  const session = getWebSession()
+  if (!session) return null
+  const plan = runTxn(session.opened, { ops, dryRun: true })
+  if (plan.failures?.length) return { session, r: plan, failed: true as const }
+  pushHistory(session)
+  const r = runTxn(session.opened, { ops })
+  if (!r.applied) {
+    session.undoStack.pop()
+    return { session, r, failed: true as const }
+  }
+  return { session, r, failed: false as const }
+}
+
+function resolveLayoutPath(layoutPath?: string): string | undefined {
+  const session = getWebSession()
+  if (!session || !layoutPath) return layoutPath
+  if (!layoutPath.startsWith(BUILTIN_LAYOUT_PREFIX)) return layoutPath
+  return (
+    ensureBuiltinLayout(
+      session.opened.archive,
+      session.opened.deck.size,
+      layoutPath.slice(BUILTIN_LAYOUT_PREFIX.length),
+    ) ?? undefined
+  )
 }
 
 function toEmu(session: WebSlideSession, fitWidthPx: number, px: number): number {
@@ -787,20 +834,85 @@ const slidesApi: SlidesApi = {
     return rendered
   },
 
-  findReplace: async () => notAvailable('findReplace'),
+  findReplace: async (op: FindReplaceOp) => {
+    const txn = webTxn([
+      {
+        op: 'findReplace',
+        find: op.find,
+        replace: op.replace,
+        matchCase: op.matchCase,
+        firstOnly: op.firstOnly,
+        slideIndex: op.slideIndex,
+        elementId: op.elementId,
+      },
+    ])
+    if (!txn || txn.failed) return { count: 0, slides: null }
+    const count = (txn.r.records?.[0]?.after as { count?: number } | undefined)?.count ?? 0
+    return { count, slides: buildAllRenderSlides(txn.session.opened, txn.session.fitWidthPx) }
+  },
 
-  setSlideLayout: async () => notAvailable('setSlideLayout'),
-  setSlideSize: async () => notAvailable('setSlideSize'),
+  setSlideLayout: async (op: SetSlideLayoutOp) => {
+    const layoutPath = resolveLayoutPath(op.layoutPath)
+    if (op.layoutPath && !layoutPath) return null
+    const txn = webTxn([
+      {
+        op: 'setSlideLayout',
+        target: { slide: op.slideIndex },
+        ...(layoutPath ? { layoutPath } : {}),
+      },
+    ])
+    if (!txn || txn.failed) return null
+    return rebuildSlide(txn.session, op.slideIndex)
+  },
+  setSlideSize: async (op: SetSlideSizeOp) => {
+    const txn = webTxn([{ op: 'setSlideSize', cx: op.cx, cy: op.cy }])
+    if (!txn || txn.failed) return null
+    return buildAllRenderSlides(txn.session.opened, txn.session.fitWidthPx)
+  },
   getSlideSize: async () => {
     const session = getWebSession()
     if (!session) return null
     return { cx: session.opened.deck.size.cx, cy: session.opened.deck.size.cy }
   },
 
-  applyTheme: async () => notAvailable('applyTheme'),
-  setSlideHidden: async () => notAvailable('setSlideHidden'),
-  setSections: async () => notAvailable('setSections'),
-  moveSlide: async () => notAvailable('moveSlide'),
+  applyTheme: async (op: ApplyThemeOp) => {
+    const payload = {
+      op: 'applyTheme' as const,
+      name: op.name,
+      colors: op.colors,
+      ...(op.majorFont ? { majorFont: op.majorFont } : {}),
+      ...(op.minorFont ? { minorFont: op.minorFont } : {}),
+    }
+    const txn = webTxn([payload])
+    if (!txn) return null
+    if (txn.failed) return { error: txn.r.failures?.[0]?.error ?? 'applyTheme failed' }
+    const after = txn.r.records?.[0]?.after as { patched?: number; remapped?: number } | undefined
+    if ((after?.patched ?? 0) === 0 && (after?.remapped ?? 0) === 0) {
+      txn.session.undoStack.pop()
+      return null
+    }
+    txn.session.opened = reparseDeck(txn.session.opened)
+    txn.session.fitWidthPx = op.fitWidthPx
+    return buildAllRenderSlides(txn.session.opened, op.fitWidthPx)
+  },
+  setSlideHidden: async (op: SetSlideHiddenOp) => {
+    const txn = webTxn([{ op: 'setHidden', target: { slide: op.slideIndex }, hidden: op.hidden }])
+    if (!txn || txn.failed) return null
+    return rebuildSlide(txn.session, op.slideIndex)
+  },
+  setSections: async (sections: SectionInfo[]) => {
+    const txn = webTxn([{ op: 'setSections', sections }])
+    if (!txn || txn.failed) return null
+    return getSections(txn.session.opened)
+  },
+  moveSlide: async (op: MoveSlideOp) => {
+    const txn = webTxn([{ op: 'moveSlide', target: { slide: op.fromIndex }, to: op.toIndex }])
+    if (!txn || txn.failed) return null
+    return {
+      slides: buildAllRenderSlides(txn.session.opened, txn.session.fitWidthPx),
+      sections: getSections(txn.session.opened),
+    }
+  },
   nativeClipboard: async () => {},
   beginHistoryBatch: async () => {
     const session = getWebSession()
@@ -1463,15 +1575,44 @@ const slidesApi: SlidesApi = {
 
   // array-typed stubs must resolve real arrays (the renderer reads .length)
   getSections: async () => {
-    console.warn('[web-slides] getSections is not available in the web version (documented subset)')
-    return []
+    const session = getWebSession()
+    return session ? getSections(session.opened) : []
   },
-  addSection: async () => notAvailable('addSection'),
-  renameSection: async () => notAvailable('renameSection'),
-  removeSection: async () => notAvailable('removeSection'),
-  moveSection: async () => notAvailable('moveSection'),
+  addSection: async (op: AddSectionOp) => {
+    const txn = webTxn([{ op: 'addSection', atSlideIndex: op.atSlideIndex, name: op.name }])
+    if (!txn || txn.failed) return null
+    return (txn.r.records?.[0]?.after as SectionInfo[] | undefined) ?? getSections(txn.session.opened)
+  },
+  renameSection: async (op: RenameSectionOp) => {
+    const txn = webTxn([{ op: 'renameSection', id: op.id, name: op.name }])
+    if (!txn || txn.failed) return null
+    return (txn.r.records?.[0]?.after as SectionInfo[] | undefined) ?? getSections(txn.session.opened)
+  },
+  removeSection: async (op: RemoveSectionOp) => {
+    const txn = webTxn([{ op: 'removeSection', id: op.id }])
+    if (!txn || txn.failed) return null
+    return (txn.r.records?.[0]?.after as SectionInfo[] | undefined) ?? getSections(txn.session.opened)
+  },
+  moveSection: async (op: MoveSectionOp) => {
+    const txn = webTxn([{ op: 'moveSection', id: op.id, dir: op.dir }])
+    if (!txn || txn.failed) return null
+    return {
+      slides: buildAllRenderSlides(txn.session.opened, txn.session.fitWidthPx),
+      sections: getSections(txn.session.opened),
+    }
+  },
 
-  getLayouts: async () => notAvailable('getLayouts'),
+  getLayouts: async () => {
+    const session = getWebSession()
+    if (!session) return null
+    const layouts = listSlideLayouts(session.opened.archive)
+    if (shouldOfferBuiltinLayouts(layouts)) {
+      layouts.push(
+        ...builtinLayoutInfos(session.opened.deck.size, new Set(layouts.map((item) => item.name))),
+      )
+    }
+    return { layouts, size: { ...session.opened.deck.size } }
+  },
   getChartColorSchemes: async () => {
     const session = getWebSession()
     return session ? chartColorSchemes(session.opened) : []
