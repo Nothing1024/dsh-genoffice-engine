@@ -1220,13 +1220,19 @@ export default function App() {
 
   useEffect(() => {
     void (async () => {
-      const path = await window.pdfApi.consumePending()
-      if (!path) {
-        setStatus('empty')
-        if (CONTROL_PATH) applyControlReady('error', { error: 'empty path load' })
-        return
+      try {
+        const path = await window.pdfApi.consumePending()
+        if (!path) {
+          setStatus('empty')
+          if (CONTROL_PATH) applyControlReady('error', { error: 'empty path load' })
+          return
+        }
+        await openPath(path)
+      } catch (err) {
+        console.error('[pdf] consumePending failed:', err)
+        setStatus('error')
+        applyControlReady('error', { error: err instanceof Error ? err.message : 'load failed' })
       }
-      await openPath(path)
     })()
   }, [openPath])
 
@@ -5272,7 +5278,7 @@ export default function App() {
     splitPdf: splitPdfToFolder,
     splitPages: splitPagesToFile,
     mergePages: mergePagesToFile,
-    confirmFileOp: async () => false,
+    confirmFileOp: async () => CONTROL_MODE,
   }
 
   // Control-mode adapter (genoffice-dsh-office): registers the executor and

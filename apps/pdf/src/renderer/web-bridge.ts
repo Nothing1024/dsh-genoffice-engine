@@ -29,6 +29,13 @@ import type {
 } from '../shared/ipc'
 import { DEFAULT_AI_PANEL_PREFS } from '@genoffice/ui'
 import { applySaveRequest, verifyContentEdits } from './web-pdf-save'
+import {
+  cropPagesBytes,
+  extractPagesBytes,
+  insertBlankPageBytes,
+  setPageSizeBytes,
+  splitPagesBytes,
+} from '../shared/page-bytes'
 import { validateTextEdits as validateTextEditsImpl } from './web-text-edit'
 import { listEditFonts as listEditFontsImpl, canDrawText as canDrawTextImpl } from './web-text-edit'
 import { PDFDocument } from 'pdf-lib'
@@ -75,6 +82,8 @@ interface WebPdfState {
   path: string
   bytes: Uint8Array
   name: string
+  mtimeMs?: number
+  fileRevision?: string
 }
 
 let opened: WebPdfState | null = null
@@ -186,13 +195,90 @@ function clearOpenTarget(): void {
   if (changed) history.replaceState(null, '', url)
 }
 
-async function fetchPathBytes(path: string): Promise<{ bytes: Uint8Array; name: string }> {
-  const res = await relay<{ ok: boolean; base64?: string; name?: string; error?: string }>(
-    `/file?path=${encodeURIComponent(path)}`,
-  )
+async function fetchPathBytes(path: string): Promise<{
+  bytes: Uint8Array
+  name: string
+  mtimeMs?: number
+  fileRevision?: string
+}> {
+  const res = await relay<{
+    ok: boolean
+    base64?: string
+    name?: string
+    error?: string
+    mtimeMs?: number
+    fileRevision?: string
+  }>(`/file?path=${encodeURIComponent(path)}`)
   if (!res?.ok || !res.base64) throw new Error(`load-error: ${res?.error ?? 'empty result for path target'}`)
   const bin = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0))
-  return { bytes: bin, name: res.name ?? path.split('/').pop() ?? 'document.pdf' }
+  return {
+    bytes: bin,
+    name: res.name ?? path.split('/').pop() ?? 'document.pdf',
+    mtimeMs: res.mtimeMs,
+    fileRevision: res.fileRevision,
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = ''
+  const CHUNK = 0x8000
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(bin)
+}
+
+function dirOf(path: string): string {
+  const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return i >= 0 ? path.slice(0, i) : path
+}
+
+async function writeAbsPath(
+  path: string,
+  bytes: Uint8Array,
+  expected?: { expectedMtimeMs?: number; expectedRevision?: string },
+): Promise<{ mtimeMs?: number }> {
+  const res = await relay<{ ok: boolean; error?: string; mtimeMs?: number }>(
+    '/file',
+    { path, base64: bytesToBase64(bytes), ...expected },
+  )
+  if (!res?.ok) throw new Error(res?.error ?? 'write failed')
+  return { mtimeMs: res.mtimeMs }
+}
+
+async function writeNewPdf(sourcePath: string, suggestedName: string, bytes: Uint8Array): Promise<string> {
+  const dir = dirOf(sourcePath)
+  const stem = (suggestedName || 'pages.pdf').replace(/[/\\]/g, '_').replace(/\.pdf$/i, '') || 'pages'
+  let lastError = 'could not allocate output path'
+  for (let i = 0; i < 20; i++) {
+    const target = `${dir}/${stem}${i === 0 ? '' : `-${i + 1}`}.pdf`
+    try {
+      await writeAbsPath(target, bytes)
+      return target
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+      if (lastError !== 'conflict') throw error
+    }
+  }
+  throw new Error(lastError)
+}
+
+async function rewriteOpened(next: Uint8Array): Promise<void> {
+  if (!opened) throw new Error('no file open')
+  if (opened.path.startsWith('/webdoc/')) {
+    opened = { ...opened, bytes: next }
+    return
+  }
+  const written = await writeAbsPath(opened.path, next, {
+    expectedRevision: opened.fileRevision,
+    expectedMtimeMs: opened.mtimeMs,
+  })
+  opened = { ...opened, bytes: next, mtimeMs: written.mtimeMs, fileRevision: undefined }
+}
+
+function requireOpened(): WebPdfState | { ok: false; error: string } {
+  if (!opened) return { ok: false, error: 'no file open' }
+  return opened
 }
 
 /** control-mode write-back payload (BR-008): CURRENT merged bytes. */
@@ -217,7 +303,13 @@ const pdfApi: PdfApi = {
     if (target?.startsWith('path:')) {
       const abs = target.slice('path:'.length)
       const fetched = await fetchPathBytes(abs)
-      opened = { path: abs, bytes: fetched.bytes, name: fetched.name }
+      opened = {
+        path: abs,
+        bytes: fetched.bytes,
+        name: fetched.name,
+        mtimeMs: fetched.mtimeMs,
+        fileRevision: fetched.fileRevision,
+      }
       clearOpenTarget()
       return abs
     }
@@ -245,7 +337,13 @@ const pdfApi: PdfApi = {
     }
     const fetched = await fetchPathBytes(path)
     if (!fetched) throw new Error('pdf: file not readable')
-    opened = { path, bytes: fetched.bytes, name: fetched.name }
+    opened = {
+      path,
+      bytes: fetched.bytes,
+      name: fetched.name,
+      mtimeMs: fetched.mtimeMs,
+      fileRevision: fetched.fileRevision,
+    }
     return fetched.bytes.buffer.slice(
       fetched.bytes.byteOffset,
       fetched.bytes.byteOffset + fetched.bytes.byteLength,
@@ -308,9 +406,24 @@ const pdfApi: PdfApi = {
     return renderPagePreviewPng(opened.bytes, request)
   },
 
-  extractPages: async () => {
-    console.warn('[web-pdf] extractPages is not supported in the web version')
-    return { ok: false as const, error: 'extractPages is not supported in the web version' }
+  extractPages: async (request) => {
+    const session = requireOpened()
+    if ('error' in session) return session
+    const pages = request?.pages
+    if (!Array.isArray(pages) || pages.length === 0) {
+      return { ok: false as const, error: 'empty page selection' }
+    }
+    try {
+      const src = await PDFDocument.load(session.bytes, { updateMetadata: false })
+      const count = src.getPageCount()
+      const valid = pages.filter((p) => typeof p === 'number' && Number.isInteger(p) && p >= 0 && p < count)
+      if (valid.length === 0) return { ok: false as const, error: 'invalid page range' }
+      const bytes = await extractPagesBytes(session.bytes, valid)
+      const savedPath = await writeNewPdf(session.path, request.suggestedName, bytes)
+      return { ok: true as const, savedPath }
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+    }
   },
 
   insertPdf: async () => ({ ok: true, canceled: true }),
@@ -359,26 +472,77 @@ const pdfApi: PdfApi = {
   isUntitled: async () => false,
   canDrawText: (text, font, bold, italic) => canDrawTextImpl(text, font, bold, italic),
   listStaticFormFills: async () => [],
-  insertBlankPage: async () => ({
-    ok: false as const,
-    error: 'insertBlankPage is not supported in the web version',
-  }),
+  insertBlankPage: async (request) => {
+    const session = requireOpened()
+    if ('error' in session) return session
+    try {
+      const next = await insertBlankPageBytes(
+        session.bytes,
+        typeof request?.afterPageIndex === 'number' ? request.afterPageIndex : -1,
+      )
+      await rewriteOpened(next)
+      return { ok: true as const }
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+    }
+  },
   splitPdf: async () => ({ ok: true as const, canceled: true as const }),
   mergePdf: async () => ({ ok: true as const, canceled: true as const }),
   mergePages: async () => ({ ok: true as const, canceled: true as const }),
   replacePages: async () => ({ ok: true as const, canceled: true as const }),
-  setPageSize: async () => ({
-    ok: false as const,
-    error: 'setPageSize is not supported in the web version',
-  }),
-  splitPages: async () => ({
-    ok: false as const,
-    error: 'splitPages is not supported in the web version',
-  }),
-  cropPages: async () => ({
-    ok: false as const,
-    error: 'cropPages is not supported in the web version',
-  }),
+  setPageSize: async (request) => {
+    const session = requireOpened()
+    if ('error' in session) return session
+    const width = request?.width
+    const height = request?.height
+    if (!(width > 0) || !(height > 0)) return { ok: false as const, error: 'invalid page size' }
+    try {
+      const next = await setPageSizeBytes(session.bytes, width, height)
+      await rewriteOpened(next)
+      return { ok: true as const }
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+    }
+  },
+  splitPages: async (request) => {
+    const session = requireOpened()
+    if ('error' in session) return session
+    const perPage = request?.perPage
+    if (perPage !== 2 && perPage !== 4 && perPage !== 9) {
+      return { ok: false as const, error: 'perPage must be 2, 4, or 9' }
+    }
+    try {
+      const bytes = await splitPagesBytes(session.bytes, perPage)
+      const savedPath = await writeNewPdf(session.path, request.suggestedName, bytes)
+      return { ok: true as const, savedPath }
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+    }
+  },
+  cropPages: async (request) => {
+    const session = requireOpened()
+    if ('error' in session) return session
+    const pages = request?.pages
+    const rect = request?.rect
+    if (!Array.isArray(pages) || pages.length === 0) {
+      return { ok: false as const, error: 'empty page selection' }
+    }
+    if (!rect || !(rect.r > rect.l) || !(rect.b > rect.t)) {
+      return { ok: false as const, error: 'invalid crop rect' }
+    }
+    try {
+      const src = await PDFDocument.load(session.bytes, { updateMetadata: false })
+      const count = src.getPageCount()
+      if (!pages.some((p) => typeof p === 'number' && p >= 0 && p < count)) {
+        return { ok: false as const, error: 'invalid page range' }
+      }
+      const next = await cropPagesBytes(session.bytes, pages, rect)
+      await rewriteOpened(next)
+      return { ok: true as const }
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+    }
+  },
   convertOffice: async () => {
     console.warn('[web-pdf] convertOffice is not supported in the web version')
     throw new Error('PDF conversion to Word/Excel/PowerPoint is not supported in the web version')

@@ -289,29 +289,16 @@ function applyFormValues(pdfDoc: PDFDocument, values: FormValueInput[]): void {
   }
 }
 
-/** Extract the given pages (original indices) into bytes of a new PDF */
-export async function extractPagesBytes(bytes: Uint8Array, pages: number[]): Promise<Uint8Array> {
-  const src = await PDFDocument.load(bytes, { updateMetadata: false })
-  const out = await PDFDocument.create()
-  const valid = pages.filter((p) => p >= 0 && p < src.getPageCount())
-  const copied = await out.copyPages(src, valid)
-  for (const p of copied) out.addPage(p)
-  return out.save({ useObjectStreams: false })
-}
-
-/** Insert all pages of another PDF after afterPageIndex (-1 = front); returns merged bytes and inserted page count */
-export async function insertPdfBytes(
-  bytes: Uint8Array,
-  otherBytes: Uint8Array,
-  afterPageIndex: number,
-): Promise<{ merged: Uint8Array; count: number }> {
-  const dst = await PDFDocument.load(bytes, { updateMetadata: false })
-  const src = await PDFDocument.load(otherBytes, { updateMetadata: false })
-  const copied = await dst.copyPages(src, src.getPageIndices())
-  let at = Math.min(Math.max(afterPageIndex + 1, 0), dst.getPageCount())
-  for (const p of copied) dst.insertPage(at++, p)
-  return { merged: await dst.save({ useObjectStreams: false }), count: copied.length }
-}
+export {
+  cropPagesBytes,
+  extractPagesBytes,
+  insertBlankPageBytes,
+  insertPdfBytes,
+  mergeGrid,
+  setPageSizeBytes,
+  splitPagesBytes,
+} from '../shared/page-bytes'
+export type { CropFractionsRect } from '../shared/page-bytes'
 
 function applyMetadata(pdfDoc: PDFDocument, meta: MetadataInput): void {
   if (meta.title !== undefined) pdfDoc.setTitle(meta.title)

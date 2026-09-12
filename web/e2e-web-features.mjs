@@ -14,13 +14,14 @@ import { createServer } from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 import { chromium } from 'playwright'
 import JSZip from 'jszip'
+import { PDFDocument, StandardFonts } from 'pdf-lib'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
@@ -225,6 +226,38 @@ async function callTool(base, path, name, input = {}) {
   return post(base, `/api/control/sheets/${docIdFor(path)}/tool`, {
     call: { id: randomUUID(), name, input },
   })
+}
+
+async function callPdfTool(base, path, name, input = {}) {
+  return post(base, `/api/control/pdf/${docIdFor(path)}/tool`, {
+    call: { id: randomUUID(), name, input },
+  })
+}
+
+async function buildPdfFixture(file) {
+  const doc = await PDFDocument.create()
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+  for (const label of ['PageOne', 'PageTwo', 'PageThree']) {
+    const page = doc.addPage([612, 792])
+    page.drawText(label, { x: 72, y: 720, size: 24, font })
+  }
+  await writeFile(file, Buffer.from(await doc.save()))
+}
+
+async function inspectPdf(file) {
+  const doc = await PDFDocument.load(await readFile(file))
+  return {
+    pageCount: doc.getPageCount(),
+    sizes: doc.getPages().map((page) => {
+      const box = page.getCropBox()
+      return { w: Math.round(box.width), h: Math.round(box.height) }
+    }),
+  }
+}
+
+function savedPathFrom(result) {
+  const text = toolOutput(result)
+  return text.match(/saved at (.+?) and opened/)?.[1] ?? null
 }
 
 async function saveApp(base, path) {
@@ -1520,6 +1553,142 @@ async function runSheetsMedia(outDir) {
 }
 
 
+
+async function runPdfPages(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-pdf-pages')
+  await mkdir(workDir, { recursive: true })
+  const file = join(workDir, 'pages-source.pdf')
+  await buildPdfFixture(file)
+  const beforeSha = sha256(await readFile(file))
+  const missing = join(workDir, 'missing-pages.pdf')
+  const corrupt = join(workDir, 'corrupt-pages.pdf')
+  await writeFile(corrupt, 'not-a-pdf')
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[pdf] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[pdf] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, file)
+    const extractBad = await callPdfTool(relay.base, file, 'extract_pages', { pages: '' })
+    const extractOob = await callPdfTool(relay.base, file, 'extract_pages', { pages: '9-12' })
+    const afterBadSha = sha256(await readFile(file))
+    const extracted = await callPdfTool(relay.base, file, 'extract_pages', { pages: '1-2' })
+    const afterExtractSha = sha256(await readFile(file))
+    const extractPath = savedPathFrom(extracted)
+    const extractInfo = extractPath && existsSync(extractPath) ? await inspectPdf(extractPath) : null
+    const inserted = await callPdfTool(relay.base, file, 'insert_blank_page', { after_page: 1 })
+    const afterInsert = await inspectPdf(file)
+    const sized = await callPdfTool(relay.base, file, 'set_page_size', { preset: 'A4' })
+    const afterSize = await inspectPdf(file)
+    const cropped = await callPdfTool(relay.base, file, 'crop_pages', {
+      pages: '1',
+      left: 0.1,
+      top: 0.1,
+      right: 0.9,
+      bottom: 0.9,
+    })
+    const afterCrop = await inspectPdf(file)
+    const afterCropSha = sha256(await readFile(file))
+    const split = await callPdfTool(relay.base, file, 'split_pages', { per_page: 2 })
+    const splitPath = savedPathFrom(split)
+    const splitInfo = splitPath && existsSync(splitPath) ? await inspectPdf(splitPath) : null
+    const afterSplitSha = sha256(await readFile(file))
+    shot = await page.screenshot({ type: 'png' })
+
+    const missPage = await browser.newPage()
+    await missPage.goto(`${relay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${missing}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const missingReady = await waitReady(relay.base, missing, 20_000).catch((error) => ({
+      readiness: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    }))
+    await missPage.close()
+    const badPage = await browser.newPage()
+    await badPage.goto(`${relay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${corrupt}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const corruptReady = await waitReady(relay.base, corrupt, 20_000).catch((error) => ({
+      readiness: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    }))
+    await badPage.close()
+
+    const a4 = afterSize.sizes.every((size) => size.w === 595 && size.h === 842)
+    const croppedSmaller = afterCrop.sizes[0].w < afterSize.sizes[0].w && afterCrop.sizes[0].h < afterSize.sizes[0].h
+    const successAssertions = [
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened),
+      assertion('extract-ok', toolOk(extracted) && Boolean(extractPath), true, extracted),
+      assertion('extract-reopen-pages', extractInfo?.pageCount === 2, 2, extractInfo),
+      assertion('extract-does-not-rewrite-source', afterExtractSha === beforeSha, beforeSha, afterExtractSha),
+      assertion('insert-ok', toolOk(inserted), true, inserted),
+      assertion('insert-page-count', afterInsert.pageCount === 4, 4, afterInsert),
+      assertion('set-size-ok', toolOk(sized) && a4, 'A4 595x842', afterSize),
+      assertion('crop-ok', toolOk(cropped) && croppedSmaller, 'smaller crop', afterCrop),
+      assertion('split-ok', toolOk(split) && splitInfo?.pageCount === 8, 8, splitInfo),
+      assertion('split-does-not-rewrite-source', afterSplitSha === afterCropSha, afterCropSha, afterSplitSha),
+    ]
+    const failure1 = [
+      assertion('empty-pages-rejected', toolOk(extractBad) === false, false, extractBad),
+      assertion('oob-pages-rejected', toolOk(extractOob) === false, false, extractOob),
+      assertion('invalid-range-keeps-source', afterBadSha === beforeSha, beforeSha, afterBadSha),
+    ]
+    const failure2 = [
+      assertion('missing-file-error', missingReady.readiness === 'error', 'error', missingReady),
+      assertion('corrupt-file-error', corruptReady.readiness === 'error', 'error', corruptReady),
+    ]
+    const success = await writeEvidence(outDir, 'UF-003', 'success', {
+      cases: [{ id: 'pdf-pages-extract-size-split-crop', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+      console: logs.join('\n'),
+      network: { events: networkEvents.slice(0, 80), count: networkEvents.length },
+      screenshot: shot,
+    })
+    const fail1 = await writeEvidence(outDir, 'UF-003', 'failure-1', {
+      cases: [{ id: 'pdf-pages-invalid-range', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+      console: `${logs.join('\n')}\nbad=${JSON.stringify(extractBad)}\noob=${JSON.stringify(extractOob)}\n`,
+      network: { events: [extractBad, extractOob], count: 2 },
+      screenshot: shot,
+    })
+    const fail2 = await writeEvidence(outDir, 'UF-003', 'failure-2', {
+      cases: [{ id: 'pdf-pages-missing-or-corrupt', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+      console: `${logs.join('\n')}\nmissing=${JSON.stringify(missingReady)}\ncorrupt=${JSON.stringify(corruptReady)}\n`,
+      network: { events: [missingReady, corruptReady], count: 2 },
+      screenshot: shot,
+    })
+    const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-003',
+      branch: 'pdf-pages',
+      status: ok ? 'passed' : 'failed',
+      results: { success, failure1: fail1, failure2: fail2 },
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-7.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (ok === false) throw new Error('pdf-pages case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -1550,6 +1719,10 @@ async function main() {
   if (args.caseName === 'sheets-media' || runPhase0) {
     await runSheetsMedia(evidenceRoot)
     ran.push('sheets-media')
+  }
+  if (args.caseName === 'pdf-pages' || args.all) {
+    await runPdfPages(evidenceRoot)
+    ran.push('pdf-pages')
   }
   if (args.caseName === 'entries-sheets') {
     const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)
