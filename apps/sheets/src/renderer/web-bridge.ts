@@ -191,6 +191,38 @@ async function relay<T>(path: string, body?: unknown): Promise<T | null> {
   }
 }
 
+
+async function runPrintJob(payload: Record<string, unknown>): Promise<{
+  ok: boolean
+  path?: string
+  error?: string
+  canceled?: boolean
+  available?: boolean
+  base64?: string
+}> {
+  const ready = await relay<{ available?: boolean; reason?: string }>('/print/ready')
+  if (!ready?.available) {
+    return { ok: false, error: ready?.reason ?? 'print-service-unavailable', available: false }
+  }
+  const started = await relay<{ ok?: boolean; jobId?: string; error?: string }>('/print/jobs', payload)
+  if (!started?.ok || !started.jobId) {
+    return { ok: false, error: started?.error ?? 'print-job-rejected', available: false }
+  }
+  const done = await relay<{
+    ok?: boolean
+    dest?: string
+    error?: string
+    status?: string
+    base64?: string
+  }>('/print/jobs/wait', { id: started.jobId })
+  if (done?.status === 'cancelled') return { ok: false, error: 'cancelled', canceled: true }
+  if (!done?.ok) return { ok: false, error: done?.error ?? 'print-failed' }
+  const result: { ok: true; path?: string; base64?: string } = { ok: true }
+  if (done.dest) result.path = done.dest
+  if (done.base64) result.base64 = done.base64
+  return result
+}
+
 /** URL open target (`?open=` / `?file=`), captured before the address bar is rewritten. */
 function parseOpenTarget(): string | null {
   const params = new URLSearchParams(location.search)
@@ -430,9 +462,30 @@ const desktopApi: DesktopApi = {
 
   autoRenameWorkbook: async () => ({ renamed: false }),
 
-  exportPdf: async (_request: WorkbookExportPdfRequest): Promise<WorkbookExportPdfResult> => ({
-    canceled: true,
-  }),
+  exportPdf: async (request: WorkbookExportPdfRequest): Promise<WorkbookExportPdfResult> => {
+    const destHint = (request as WorkbookExportPdfRequest & { dest?: string }).dest
+    const stem = String(request.fileName || 'workbook').replace(/\.[^.]+$/, '')
+    const dest =
+      typeof destHint === 'string' && destHint.startsWith('/')
+        ? destHint
+        : opened?.path?.startsWith('/')
+          ? `${opened.path.replace(/\/[^/]+$/, '')}/${stem}.pdf`
+          : `/tmp/genoffice-web-print/${stem}.pdf`
+    const printed = await runPrintJob({
+      app: 'sheets',
+      dest,
+      html: request.html,
+      landscape: request.landscape,
+      pageSize: request.pageSize,
+      margins: request.margins,
+      scale: request.scale,
+      headerTemplate: request.headerTemplate,
+      footerTemplate: request.footerTemplate,
+    })
+    if (printed.canceled || printed.available === false) return { canceled: true }
+    if (!printed.ok) return { canceled: true }
+    return { canceled: false, path: printed.path ?? dest }
+  },
   exportCsv: async () => ({ canceled: true as const }),
   confirmCsvSave: async () => 'cancel' as const,
   createDocument: async () => ({

@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const PHASE1_CASES = ['pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
@@ -177,10 +177,10 @@ async function until(fn, { timeout = 20_000, interval = 40 } = {}) {
   throw new Error(`wait timeout: ${last instanceof Error ? last.message : JSON.stringify(last)}`)
 }
 
-async function startRelay(port) {
+async function startRelay(port, extraEnv = {}) {
   const child = spawn(process.execPath, [join(ENGINE, 'web/server.mjs')], {
     cwd: ENGINE,
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port) },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const logs = []
@@ -2526,6 +2526,187 @@ async function runSlidesPresentation(outDir) {
   }
 }
 
+
+async function fileIsPdf(file) {
+  if (existsSync(file) === false) return false
+  const buf = await readFile(file)
+  return buf.subarray(0, 4).toString() === '%PDF' && buf.length > 64
+}
+
+async function runPrintExport(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-print-export')
+  await mkdir(workDir, { recursive: true })
+  const docsFile = join(workDir, 'docs-source.docx')
+  const mdFile = join(workDir, 'md-source.md')
+  const sheetsFile = join(workDir, 'sheets-source.xlsx')
+  const slidesFile = join(workDir, 'slides-source.pptx')
+  const pdfFile = join(workDir, 'pdf-source.pdf')
+  await copyFile(join(ENGINE, 'fixtures/generated/simple.docx'), docsFile)
+  await writeFile(mdFile, '# WfcMdPrint\n')
+  await copyFile(SHEETS_FIXTURE, sheetsFile)
+  await copyFile(join(ENGINE, 'fixtures/generated/sample.pptx'), slidesFile)
+  await buildPdfFixture(pdfFile)
+  const dests = {
+    docs: join(workDir, 'docs-out.pdf'),
+    markdown: join(workDir, 'md-out.pdf'),
+    sheets: join(workDir, 'sheets-out.pdf'),
+    slides: join(workDir, 'slides-out.pdf'),
+    pdf: join(workDir, 'pdf-out.pdf'),
+  }
+  for (const file of Object.values(dests)) {
+    if (existsSync(file)) await unlink(file)
+  }
+  const missingDest = join(workDir, 'missing-dep.pdf')
+  const cancelDest = join(workDir, 'cancel-out.pdf')
+  if (existsSync(missingDest)) await unlink(missingDest)
+  if (existsSync(cancelDest)) await unlink(cancelDest)
+
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  const exports = {}
+  try {
+    const openApp = async (app, file) => {
+      const page = await browser.newPage()
+      page.on('console', (msg) => logs.push(`[${app}] ${msg.text()}`))
+      page.on('pageerror', (err) => logs.push(`[${app}] PAGEERROR ${err.message}`))
+      await page.goto(`${relay.base}/${app}/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      const opened = await waitReady(relay.base, file, 90_000)
+      return { page, opened }
+    }
+
+    const docs = await openApp('docs', docsFile)
+    exports.docs = await docs.page.evaluate(async (dest) => window.desktop.exportPdf('docs-source.docx', 12240, 15840, dest), dests.docs)
+    shot = await docs.page.screenshot({ type: 'png' })
+    await docs.page.close()
+
+    const md = await openApp('markdown', mdFile)
+    exports.markdown = await md.page.evaluate(async (dest) => window.markdownApi.exportPdf({
+      html: '<html><body><h1>WfcMdPrint</h1></body></html>',
+      suggestedName: 'md-source',
+      dest,
+    }), dests.markdown)
+    await md.page.close()
+
+    const sheets = await openApp('sheets', sheetsFile)
+    exports.sheets = await sheets.page.evaluate(async (dest) => window.desktopApi.exportPdf({
+      fileName: 'sheets-source.xlsx',
+      html: '<html><body><h1>WfcSheetsPrint</h1></body></html>',
+      landscape: false,
+      pageSize: 'A4',
+      margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 },
+      scale: 1,
+      dest,
+    }), dests.sheets)
+    await sheets.page.close()
+
+    const slides = await openApp('slides', slidesFile)
+    exports.slides = await slides.page.evaluate(async ({ dest, png }) => window.slidesApi.exportPdf({
+      filePath: dest,
+      pngsBase64: [png],
+      widthPx: 1280,
+      heightPx: 720,
+    }), { dest: dests.slides, png: TINY_PNG })
+    await slides.page.close()
+
+    const pdf = await openApp('pdf', pdfFile)
+    exports.pdf = await pdf.page.evaluate(async (dest) => window.pdfApi.exportPdf(dest), dests.pdf)
+    await pdf.page.close()
+
+    const readyOk = await fetch(`${relay.base}/api/print/ready`).then((r) => r.json())
+    const successAssertions = [
+      assertion('print-ready', readyOk.available === true, true, readyOk),
+      assertion('docs-export', exports.docs?.ok === true && await fileIsPdf(dests.docs), true, { result: exports.docs, dest: dests.docs }),
+      assertion('markdown-export', exports.markdown?.ok === true && await fileIsPdf(dests.markdown), true, { result: exports.markdown, dest: dests.markdown }),
+      assertion('sheets-export', exports.sheets?.canceled === false && await fileIsPdf(dests.sheets), true, { result: exports.sheets, dest: dests.sheets }),
+      assertion('slides-export', exports.slides?.ok === true && await fileIsPdf(dests.slides), true, { result: exports.slides, dest: dests.slides }),
+      assertion('pdf-export', exports.pdf?.ok === true && await fileIsPdf(dests.pdf), true, { result: exports.pdf, dest: dests.pdf }),
+      assertion('docs-pages', (await inspectPdf(dests.docs)).pageCount >= 1, 1, await inspectPdf(dests.docs)),
+    ]
+
+    const offPort = await freePort(port + 1)
+    const offRelay = await startRelay(offPort, { GENOFFICE_PRINT_DISABLED: '1' })
+    let missing = null
+    try {
+      const offReady = await fetch(`${offRelay.base}/api/print/ready`).then((r) => r.json())
+      const offPage = await browser.newPage()
+      await offPage.goto(`${offRelay.base}/docs/?control=1&open=${encodeURIComponent(`path:${docsFile}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      await waitReady(offRelay.base, docsFile, 90_000)
+      missing = await offPage.evaluate(async (dest) => window.desktop.exportPdf('docs-source.docx', 12240, 15840, dest), missingDest)
+      await offPage.close()
+      const failure1 = [
+        assertion('ready-unavailable', offReady.available === false, false, offReady),
+        assertion('missing-dep-refuses', missing?.ok === false, false, missing),
+        assertion('missing-dep-no-file', existsSync(missingDest) === false, false, existsSync(missingDest)),
+      ]
+      const holdPort = await freePort(offPort + 1)
+      const holdRelay = await startRelay(holdPort, { GENOFFICE_PRINT_HOLD_MS: '2500' })
+      let cancel = null
+      let waited = null
+      try {
+        cancel = await post(holdRelay.base, '/api/print/jobs', {
+          dest: cancelDest,
+          html: '<html><body>WfcCancel</body></html>',
+        })
+        const cancelled = await post(holdRelay.base, '/api/print/jobs/cancel', { id: cancel.jobId })
+        waited = await post(holdRelay.base, '/api/print/jobs/wait', { id: cancel.jobId })
+        const failure2 = [
+          assertion('job-started', Boolean(cancel?.jobId), true, cancel),
+          assertion('cancel-ok', cancelled?.ok === true || waited?.status === 'cancelled', true, { cancelled, waited }),
+          assertion('cancel-no-file', existsSync(cancelDest) === false, false, { exists: existsSync(cancelDest), waited }),
+        ]
+        const success = await writeEvidence(outDir, 'UF-005', 'success', {
+          cases: [{ id: 'print-export-five-apps', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+          console: logs.join('\n'),
+          network: { events: networkEvents.slice(0, 40), count: networkEvents.length },
+          screenshot: shot,
+        })
+        const fail1 = await writeEvidence(outDir, 'UF-005', 'failure-1', {
+          cases: [{ id: 'print-export-missing-dep', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+          console: `${logs.join('\n')}\nmissing=${JSON.stringify(missing)}\n`,
+          network: { events: [offReady, missing], count: 2 },
+          screenshot: shot,
+        })
+        const fail2 = await writeEvidence(outDir, 'UF-005', 'failure-2', {
+          cases: [{ id: 'print-export-cancel', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+          console: `${logs.join('\n')}\nstart=${JSON.stringify(cancel)}\nwait=${JSON.stringify(waited)}\n`,
+          network: { events: [cancel, waited], count: 2 },
+          screenshot: shot,
+        })
+        const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+        const payload = {
+          schema_version: 1,
+          package: 'web-feature-completion',
+          uf: 'UF-005',
+          branch: 'print-export',
+          status: ok ? 'passed' : 'failed',
+          results: { success, failure1: fail1, failure2: fail2, exports, dests },
+        }
+        await mkdir(join(outDir, 'phase-0'), { recursive: true })
+        await writeFile(join(outDir, 'phase-0/task-13.log'), `${JSON.stringify(payload, null, 2)}\n`)
+        console.log(JSON.stringify(payload, null, 2))
+        if (ok === false) throw new Error('print-export case failed')
+      } finally {
+        stopRelay(holdRelay)
+      }
+    } finally {
+      stopRelay(offRelay)
+    }
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -2577,6 +2758,10 @@ async function main() {
   if (args.caseName === 'slides-presentation' || runPhase1) {
     await runSlidesPresentation(evidenceRoot)
     ran.push('slides-presentation')
+  }
+  if (args.caseName === 'print-export' || args.all) {
+    await runPrintExport(evidenceRoot)
+    ran.push('print-export')
   }
   if (args.caseName === 'pdf-slides') {
     const missing = PHASE1_CASES.filter((name) => ran.includes(name) === false)

@@ -131,6 +131,38 @@ async function relay<T>(path: string, body?: unknown, init?: RequestInit): Promi
   }
 }
 
+
+async function runPrintJob(payload: Record<string, unknown>): Promise<{
+  ok: boolean
+  path?: string
+  error?: string
+  canceled?: boolean
+  available?: boolean
+  base64?: string
+}> {
+  const ready = await relay<{ available?: boolean; reason?: string }>('/print/ready')
+  if (!ready?.available) {
+    return { ok: false, error: ready?.reason ?? 'print-service-unavailable', available: false }
+  }
+  const started = await relay<{ ok?: boolean; jobId?: string; error?: string }>('/print/jobs', payload)
+  if (!started?.ok || !started.jobId) {
+    return { ok: false, error: started?.error ?? 'print-job-rejected', available: false }
+  }
+  const done = await relay<{
+    ok?: boolean
+    dest?: string
+    error?: string
+    status?: string
+    base64?: string
+  }>('/print/jobs/wait', { id: started.jobId })
+  if (done?.status === 'cancelled') return { ok: false, error: 'cancelled', canceled: true }
+  if (!done?.ok) return { ok: false, error: done?.error ?? 'print-failed' }
+  const result: { ok: true; path?: string; base64?: string } = { ok: true }
+  if (done.dest) result.path = done.dest
+  if (done.base64) result.base64 = done.base64
+  return result
+}
+
 // ────────────────────────────────────────────────────────────
 // IndexedDB persistence
 // ────────────────────────────────────────────────────────────
@@ -694,14 +726,20 @@ const desktop: DesktopApi = {
   },
 
   print: async () => {
+    const ready = await relay<{ available?: boolean; reason?: string }>('/print/ready')
+    if (!ready?.available) return { ok: false, error: ready?.reason ?? 'print-service-unavailable' }
     window.print()
     return { ok: true }
   },
 
-  exportPdf: async () => {
-    // the browser has no printToPDF; the print dialog offers "Save as PDF"
-    window.print()
-    return { ok: true, path: '浏览器打印（另存为 PDF）' }
+  exportPdf: async (defaultName, pageWidthTwips, pageHeightTwips, outPath, scale) => {
+    const stem = String(defaultName || 'document').replace(/\.[^.]+$/, '')
+    const dest =
+      typeof outPath === 'string' && outPath.startsWith('/')
+        ? outPath
+        : `/tmp/genoffice-web-print/${stem}.pdf`
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${stem}</title></head><body>${document.body?.innerHTML ?? '<p></p>'}</body></html>`
+    return runPrintJob({ app: 'docs', dest, html, pageWidthTwips, pageHeightTwips, scale })
   },
 
   exportHtml: async (defaultName, html) => {
@@ -710,15 +748,33 @@ const desktop: DesktopApi = {
     return { ok: true, path: name }
   },
 
-  printPdfBuffer: async () => ({
-    ok: false,
-    error: '网页版无法直接生成 PDF 字节；请使用「文件 → 打印」或浏览器打印对话框另存为 PDF',
-  }),
+  printPdfBuffer: async (pageWidthTwips, pageHeightTwips, scale) => {
+    const html = `<!doctype html><html><head><meta charset="utf-8"></head><body>${document.body?.innerHTML ?? '<p></p>'}</body></html>`
+    const printed = await runPrintJob({
+      app: 'docs',
+      html,
+      pageWidthTwips,
+      pageHeightTwips,
+      scale,
+      returnBytes: true,
+    })
+    if (!printed.ok || !printed.base64) return { ok: false, error: printed.error ?? 'print-failed' }
+    return { ok: true, base64: printed.base64 }
+  },
 
-  saveMergedPdf: async () => ({
-    ok: false,
-    error: '网页版暂不支持合并导出 PDF；请使用「文件 → 打印」另存为 PDF',
-  }),
+  saveMergedPdf: async (defaultName, base64Parts, outPath) => {
+    const dest =
+      typeof outPath === 'string' && outPath.startsWith('/')
+        ? outPath
+        : `/tmp/genoffice-web-print/${String(defaultName || 'document').replace(/\.[^.]+$/, '')}.pdf`
+    if (!Array.isArray(base64Parts) || base64Parts.length === 0) return { ok: false, error: 'empty merge' }
+    const printed = await runPrintJob(
+      base64Parts.length === 1
+        ? { app: 'docs', dest, pdfBase64: base64Parts[0] }
+        : { app: 'docs', dest, pdfsBase64: base64Parts },
+    )
+    return printed.ok ? { ok: true, path: printed.path } : { ok: false, error: printed.error ?? 'merge-failed' }
+  },
 
   aiChat: async (request: AiChatRequest): Promise<AiChatResponse> => {
     const { settings, system, user } = request

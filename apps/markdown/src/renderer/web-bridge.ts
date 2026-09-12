@@ -120,6 +120,54 @@ const THEME_KEY = 'genoffice-web-theme'
 const AI_SETTINGS_KEY = 'genoffice-web-ai-settings'
 const RELAY_BASE = '/api'
 
+async function relay<T>(path: string, body?: unknown): Promise<T | null> {
+  try {
+    const resp = await fetch(`${RELAY_BASE}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    })
+    if (!resp.ok) return null
+    return (await resp.json()) as T
+  } catch {
+    return null
+  }
+}
+
+
+async function runPrintJob(payload: Record<string, unknown>): Promise<{
+  ok: boolean
+  path?: string
+  error?: string
+  canceled?: boolean
+  available?: boolean
+  base64?: string
+}> {
+  const ready = await relay<{ available?: boolean; reason?: string }>('/print/ready')
+  if (!ready?.available) {
+    return { ok: false, error: ready?.reason ?? 'print-service-unavailable', available: false }
+  }
+  const started = await relay<{ ok?: boolean; jobId?: string; error?: string }>('/print/jobs', payload)
+  if (!started?.ok || !started.jobId) {
+    return { ok: false, error: started?.error ?? 'print-job-rejected', available: false }
+  }
+  const done = await relay<{
+    ok?: boolean
+    dest?: string
+    error?: string
+    status?: string
+    base64?: string
+  }>('/print/jobs/wait', { id: started.jobId })
+  if (done?.status === 'cancelled') return { ok: false, error: 'cancelled', canceled: true }
+  if (!done?.ok) return { ok: false, error: done?.error ?? 'print-failed' }
+  const result: { ok: true; path?: string; base64?: string } = { ok: true }
+  if (done.dest) result.path = done.dest
+  if (done.base64) result.base64 = done.base64
+  return result
+}
+
+
 function newPath(name: string): string {
   return `/webdoc/${crypto.randomUUID()}/${name}`
 }
@@ -487,10 +535,21 @@ const markdownApi: MarkdownApi = {
     return { ok: true, path: `${safeName}.docx` }
   },
 
-  exportPdf: async (_request: ExportPdfRequest): Promise<ExportResult> => ({
-    ok: false,
-    error: '网页版请使用浏览器打印（Ctrl/Cmd+P → 另存为 PDF）导出',
-  }),
+  exportPdf: async (request: ExportPdfRequest): Promise<ExportResult> => {
+    const destHint = (request as ExportPdfRequest & { dest?: string }).dest
+    const stem = String(request.suggestedName || 'markdown').replace(/\.[^.]+$/, '')
+    const dest =
+      typeof destHint === 'string' && destHint.startsWith('/')
+        ? destHint
+        : currentPath && currentPath.startsWith('/')
+          ? `${currentPath.replace(/\/[^/]+$/, '')}/${stem}.pdf`
+          : `/tmp/genoffice-web-print/${stem}.pdf`
+    if (!request.html) return { ok: false, error: 'missing print html' }
+    const printed = await runPrintJob({ app: 'markdown', dest, html: request.html })
+    if (printed.canceled) return { ok: true, canceled: true }
+    if (!printed.ok) return { ok: false, error: printed.error ?? 'print-failed' }
+    return { ok: true, path: printed.path ?? dest }
+  },
 
   getLanguage: async () => {
     const v = localStorage.getItem(LANG_KEY)

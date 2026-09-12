@@ -286,6 +286,38 @@ async function rewriteOpened(next: Uint8Array): Promise<void> {
   opened = { ...opened, bytes: next, mtimeMs: written.mtimeMs, fileRevision: undefined }
 }
 
+
+async function runPrintJob(payload: Record<string, unknown>): Promise<{
+  ok: boolean
+  path?: string
+  error?: string
+  canceled?: boolean
+  available?: boolean
+  base64?: string
+}> {
+  const ready = await relay<{ available?: boolean; reason?: string }>('/print/ready')
+  if (!ready?.available) {
+    return { ok: false, error: ready?.reason ?? 'print-service-unavailable', available: false }
+  }
+  const started = await relay<{ ok?: boolean; jobId?: string; error?: string }>('/print/jobs', payload)
+  if (!started?.ok || !started.jobId) {
+    return { ok: false, error: started?.error ?? 'print-job-rejected', available: false }
+  }
+  const done = await relay<{
+    ok?: boolean
+    dest?: string
+    error?: string
+    status?: string
+    base64?: string
+  }>('/print/jobs/wait', { id: started.jobId })
+  if (done?.status === 'cancelled') return { ok: false, error: 'cancelled', canceled: true }
+  if (!done?.ok) return { ok: false, error: done?.error ?? 'print-failed' }
+  const result: { ok: true; path?: string; base64?: string } = { ok: true }
+  if (done.dest) result.path = done.dest
+  if (done.base64) result.base64 = done.base64
+  return result
+}
+
 function requireOpened(): WebPdfState | { ok: false; error: string } {
   if (!opened) return { ok: false, error: 'no file open' }
   return opened
@@ -617,6 +649,21 @@ const pdfApi: PdfApi = {
   },
 
   getAiSettings: async () => readAiSettings(),
+  exportPdf: async (dest: string) => {
+    const session = requireOpened()
+    if ('error' in session) return { ok: false, error: session.error }
+    if (typeof dest !== 'string' || dest.startsWith('/') === false) {
+      return { ok: false, error: 'exportPdf needs an absolute dest' }
+    }
+    let binary = ''
+    const bytes = session.bytes
+    const step = 0x8000
+    for (let i = 0; i < bytes.length; i += step) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + step))
+    }
+    const printed = await runPrintJob({ app: 'pdf', dest, pdfBase64: btoa(binary) })
+    return printed.ok ? { ok: true, path: printed.path ?? dest } : { ok: false, error: printed.error ?? 'print-failed' }
+  },
   ocrPage: async () => null,
   createDocument: async () => ({ ok: false, error: '网页版暂不支持 create_document' }),
   aiStream: async () => {},

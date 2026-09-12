@@ -30,6 +30,8 @@ import type {
   AddTableOp,
   ApplyEditScriptOp,
   ExportImagesOp,
+  ExportPdfOp,
+  PrintSlidesOp,
   HeaderFooterOp,
   AnimationItem,
   ApplyThemeOp,
@@ -442,6 +444,38 @@ async function imageDimsForSpec(
   }
 }
 
+
+
+async function runPrintJob(payload: Record<string, unknown>): Promise<{
+  ok: boolean
+  path?: string
+  error?: string
+  canceled?: boolean
+  available?: boolean
+  base64?: string
+}> {
+  const ready = await relay<{ available?: boolean; reason?: string }>('/print/ready')
+  if (!ready?.available) {
+    return { ok: false, error: ready?.reason ?? 'print-service-unavailable', available: false }
+  }
+  const started = await relay<{ ok?: boolean; jobId?: string; error?: string }>('/print/jobs', payload)
+  if (!started?.ok || !started.jobId) {
+    return { ok: false, error: started?.error ?? 'print-job-rejected', available: false }
+  }
+  const done = await relay<{
+    ok?: boolean
+    dest?: string
+    error?: string
+    status?: string
+    base64?: string
+  }>('/print/jobs/wait', { id: started.jobId })
+  if (done?.status === 'cancelled') return { ok: false, error: 'cancelled', canceled: true }
+  if (!done?.ok) return { ok: false, error: done?.error ?? 'print-failed' }
+  const result: { ok: true; path?: string; base64?: string } = { ok: true }
+  if (done.dest) result.path = done.dest
+  if (done.base64) result.base64 = done.base64
+  return result
+}
 
 // ── explicit not-available stub (防呆: never silent) ────────────────────
 
@@ -2147,7 +2181,21 @@ const slidesApi: SlidesApi = {
     return webRedo(session)
   },
 
-  printSlides: async () => notAvailable('printSlides'),
+  printSlides: async (op: PrintSlidesOp) => {
+    const ready = await relay<{ available?: boolean; reason?: string }>('/print/ready')
+    if (!ready?.available) return { ok: false, error: ready?.reason ?? 'print-service-unavailable' }
+    if (!op || !Array.isArray(op.pngsBase64) || op.pngsBase64.length === 0) {
+      return { ok: false, error: 'printSlides needs png pages' }
+    }
+    const printed = await runPrintJob({
+      app: 'slides',
+      pngsBase64: op.pngsBase64,
+      widthPx: op.widthPx,
+      heightPx: op.heightPx,
+      returnBytes: true,
+    })
+    return printed.ok ? { ok: true } : { ok: false, error: printed.error ?? 'print-failed' }
+  },
   exportImages: async (op: ExportImagesOp) => {
     if (!op.dir || !op.dir.startsWith('/') || !Array.isArray(op.pngsBase64) || op.pngsBase64.length === 0) {
       return { ok: false, error: 'exportImages needs an absolute dir and at least one PNG' }
@@ -2166,9 +2214,29 @@ const slidesApi: SlidesApi = {
     }
     return { ok: true, paths }
   },
-  exportPdf: async () => notAvailable('exportPdf'),
+  exportPdf: async (op: ExportPdfOp) => {
+    if (!op?.filePath || !op.filePath.startsWith('/') || !Array.isArray(op.pngsBase64) || op.pngsBase64.length === 0) {
+      return { ok: false, error: 'exportPdf needs an absolute filePath and at least one PNG' }
+    }
+    const printed = await runPrintJob({
+      app: 'slides',
+      dest: op.filePath,
+      pngsBase64: op.pngsBase64,
+      widthPx: op.widthPx,
+      heightPx: op.heightPx,
+    })
+    return printed.ok
+      ? { ok: true, path: printed.path ?? op.filePath }
+      : { ok: false, error: printed.error ?? 'print-failed' }
+  },
   pickExportDir: async () => null,
-  pickExportPdfPath: async () => null,
+  pickExportPdfPath: async (defaultName: string) => {
+    const session = getWebSession()
+    if (!session?.path || !session.path.startsWith('/')) return null
+    const dir = session.path.replace(/\/[^/]+$/, '')
+    const name = defaultName.endsWith('.pdf') ? defaultName : `${defaultName}.pdf`
+    return `${dir}/${name}`
+  },
 
   // ── save (BR-008: bytes via webSaveBytes; write-back is control.ts's job) ──
   save: async () => {

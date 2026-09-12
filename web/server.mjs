@@ -6,6 +6,11 @@
  * capabilities the renderer cannot do itself:
  *
  *   GET  /api/health          → { ok, name }
+ *   GET  /api/print/ready     → { available, reason? }
+ *   POST /api/print/jobs      { dest, html|pdfBase64|pngsBase64 } → job
+ *   GET  /api/print/jobs?id=  → job status
+ *   POST /api/print/jobs/wait { id } → finished job
+ *   POST /api/print/jobs/cancel { id } → cancel
  *   GET  /api/dir?path=       → directory listing { ok, path, parent, entries }
  *                              (defaults to the user's home; same security
  *                              policy as /api/file — loopback-only by default,
@@ -33,6 +38,7 @@ import { homedir } from 'node:os'
 import { extname, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { preflightDest, writeFileAtomic } from './write-atomic.mjs'
+import { printReady, startPrintJob, getPrintJob, cancelPrintJob, waitPrintJob } from './print-service.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -564,7 +570,28 @@ async function handleApi(req, res, pathname, body, url) {
       ready: live.length > 0,
       roots: live.map((r) => r.app),
       executors: executors.size,
+      print: printReady(),
     })
+  }
+
+  if (req.method === 'GET' && pathname === '/api/print/ready') {
+    return json(res, 200, { ok: true, ...printReady() })
+  }
+  if (req.method === 'POST' && pathname === '/api/print/jobs') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, startPrintJob(body ?? {}))
+  }
+  if (req.method === 'GET' && pathname === '/api/print/jobs') {
+    const job = getPrintJob(url.searchParams.get('id'))
+    return json(res, 200, job ?? { ok: false, error: 'unknown job' })
+  }
+  if (req.method === 'POST' && pathname === '/api/print/jobs/wait') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, await waitPrintJob(body?.id))
+  }
+  if (req.method === 'POST' && pathname === '/api/print/jobs/cancel') {
+    if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    return json(res, 200, cancelPrintJob(body?.id))
   }
 
   // remote file proxy: /docs/?open=https://… opens files from any CORS-free host
