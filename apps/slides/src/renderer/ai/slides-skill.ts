@@ -1,4 +1,4 @@
-import type { AgentSkill, ToolDisplay } from '@genoffice/agent-core'
+import type { AgentSkill, ToolDisplay, ToolExecution } from '@genoffice/agent-core'
 import type {
   GroupRenderNode,
   PictureRenderNode,
@@ -1532,7 +1532,7 @@ async function executeTool(
   call: AgentToolCall,
   state?: SkillState,
   signal?: AbortSignal,
-) {
+): Promise<ToolExecution> {
   const slides = access.getSlides()
   switch (call.name) {
     case 'read_slide': {
