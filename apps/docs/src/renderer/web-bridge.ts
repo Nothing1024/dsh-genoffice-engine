@@ -1042,6 +1042,10 @@ function parseOpenTarget(): string | null {
   return null
 }
 
+// Captured before control.ts / boot effects rewrite the address bar.
+const INITIAL_OPEN_TARGET = parseOpenTarget()
+let pendingOpenConsumed = false
+
 /** strip the open/file query params (and /f/ path) from the address bar */
 function clearOpenTarget(): void {
   const url = new URL(location.href)
@@ -1061,6 +1065,7 @@ function clearOpenTarget(): void {
 }
 
 async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; name: string } | null> {
+  const isPath = target.startsWith('path:')
   try {
     if (target.startsWith('data:')) {
       const comma = target.indexOf(',')
@@ -1076,7 +1081,6 @@ async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; nam
     const isHttp = /^https?:\/\//.test(target)
     const isServer = target.startsWith('server:')
     const isInject = target.startsWith('inject:')
-    const isPath = target.startsWith('path:')
     if (!isHttp && !isServer && !isInject && !isPath) return null
     const endpoint = isHttp
       ? `fetch-file?url=${encodeURIComponent(target)}`
@@ -1086,12 +1090,19 @@ async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; nam
           ? `inject/${encodeURIComponent(target.slice('inject:'.length))}`
           : `file?path=${encodeURIComponent(target.slice('path:'.length))}`
     const resp = await fetch(`${RELAY_BASE}/${endpoint}`)
-    if (!resp.ok) return null
+    if (!resp.ok) {
+      if (isPath) throw new Error(`load-error: HTTP ${resp.status}`)
+      return null
+    }
     const data = (await resp.json()) as { ok: boolean; base64?: string; name?: string; error?: string }
-    if (!data.ok || !data.base64) return null
+    if (!data.ok || !data.base64) {
+      if (isPath) throw new Error(`load-error: ${data.error ?? 'empty result for path target'}`)
+      return null
+    }
     const bin = Uint8Array.from(atob(data.base64), (c) => c.charCodeAt(0))
     return { data: bin.buffer as ArrayBuffer, name: data.name ?? 'remote-file' }
-  } catch {
+  } catch (error) {
+    if (isPath || String(error).includes('load-error:')) throw error
     return null
   }
 }
@@ -1106,9 +1117,15 @@ async function openTarget(target: string): Promise<OpenFileResult | null> {
   // remote / data: / server: → pull bytes through the relay and open as a
   // local (bytes) document
   const remote = await bytesFromRemote(target)
-  if (!remote) return null
-  if (!remote.name.toLowerCase().endsWith('.docx')) return null
-  const path = newPath(remote.name)
+  if (!remote) {
+    if (target.startsWith('path:')) throw new Error('load-error: empty result for path target')
+    return null
+  }
+  const pathHint = target.startsWith('path:') ? target.slice('path:'.length) : target
+  const looksDocx =
+    remote.name.toLowerCase().endsWith('.docx') || pathHint.toLowerCase().endsWith('.docx')
+  if (!looksDocx) return null
+  const path = newPath(remote.name.toLowerCase().endsWith('.docx') ? remote.name : pathHint.split(/[\\/]/).pop() ?? remote.name)
   await idbPut(STORE_HANDLES, path, {
     name: remote.name,
     kind: 'bytes',
@@ -1125,10 +1142,16 @@ async function openTarget(target: string): Promise<OpenFileResult | null> {
 }
 
 async function consumePendingOpenDocxImpl(): Promise<OpenFileResult | null> {
-  const target = parseOpenTarget()
+  if (pendingOpenConsumed) return null
+  pendingOpenConsumed = true
+  const target = parseOpenTarget() ?? INITIAL_OPEN_TARGET
   if (!target) return null
   clearOpenTarget()
-  return await openTarget(target)
+  const opened = await openTarget(target)
+  if (!opened && target.startsWith('path:')) {
+    throw new Error('load-error: empty result for path target')
+  }
+  return opened
 }
 
 // ────────────────────────────────────────────────────────────

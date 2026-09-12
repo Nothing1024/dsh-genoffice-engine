@@ -1503,8 +1503,8 @@ export function App() {
         const outcome = pending ? await loadFile(pending) : 'canceled'
         if (outcome === 'ok') {
           applyControlReady('ready')
-        } else if (CONTROL_PATH && outcome === 'failed') {
-          applyControlReady('error', { error: 'load failed' })
+        } else if (CONTROL_PATH && (outcome === 'failed' || outcome === 'canceled')) {
+          applyControlReady('error', { error: pending ? 'load failed' : 'load-error: empty result for path target' })
           return
         }
         if (outcome === 'canceled') await newFile()
@@ -1517,7 +1517,13 @@ export function App() {
         }
       })
       // Open failures also land on a blank document, or the tab stays at "Opening…" forever
-      .catch(() => {
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        if (CONTROL_PATH) {
+          applyControlReady('error', { error: message || 'load failed' })
+          bootHandledRef.current = true
+          return
+        }
         if (bootHandledRef.current) return
         bootHandledRef.current = true
         void newFile().catch(() => {})

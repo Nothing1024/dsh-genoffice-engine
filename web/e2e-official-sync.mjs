@@ -14,6 +14,7 @@ import { createServer } from 'node:net'
 import { copyFile, mkdir, readFile, stat, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import JSZip from 'jszip'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -221,9 +222,91 @@ async function writeEvidence(outDir, uf, branch, payload) {
   return dir
 }
 
+
+async function buildDocsContextDocx() {
+  const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+  const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+  const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+  const CT = 'http://schemas.openxmlformats.org/package/2006/content-types'
+  const PKG_REL = 'http://schemas.openxmlformats.org/package/2006/relationships'
+  const commentsXml =
+    XML +
+    `<w:comments ${W}>` +
+    '<w:comment w:id="1" w:author="Alice" w:initials="A" w:date="2026-07-01T10:00:00Z">' +
+    '<w:p><w:r><w:t>OfficialThreadKeep</w:t></w:r></w:p>' +
+    '</w:comment></w:comments>'
+  const headerXml = `${XML}<w:hdr ${W}><w:p><w:r><w:t>OfficialHeaderOrig</w:t></w:r></w:p></w:hdr>`
+  const footerXml = `${XML}<w:ftr ${W}><w:p><w:r><w:t>OfficialFooterOrig</w:t></w:r></w:p></w:ftr>`
+  const stylesXml =
+    XML +
+    `<w:styles ${W}>` +
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+    '</w:styles>'
+  const body =
+    '<w:p><w:r><w:t xml:space="preserve">ContextBody </w:t></w:r>' +
+    '<w:commentRangeStart w:id="1"/>' +
+    '<w:r><w:t>OfficialCommentAnchor</w:t></w:r>' +
+    '<w:commentRangeEnd w:id="1"/>' +
+    '<w:r><w:commentReference w:id="1"/></w:r></w:p>' +
+    '<w:p><w:ins w:id="3" w:author="RevAuthor" w:date="2026-01-01T00:00:00Z">' +
+    '<w:r><w:t>OfficialRevKeep</w:t></w:r></w:ins></w:p>'
+  const sectPr =
+    '<w:sectPr>' +
+    '<w:headerReference w:type="default" r:id="rIdH"/>' +
+    '<w:footerReference w:type="default" r:id="rIdF"/>' +
+    '<w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>' +
+    '</w:sectPr>'
+  const zip = new JSZip()
+  zip.file(
+    '[Content_Types].xml',
+    `${XML}<Types xmlns="${CT}">` +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
+      '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>' +
+      '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' +
+      '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>' +
+      '</Types>',
+  )
+  zip.file(
+    '_rels/.rels',
+    `${XML}<Relationships xmlns="${PKG_REL}">` +
+      `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/>` +
+      '</Relationships>',
+  )
+  zip.file(
+    'word/_rels/document.xml.rels',
+    `${XML}<Relationships xmlns="${PKG_REL}">` +
+      `<Relationship Id="rId1" Type="${REL}/styles" Target="styles.xml"/>` +
+      `<Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/>` +
+      `<Relationship Id="rIdH" Type="${REL}/header" Target="header1.xml"/>` +
+      `<Relationship Id="rIdF" Type="${REL}/footer" Target="footer1.xml"/>` +
+      '</Relationships>',
+  )
+  zip.file('word/styles.xml', stylesXml)
+  zip.file('word/comments.xml', commentsXml)
+  zip.file('word/header1.xml', headerXml)
+  zip.file('word/footer1.xml', footerXml)
+  zip.file(
+    'word/document.xml',
+    `${XML}<w:document ${W} ${R}><w:body>${body}${sectPr}</w:body></w:document>`,
+  )
+  zip.forEach((_path, entry) => {
+    entry.date = new Date(Date.UTC(2026, 0, 1))
+  })
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })
+}
+
 async function copyFixture(app, dest) {
   if (app === 'markdown') {
     await writeFile(dest, '# ORIGINAL\n\noriginal body\n')
+    return dest
+  }
+  if (app === 'docs') {
+    await writeFile(dest, await buildDocsContextDocx())
     return dest
   }
   const source = FIXTURE_SOURCES[app]
@@ -334,45 +417,62 @@ async function runDocsContext(ctx) {
   const page = await ctx.browser.newPage()
   const logs = []
   page.on('console', (msg) => logs.push(msg.text()))
+  page.on('pageerror', (err) => logs.push(`PAGEERROR ${err.message}`))
   await openFamily(page, ctx.base, 'docs', file)
   const opened = await waitReady(ctx.base, file)
   const relayContext = await contextApp(ctx.base, 'docs', file)
   const pluginContext = await callTool(ctx.base, 'docs', file, 'get_document_context', {})
   const comments = await callTool(ctx.base, 'docs', file, 'read_comments', {})
+  const revisions = await callTool(ctx.base, 'docs', file, 'read_revisions', {})
+  const commentsOut = toolOutput(comments)
+  const commentId = commentsOut.match(/id\s+(\S+)\s+by\s+Alice/i)?.[1]
   const missing = await callTool(ctx.base, 'docs', file, 'reply_comment', { parentId: 'missing-thread', text: 'nope' })
-  const hf = await callTool(ctx.base, 'docs', file, 'edit_header_footer', {
+  const reply = commentId
+    ? await callTool(ctx.base, 'docs', file, 'reply_comment', { parentId: commentId, text: 'OfficialReplyKeep' })
+    : { ok: false, error: 'no-comment-id', comments }
+  const hf = await callTool(ctx.base, 'docs', file, 'set_header_footer', {
     kind: 'header',
     view: 'default',
     text: 'OfficialHfKeep',
-  }).catch((error) => ({ ok: false, error: String(error) }))
-  const altHf = toolOk(hf)
-    ? hf
-    : await callTool(ctx.base, 'docs', file, 'set_header_footer', { kind: 'header', text: 'OfficialHfKeep' })
+  })
   const saved = await saveApp(ctx.base, 'docs', file)
   await openFamily(page, ctx.base, 'docs', file)
   const reopened = await waitReady(ctx.base, file)
   const reContext = await contextApp(ctx.base, 'docs', file)
+  const rePlugin = await callTool(ctx.base, 'docs', file, 'get_document_context', {})
   const reComments = await callTool(ctx.base, 'docs', file, 'read_comments', {})
+  const reRevisions = await callTool(ctx.base, 'docs', file, 'read_revisions', {})
   const shot = await page.screenshot({ type: 'png' })
   await page.close()
-  const commentsOut = toolOutput(comments)
-  const commentsAvailable = !/not available|unavailable/i.test(commentsOut)
+  const relayText = toolOutput(relayContext)
+  const pluginText = toolOutput(pluginContext)
+  const reRelay = toolOutput(reContext)
+  const rePluginText = toolOutput(rePlugin)
+  const reCommentsOut = toolOutput(reComments)
+  const revOut = toolOutput(revisions)
+  const reRevOut = toolOutput(reRevisions)
   const missingDenied = missing.ok === false || missing.execution?.isError === true || /no comment|not available|unavailable/i.test(toolOutput(missing))
   const assertions = [
     assertion('open-ready', opened.readiness === 'ready', 'ready', opened),
-    assertion('relay-context-ok', relayContext.ok !== false && toolOutput(relayContext).length > 0, 'relay-context', toolOutput(relayContext).slice(0, 400)),
-    assertion('plugin-context-ok', toolOk(pluginContext) || toolOutput(pluginContext).length > 0, 'get_document_context', toolOutput(pluginContext).slice(0, 400)),
-    assertion('two-context-entries', toolOutput(relayContext).length > 0 && toolOutput(pluginContext).length > 0, 'both', {
-      relay: toolOutput(relayContext).slice(0, 120),
-      plugin: toolOutput(pluginContext).slice(0, 120),
+    assertion('relay-context-ok', /OfficialCommentAnchor|ContextBody/i.test(relayText) && /id\s+\S+/.test(relayText), 'relay-context', relayText.slice(0, 500)),
+    assertion('plugin-context-ok', /OfficialCommentAnchor|ContextBody/i.test(pluginText) && /\d+\|p\|/.test(pluginText), 'get_document_context', pluginText.slice(0, 500)),
+    assertion('two-context-entries', /OfficialCommentAnchor|ContextBody/i.test(relayText) && /OfficialCommentAnchor|ContextBody/i.test(pluginText), 'both', {
+      relay: relayText.slice(0, 160),
+      plugin: pluginText.slice(0, 160),
     }),
-    assertion('comments-access-or-unavailable', commentsAvailable || /not available|unavailable/i.test(commentsOut), 'comments contract', commentsOut.slice(0, 400)),
+    assertion('comments-available', /OfficialThreadKeep/i.test(commentsOut) && Boolean(commentId), 'comments', commentsOut.slice(0, 400)),
+    assertion('revisions-present', /OfficialRevKeep|RevAuthor|inserted/i.test(revOut), 'revisions', revOut.slice(0, 400)),
     assertion('missing-thread-refused', missingDenied, 'recoverable', missing),
-    assertion('hf-attempted', true, 'hf', { hf, altHf }),
+    assertion('reply-ok', toolOk(reply), true, reply),
+    assertion('hf-ok', toolOk(hf), true, hf),
     assertion('save-ok', saved.ok === true, true, saved),
     assertion('reopen-ready', reopened.readiness === 'ready', 'ready', reopened),
-    assertion('reopen-context', toolOutput(reContext).length > 0, 'context', toolOutput(reContext).slice(0, 300)),
-    assertion('reopen-comments-contract', true, 'comments', toolOutput(reComments).slice(0, 300)),
+    assertion('reopen-hf', /OfficialHfKeep/i.test(reRelay) || /OfficialHfKeep/i.test(rePluginText), 'OfficialHfKeep', {
+      relay: reRelay.slice(0, 300),
+      plugin: rePluginText.slice(0, 300),
+    }),
+    assertion('reopen-reply', /OfficialReplyKeep/i.test(reCommentsOut) || /OfficialReplyKeep/i.test(reRelay), 'OfficialReplyKeep', reCommentsOut.slice(0, 400)),
+    assertion('reopen-revision', /OfficialRevKeep|RevAuthor|inserted/i.test(reRevOut) || /OfficialRevKeep/i.test(reRelay), 'OfficialRevKeep', reRevOut.slice(0, 400)),
   ]
   return {
     name: 'docs-context',
@@ -380,8 +480,7 @@ async function runDocsContext(ctx) {
     assertions,
     screenshot: shot,
     console: logs.join('\n'),
-    network: { events: [opened, relayContext, pluginContext, comments, missing, saved], count: 6 },
-    commentsAvailable,
+    network: { events: [opened, relayContext, pluginContext, comments, reply, hf, saved, reopened], count: 8 },
   }
 }
 
@@ -723,6 +822,28 @@ async function main() {
       if (!result.ok) failed = true
     }
     if (args.all) await archiveMatrix(ctx, results, outDir)
+    else if (args.caseName === 'docs-context') {
+      const docs = results.find((item) => item.name === 'docs-context')
+      if (docs) {
+        await writeEvidence(outDir, 'UF-002', 'success', {
+          run_id: ctx.runId,
+          status: docs.ok ? 'passed' : 'failed',
+          cases: [{ id: 'UF-002-success', status: docs.ok ? 'passed' : 'failed', assertions: docs.assertions }],
+          console: docs.console,
+          network: docs.network,
+          screenshot: docs.screenshot,
+        })
+        const missing = (docs.assertions || []).find((row) => row.name === 'missing-thread-refused')
+        await writeEvidence(outDir, 'UF-002', 'failure-1', {
+          run_id: ctx.runId,
+          status: missing?.status === 'passed' ? 'passed' : 'failed',
+          cases: [{ id: 'UF-002-failure-1', status: missing?.status === 'passed' ? 'passed' : 'failed', assertions: missing ? [missing] : [] }],
+          console: docs.console,
+          network: docs.network,
+          screenshot: docs.screenshot,
+        })
+      }
+    }
   } finally {
     await browser.close()
     stopRelay(relay)
