@@ -21,7 +21,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert']
 const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
@@ -1689,6 +1689,126 @@ async function runPdfPages(outDir) {
   }
 }
 
+
+async function zipHasText(file, needle) {
+  const zip = await JSZip.loadAsync(await readFile(file))
+  for (const name of Object.keys(zip.files)) {
+    if (!/\.(xml|rels|txt)$/i.test(name)) continue
+    const body = await zip.file(name).async('string')
+    if (body.includes(needle)) return true
+  }
+  return false
+}
+
+async function runPdfConvert(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-pdf-convert')
+  await mkdir(workDir, { recursive: true })
+  const file = join(workDir, 'convert-source.pdf')
+  await buildPdfFixture(file)
+  const beforeSha = sha256(await readFile(file))
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const networkEvents = []
+  let shot = null
+  try {
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(`[pdf] ${msg.text()}`))
+    page.on('pageerror', (err) => logs.push(`[pdf] PAGEERROR ${err.message}`))
+    page.on('request', (req) => {
+      if (req.url().includes('/api/')) networkEvents.push({ method: req.method(), url: req.url() })
+    })
+    await page.goto(`${relay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${file}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const opened = await waitReady(relay.base, file, 90_000)
+    const badFormat = await callPdfTool(relay.base, file, 'convert_office', { format: 'rtf' })
+    const emptyFormat = await callPdfTool(relay.base, file, 'convert_office', { format: '' })
+    const cancelFirst = await callPdfTool(relay.base, file, 'cancel_convert', {})
+    const canceled = await callPdfTool(relay.base, file, 'convert_office', { format: 'docx' })
+    const afterCancelSha = sha256(await readFile(file))
+    const canceledDocx = existsSync(join(workDir, 'convert-source.docx'))
+
+    const targets = []
+    for (const format of ['docx', 'pptx', 'xlsx']) {
+      const converted = await callPdfTool(relay.base, file, 'convert_office', { format })
+      const saved = savedPathFrom(converted)
+      const exists = Boolean(saved && existsSync(saved))
+      const hasText = exists ? await zipHasText(saved, 'PageOne') : false
+      let reopen = null
+      if (exists) {
+        const app = format === 'docx' ? 'docs' : format === 'pptx' ? 'slides' : 'sheets'
+        const tab = await browser.newPage()
+        await tab.goto(`${relay.base}/${app}/?control=1&open=${encodeURIComponent(`path:${saved}`)}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60_000,
+        })
+        reopen = await waitReady(relay.base, saved, 90_000)
+        await tab.close()
+      }
+      targets.push({ format, converted, saved, exists, hasText, reopen })
+    }
+    const afterSha = sha256(await readFile(file))
+    shot = await page.screenshot({ type: 'png' })
+
+    const successAssertions = [
+      assertion('open-ready', opened.readiness === 'ready', 'ready', opened.readiness),
+      assertion('source-unchanged', afterSha === beforeSha, beforeSha, afterSha),
+      ...targets.flatMap((row) => [
+        assertion(`${row.format}-ok`, toolOk(row.converted) && row.exists, true, row.converted),
+        assertion(`${row.format}-has-text`, row.hasText, true, { saved: row.saved, hasText: row.hasText }),
+        assertion(`${row.format}-reopen`, row.reopen?.readiness === 'ready', 'ready', row.reopen),
+      ]),
+    ]
+    const failure1 = [
+      assertion('invalid-format-rejected', toolOk(badFormat) === false, false, badFormat),
+      assertion('empty-format-rejected', toolOk(emptyFormat) === false, false, emptyFormat),
+      assertion('invalid-keeps-source', afterCancelSha === beforeSha, beforeSha, afterCancelSha),
+    ]
+    const failure2 = [
+      assertion('cancel-tool-ok', toolOk(cancelFirst), true, cancelFirst),
+      assertion('convert-honors-cancel', toolOk(canceled) === false || /cancel/i.test(toolOutput(canceled)), true, canceled),
+      assertion('cancel-writes-no-docx', canceledDocx === false, false, canceledDocx),
+    ]
+    const success = await writeEvidence(outDir, 'UF-003', 'success', {
+      cases: [{ id: 'pdf-convert-three-targets', status: successAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: successAssertions }],
+      console: logs.join('\n'),
+      network: { events: networkEvents.slice(0, 80), count: networkEvents.length },
+      screenshot: shot,
+    })
+    const fail1 = await writeEvidence(outDir, 'UF-003', 'failure-1', {
+      cases: [{ id: 'pdf-convert-invalid-format', status: failure1.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure1 }],
+      console: `${logs.join('\n')}\nbad=${JSON.stringify(badFormat)}\nempty=${JSON.stringify(emptyFormat)}\n`,
+      network: { events: [badFormat, emptyFormat], count: 2 },
+      screenshot: shot,
+    })
+    const fail2 = await writeEvidence(outDir, 'UF-003', 'failure-2', {
+      cases: [{ id: 'pdf-convert-cancel', status: failure2.every((a) => a.status === 'passed') ? 'passed' : 'failed', assertions: failure2 }],
+      console: `${logs.join('\n')}\ncancel=${JSON.stringify(cancelFirst)}\nconverted=${JSON.stringify(canceled)}\n`,
+      network: { events: [cancelFirst, canceled], count: 2 },
+      screenshot: shot,
+    })
+    const ok = [success, fail1, fail2].every((item) => item.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'UF-003',
+      branch: 'pdf-convert',
+      status: ok ? 'passed' : 'failed',
+      results: { success, failure1: fail1, failure2: fail2, targets: targets.map((t) => ({ format: t.format, saved: t.saved, hasText: t.hasText, reopen: t.reopen?.readiness })) },
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-8.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (ok === false) throw new Error('pdf-convert case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -1723,6 +1843,10 @@ async function main() {
   if (args.caseName === 'pdf-pages' || args.all) {
     await runPdfPages(evidenceRoot)
     ran.push('pdf-pages')
+  }
+  if (args.caseName === 'pdf-convert' || args.all) {
+    await runPdfConvert(evidenceRoot)
+    ran.push('pdf-convert')
   }
   if (args.caseName === 'entries-sheets') {
     const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)

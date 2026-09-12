@@ -50,6 +50,19 @@ function stubCodexAppServer(): Plugin {
   }
 }
 
+function workerProcessShim(): Plugin {
+  return {
+    name: 'worker-process-shim',
+    renderChunk(code) {
+      return (
+        'globalThis.process ??= { platform: "linux", env: {}, versions: {} };\n' +
+        'if (typeof globalThis.Buffer === "undefined") globalThis.Buffer = Uint8Array;\n' +
+        code
+      )
+    },
+  }
+}
+
 export default defineConfig({
   root: 'src/renderer',
   // served under /pdf/ by web/server.mjs — asset URLs must match
@@ -64,6 +77,9 @@ export default defineConfig({
       { find: 'node:os', replacement: shims },
       { find: 'node:crypto', replacement: shims },
       { find: 'node:buffer', replacement: shims },
+      { find: 'node:child_process', replacement: shims },
+      { find: 'node:zlib', replacement: shims },
+      { find: 'node:stream/promises', replacement: shims },
     ],
   },
   server: {
@@ -79,5 +95,8 @@ export default defineConfig({
     emptyOutDir: true,
     chunkSizeWarningLimit: 6000,
     target: 'es2022',
+  },
+  worker: {
+    plugins: () => [workerProcessShim()],
   },
 })

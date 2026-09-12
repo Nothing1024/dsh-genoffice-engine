@@ -143,6 +143,13 @@ function makeDeps(over: Partial<PdfAiDeps> = {}): PdfAiDeps {
     splitPdf: vi.fn(async () => ({ ok: true, savedDir: '/tmp/split', count: 2 })),
     splitPages: vi.fn(async () => ({ ok: true, savedPath: '/tmp/test-split.pdf' })),
     mergePages: vi.fn(async () => ({ ok: true, savedPath: '/tmp/test-2in1.pdf' })),
+    convertOffice: vi.fn(async () => ({
+      ok: true,
+      savedPath: '/tmp/test.docx',
+      scannedDocument: false,
+      warnings: [],
+    })),
+    cancelConvertOffice: vi.fn(),
     ...over,
   }
 }

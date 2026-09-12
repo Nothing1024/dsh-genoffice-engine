@@ -4755,6 +4755,12 @@ export default function App() {
     )
   const cropPagesOnDisk = (visIdxs: number[], rect: CropRect) =>
     rewriteInPlace(() => window.pdfApi.cropPages({ path: filePath, pages: visIdxs, rect }))
+  const convertOfficeToFile = (format: PdfConvertFormat) =>
+    runFileOp(async () => {
+      const result = await window.pdfApi.convertOffice(format)
+      if (!result) return { ok: false as const, error: 'conversion is not available in this build' }
+      return result
+    })
 
   const extractPage = (origIdx: number) => extractPagesToFile([visList.indexOf(origIdx)])
 
@@ -5278,6 +5284,10 @@ export default function App() {
     splitPdf: splitPdfToFolder,
     splitPages: splitPagesToFile,
     mergePages: mergePagesToFile,
+    convertOffice: convertOfficeToFile,
+    cancelConvertOffice: () => {
+      void window.pdfApi.cancelConvertOffice?.()
+    },
     confirmFileOp: async () => CONTROL_MODE,
   }
 
@@ -5611,9 +5621,10 @@ export default function App() {
     if (convertBusy) return
     setConvertBusy(true)
     try {
-      await window.pdfApi.convertOffice(format)
-    } catch {
-      // No shell conversion flow in standalone mode; shell-side errors show their own dialogs
+      const result = await convertOfficeToFile(format)
+      if (!result.ok) opFailed(result.error)
+    } catch (err) {
+      opFailed(err instanceof Error ? err.message : String(err))
     } finally {
       setConvertBusy(false)
     }
@@ -6052,6 +6063,15 @@ export default function App() {
                           {t('convertToExcel')}
                         </button>
                         <button onClick={() => void convertTo('pptx')}>{t('convertToPpt')}</button>
+                        {convertBusy && (
+                          <button
+                            onClick={() => {
+                              void window.pdfApi.cancelConvertOffice?.()
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>

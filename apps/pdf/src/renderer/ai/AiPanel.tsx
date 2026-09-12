@@ -340,6 +340,8 @@ export function AiPanel({
       splitPdf: (n) => apiRef.current.splitPdf(n),
       splitPages: (n) => apiRef.current.splitPages(n),
       mergePages: (n, direction, separator) => apiRef.current.mergePages(n, direction, separator),
+      convertOffice: (format) => apiRef.current.convertOffice(format),
+      cancelConvertOffice: () => apiRef.current.cancelConvertOffice(),
       stamps: () => apiRef.current.stamps(),
       setStamps: (cfg) => apiRef.current.setStamps(cfg),
       annotationsOn: (idx) => apiRef.current.annotationsOn(idx),

@@ -10,6 +10,7 @@ import type {
   CreateDocumentRequest,
   CreateDocumentResult,
   CreateDocumentType,
+  PdfConvertFormat,
   FormValueInput,
   ImageLayer,
   ImageSearchResponse,
@@ -198,6 +199,8 @@ export interface PdfAiDeps {
     direction: 'horizontal' | 'vertical',
     separator: boolean,
   ): Promise<NewFileResult>
+  convertOffice(format: PdfConvertFormat): Promise<ConvertOfficeToolResult>
+  cancelConvertOffice(): void
 }
 
 export interface FileOpConfirm {
@@ -216,6 +219,11 @@ export type FileOpResult =
 
 export type NewFileResult =
   { ok: true; savedPath: string } | FileOpCanceled | { ok: false; error: string }
+
+export type ConvertOfficeToolResult =
+  | { ok: true; savedPath: string; scannedDocument: boolean; warnings: string[] }
+  | FileOpCanceled
+  | { ok: false; error: string }
 
 export type SplitPdfOutcome =
   { ok: true; savedDir: string; count: number } | FileOpCanceled | { ok: false; error: string }
@@ -1136,6 +1144,28 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     },
   },
   {
+    name: 'convert_office',
+    description:
+      'Convert the current PDF to a Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) file using the local pdf2docx pipeline. IRREVERSIBLE FILE OPERATION: the user is asked to confirm first; on confirm every unsaved edit is saved and a NEW sibling file is written. The current PDF is unchanged. Scanned pages without OCR are image-fidelity only and are not claimed as editable text. cancel_convert aborts an in-flight conversion and deletes any partial output.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        format: {
+          type: 'string',
+          enum: ['docx', 'pptx', 'xlsx'],
+          description: 'Target Office format',
+        },
+      },
+      required: ['format'],
+    },
+  },
+  {
+    name: 'cancel_convert',
+    description:
+      'Cancel an in-flight PDF→Office conversion. Cleans temporary output and does not report success. Safe to call when nothing is running.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'create_document',
     description:
       'Create a NEW standalone file in the default save folder and open it in a new tab; the current PDF is not modified. Use when the user asks to put content (a summary, an extraction, an analysis result) into a new/separate document. ' +
@@ -1746,6 +1776,41 @@ const rangeStillValid = (deps: PdfAiDeps, raw: unknown, map: number[]): boolean 
 
 const fmtPath = (r: { savedPath: string }): string =>
   `saved at ${r.savedPath} and opened in a new tab`
+
+async function convertOfficeTool(
+  deps: PdfAiDeps,
+  input: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ToolExecution> {
+  const format = String(input.format ?? '')
+  const summary = t('convertPdf') + (format ? ` → ${format}` : '')
+  if (format !== 'docx' && format !== 'pptx' && format !== 'xlsx') {
+    return err('format must be docx, pptx, or xlsx', summary)
+  }
+  if (deps.readOnly()) return err(READONLY_OUTPUT, summary)
+  const denied = await fileOpGate(deps, { summary, detail: t('aiFileOpNewFile') }, signal)
+  if (denied) return { output: denied, summary }
+  const r = await deps.convertOffice(format)
+  if (!r.ok) return err(r.error, summary)
+  if ('canceled' in r) return { output: canceledOutput(r, 'conversion'), summary }
+  const scan = r.scannedDocument
+    ? ' Scanned pages were exported as images (OCR was not run); the result is not claimed as editable text.'
+    : ''
+  const warn = r.warnings.length > 0 ? ` Warnings: ${r.warnings.join('; ')}.` : ''
+  return {
+    output: `Converted the PDF to ${format} ${fmtPath(r)}. The current PDF was saved and is unchanged.${scan}${warn}`,
+    mutated: true,
+    summary,
+  }
+}
+
+async function cancelConvertTool(deps: PdfAiDeps): Promise<ToolExecution> {
+  deps.cancelConvertOffice()
+  return {
+    output: 'Conversion cancel requested. Any in-flight job will stop without writing output.',
+    summary: 'cancel convert',
+  }
+}
 
 async function insertBlankPageTool(
   deps: PdfAiDeps,
@@ -3541,6 +3606,10 @@ export async function executePdfTool(
       return listFormFields(deps)
     case 'apply_ops':
       return applyOpsTool(deps, input)
+    case 'convert_office':
+      return convertOfficeTool(deps, input, signal)
+    case 'cancel_convert':
+      return cancelConvertTool(deps)
     case 'insert_blank_page':
       return insertBlankPageTool(deps, input, signal)
     case 'set_page_size':

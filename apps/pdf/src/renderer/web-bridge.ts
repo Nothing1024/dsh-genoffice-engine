@@ -39,6 +39,8 @@ import {
 import { validateTextEdits as validateTextEditsImpl } from './web-text-edit'
 import { listEditFonts as listEditFontsImpl, canDrawText as canDrawTextImpl } from './web-text-edit'
 import { PDFDocument } from 'pdf-lib'
+import type { ConvertOfficeResult, PdfConvertFormat } from '../shared/ipc'
+import { requestConvertCancel, runConvertInWorker } from './web-convert-office'
 
 declare global {
   interface Window {
@@ -246,12 +248,15 @@ async function writeAbsPath(
   return { mtimeMs: res.mtimeMs }
 }
 
-async function writeNewPdf(sourcePath: string, suggestedName: string, bytes: Uint8Array): Promise<string> {
+async function writeNewSibling(sourcePath: string, suggestedName: string, bytes: Uint8Array): Promise<string> {
   const dir = dirOf(sourcePath)
-  const stem = (suggestedName || 'pages.pdf').replace(/[/\\]/g, '_').replace(/\.pdf$/i, '') || 'pages'
+  const raw = (suggestedName || 'output.bin').replace(/[/\\]/g, '_')
+  const dot = raw.lastIndexOf('.')
+  const ext = dot >= 0 ? raw.slice(dot) : ''
+  const stem = (dot >= 0 ? raw.slice(0, dot) : raw) || 'output'
   let lastError = 'could not allocate output path'
   for (let i = 0; i < 20; i++) {
-    const target = `${dir}/${stem}${i === 0 ? '' : `-${i + 1}`}.pdf`
+    const target = `${dir}/${stem}${i === 0 ? '' : `-${i + 1}`}${ext}`
     try {
       await writeAbsPath(target, bytes)
       return target
@@ -261,6 +266,11 @@ async function writeNewPdf(sourcePath: string, suggestedName: string, bytes: Uin
     }
   }
   throw new Error(lastError)
+}
+
+async function writeNewPdf(sourcePath: string, suggestedName: string, bytes: Uint8Array): Promise<string> {
+  const name = suggestedName.toLowerCase().endsWith('.pdf') ? suggestedName : `${suggestedName}.pdf`
+  return writeNewSibling(sourcePath, name, bytes)
 }
 
 async function rewriteOpened(next: Uint8Array): Promise<void> {
@@ -543,9 +553,29 @@ const pdfApi: PdfApi = {
       return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
     }
   },
-  convertOffice: async () => {
-    console.warn('[web-pdf] convertOffice is not supported in the web version')
-    throw new Error('PDF conversion to Word/Excel/PowerPoint is not supported in the web version')
+  convertOffice: async (format: PdfConvertFormat): Promise<ConvertOfficeResult> => {
+    const session = requireOpened()
+    if ('error' in session) return { ok: false, error: session.error }
+    if (format !== 'docx' && format !== 'pptx' && format !== 'xlsx') {
+      return { ok: false, error: 'unsupported convert format' }
+    }
+    try {
+      const converted = await runConvertInWorker(session.bytes, format)
+      if (converted.canceled) return { ok: true, canceled: true }
+      const stem = (session.name || 'document').replace(/\.pdf$/i, '') || 'document'
+      const savedPath = await writeNewSibling(session.path, `${stem}.${format}`, converted.bytes)
+      return {
+        ok: true,
+        savedPath,
+        scannedDocument: converted.scannedDocument,
+        warnings: converted.warnings,
+      }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  },
+  cancelConvertOffice: async () => {
+    requestConvertCancel()
   },
   listSavedSignatures: async () => [],
   addSavedSignature: async () => [],

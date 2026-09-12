@@ -311,3 +311,26 @@ export const pathShim = { dirname, join, resolve }
 export const osShim = { tmpdir }
 export const zlibShim = { deflateSync, deflateRawSync }
 export const cryptoShim = { createHash }
+
+export const spawnSync = (): never => nodeOnly('child_process.spawnSync')
+export const spawn = (): never => nodeOnly('child_process.spawn')
+
+export const homedir = (): string => '/'
+export const existsSync = (): boolean => false
+export const readdirSync = (): never[] => []
+export const statSync = (): never => nodeOnly('fs.statSync')
+export const openSync = (): never => nodeOnly('fs.openSync')
+export const closeSync = (): void => {}
+export const readSync = (): number => 0
+export const readFileSync = (): never => nodeOnly('fs.readFileSync')
+export const writeFileSync = (): never => nodeOnly('fs.writeFileSync')
+export const mkdirSync = (): never => nodeOnly('fs.mkdirSync')
+export const createWriteStream = (): never => nodeOnly('fs.createWriteStream')
+export const pipeline = async (): Promise<void> => nodeOnly('stream.pipeline')
+
+const g = globalThis as unknown as {
+  process?: { platform: string; env: Record<string, unknown>; versions: Record<string, string> }
+  Buffer?: typeof WebBuffer
+}
+g.process ??= { platform: 'linux', env: {}, versions: {} }
+g.Buffer ??= WebBuffer

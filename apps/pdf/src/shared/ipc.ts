@@ -78,6 +78,12 @@ export interface SavedSignature {
 
 export type PdfConvertFormat = 'docx' | 'xlsx' | 'pptx'
 
+/** Web convertOffice result. Desktop may resolve void (save-dialog flow). */
+export type ConvertOfficeResult =
+  | { ok: true; savedPath: string; scannedDocument: boolean; warnings: string[] }
+  | { ok: true; canceled: true }
+  | { ok: false; error: string }
+
 /** target file type of the AI create_document tool (mirrors the docs app's contract) */
 export type CreateDocumentType = 'docx' | 'pdf' | 'md' | 'html'
 
@@ -723,7 +729,9 @@ export interface PdfApi {
   cropPages(request: CropPagesRequest): Promise<CropPagesResult>
   exportImages(request: ExportImagesRequest): Promise<ExportImagesResult>
   /** Convert the current PDF to Word / Excel / PowerPoint via the shell's local conversion flows */
-  convertOffice(format: PdfConvertFormat): Promise<void>
+  convertOffice(format: PdfConvertFormat): Promise<ConvertOfficeResult | void>
+  /** Abort an in-flight web conversion; no-op on desktop */
+  cancelConvertOffice?(): Promise<void> | void
   /** AI create_document: build a new standalone file in the default folder and open it in a new tab */
   createDocument(request: CreateDocumentRequest): Promise<CreateDocumentResult>
   /** Web image search for AI tools (app-wide ai:image-search handler) */
