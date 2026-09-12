@@ -16,7 +16,8 @@
  * This file is only included by the web build (vite.web.config.ts).
  */
 import { defaultAiSettings } from '@genoffice/ai-provider'
-import type { AccountLoginEvent, AccountStatus, CloudProjectsSnapshot, HomeApi, ProjectHomeApi, ProjectSummaryEntry, RecentEntry, RecentPage, RecentQuery, RenameResult, TimelineEntryItem, UiLanguage, UiTheme } from '../../shared/home-api'
+import { DEFAULT_AI_PANEL_PREFS } from '@genoffice/ui/ai-panel-prefs'
+import type { AccountLoginEvent, AccountStatus, AutoSaveDefault, CloudProjectsSnapshot, HomeApi, ProjectHomeApi, ProjectSummaryEntry, RecentEntry, RecentPage, RecentQuery, RenameResult, TimelineEntryItem, UiLanguage, UiTheme } from '../../shared/home-api'
 import type { TabsApi, TabSummary } from '../../shared/tabs-api'
 
 declare global {
@@ -293,6 +294,7 @@ const aiOffice: HomeApi = {
   newSheet: async () => notifyUnsupported('xlsx'),
   newSlide: async () => notifyUnsupported('pptx'),
   newMarkdown: async () => openWebApp('markdown'),
+  newHtml: async () => openWebApp('html'),
   newPdf: async () => notifyUnsupported('pdf'),
 
   removeRecent: async (paths) => {
@@ -399,6 +401,38 @@ const aiOffice: HomeApi = {
   setTheme: async (theme) => {
     localStorage.setItem(THEME_KEY, theme)
   },
+  getAutoSaveDefault: async (): Promise<AutoSaveDefault> => {
+    try {
+      const raw = localStorage.getItem('genoffice-web-autosave-default')
+      if (raw) {
+        const parsed = JSON.parse(raw) as AutoSaveDefault
+        if (typeof parsed?.on === 'boolean' && typeof parsed?.updatedAt === 'number') return parsed
+      }
+    } catch {
+      /* ignore */
+    }
+    return { on: false, updatedAt: 0 }
+  },
+  setAutoSaveDefault: async (on) => {
+    localStorage.setItem(
+      'genoffice-web-autosave-default',
+      JSON.stringify({ on, updatedAt: Date.now() }),
+    )
+  },
+  getAiPanelPrefs: async () => {
+    try {
+      const raw = localStorage.getItem('genoffice-web-ai-panel-prefs')
+      if (raw) return { ...DEFAULT_AI_PANEL_PREFS, ...JSON.parse(raw) }
+    } catch {
+      /* ignore */
+    }
+    return DEFAULT_AI_PANEL_PREFS
+  },
+  setAiPanelPrefs: async (patch) => {
+    const next = { ...DEFAULT_AI_PANEL_PREFS, ...patch }
+    localStorage.setItem('genoffice-web-ai-panel-prefs', JSON.stringify(next))
+    return next
+  },
   getAnalyticsEnabled: async () => false,
   setAnalyticsEnabled: async () => false,
   getDefaultSaveDir: async () => '',
@@ -432,9 +466,20 @@ const aiOffice: HomeApi = {
     console.warn('[web-shell] setAiSettings is not wired in the web version')
   },
   getAiProviders: () => [],
+  getCodexModels: async () => ({ models: [], defaultModel: '' }),
   testAiSettings: async () => ({
     ok: false,
     error: 'AI settings are not available in the web version',
+  }),
+  getAiMediaProviders: () => [],
+  testAiMediaSettings: async () => ({
+    ok: false,
+    error: '网页版不提供媒体 provider 探测',
+  }),
+  getAiSearchProviders: () => [],
+  testAiSearchSettings: async () => ({
+    ok: false,
+    error: '网页版不提供搜索 provider 探测',
   }),
 }
 

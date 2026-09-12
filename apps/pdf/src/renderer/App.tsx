@@ -5019,7 +5019,7 @@ export default function App() {
     return `The document has ${bits.join(' and ')}; use read_annotations to read them.`
   }
 
-  const aiApi: PdfAppDeps = {
+  const aiApi: PdfAiDeps = {
     doc: () => doc,
     fileName: () => fileName,
     pageCount: () => sizes.length,
@@ -5272,6 +5272,7 @@ export default function App() {
     splitPdf: splitPdfToFolder,
     splitPages: splitPagesToFile,
     mergePages: mergePagesToFile,
+    confirmFileOp: async () => false,
   }
 
   // Control-mode adapter (genoffice-dsh-office): registers the executor and

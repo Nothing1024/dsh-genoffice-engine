@@ -11,8 +11,8 @@
  */
 import type { Editor } from '@tiptap/core'
 import type { AgentToolCall, ToolExecution } from '@genoffice/agent-core'
-import { executeTool, type AiCommentsAccess, type AiHeaderFooterAccess, type AiTrack, type FrozenSelection } from './ai/tools'
-import { buildDocContext, getSelectionScope, type NumIds } from './ai/protocol'
+import { executeTool, type AiCommentsAccess, type AiHeaderFooterAccess, type FrozenSelection } from './ai/tools'
+import { buildDocContext, getSelectionScope, type AiTrack, type NumIds } from './ai/protocol'
 
 // ── module-level capture ──────────────────────────────────────────────
 // The app's open flow clears ?open= (and we clear ?control=) from the

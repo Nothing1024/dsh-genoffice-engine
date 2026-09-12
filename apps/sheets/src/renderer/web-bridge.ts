@@ -48,7 +48,9 @@ import type {
   WorkbookRecalcResult,
   WorkbookSaveRequest,
   WorkbookSaveResult,
+  AutoSaveDefault,
 } from '../shared/desktop-api'
+import { DEFAULT_AI_PANEL_PREFS, NO_AUTO_SAVE_DEFAULT } from '@genoffice/ui'
 import {
   applySaveRequest,
   buildFormulaResult,
@@ -196,6 +198,10 @@ const desktopApi: DesktopApi = {
     themeListeners.add(handler)
     return () => themeListeners.delete(handler)
   },
+  getAutoSaveDefault: async (): Promise<AutoSaveDefault> => NO_AUTO_SAVE_DEFAULT,
+  onAutoSaveDefaultChanged: () => () => {},
+  getAiPanelPrefs: async () => DEFAULT_AI_PANEL_PREFS,
+  onAiPanelPrefsChanged: () => () => {},
 
   selectWorkbook: async () => {
     // control-mode / URL-driven open: `?open=path:` wins; otherwise fall back
@@ -301,6 +307,14 @@ const desktopApi: DesktopApi = {
   exportPdf: async (_request: WorkbookExportPdfRequest): Promise<WorkbookExportPdfResult> => ({
     canceled: true,
   }),
+  exportCsv: async () => ({ canceled: true as const }),
+  confirmCsvSave: async () => 'cancel' as const,
+  createDocument: async () => ({
+    ok: false,
+    error: '网页版暂不支持 create_document；请在本页直接编辑后显式保存',
+  }),
+  selectWorkbooksForMerge: async () => null,
+  openWorkbooksForMerge: async () => null,
 
   closeWorkbook: async () => {
     opened = null

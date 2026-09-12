@@ -1245,6 +1245,22 @@ export interface SlidesApi {
     | { error: string }
   >
   /** Whether cloud single-page generation (gsk slide_generate) is available (GENOFFICE_CLOUD_SLIDE=1 + gsk login) */
+  htmlToPptx?: (
+    pagesHtml: string[],
+    fitWidthPx: number,
+    mode?: 'replace' | 'append' | 'replace_at' | 'insert_at',
+    atIndex?: number,
+    deckName?: string,
+  ) => Promise<
+    | (OpenResult & {
+        appendedFrom?: number
+        replacedIndex?: number
+        insertedIndex?: number
+        fallbackReason?: string
+        imageFailures?: { page: number; url: string }[]
+      })
+    | { error: string }
+  >
   cloudGenStatus: () => Promise<{ enabled: boolean }>
   /** Cloud single-page generation: brief → one-slide pptx temp file; the marker goes into a landGeneratedPages pageMarkers slot */
   cloudGeneratePage: (op: {

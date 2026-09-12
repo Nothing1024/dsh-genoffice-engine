@@ -28,6 +28,7 @@ import type {
   SaveMode,
   UiTheme,
 } from '../shared/ipc'
+import { DEFAULT_AI_PANEL_PREFS, NO_AUTO_SAVE_DEFAULT } from '@genoffice/ui'
 
 declare global {
   interface Window {
@@ -511,7 +512,12 @@ const markdownApi: MarkdownApi = {
     })
     return () => {}
   },
+  getAutoSaveDefault: async () => NO_AUTO_SAVE_DEFAULT,
+  onAutoSaveDefaultChanged: () => () => {},
+  getAiPanelPrefs: async () => DEFAULT_AI_PANEL_PREFS,
+  onAiPanelPrefsChanged: () => () => {},
 
+  aiGskStatus: async () => ({ loggedIn: false }),
   getAiSettings: async (): Promise<AiSettings> => {
     try {
       const raw = localStorage.getItem(AI_SETTINGS_KEY)
@@ -535,6 +541,9 @@ const markdownApi: MarkdownApi = {
     return () => streamListeners.delete(handler)
   },
 
+  imageSearch: async () => ({ images: [], method: 'unsupported', error: '网页版未接入图片搜索' }),
+  fetchImage: async () => null,
+  aiGenerateImage: async () => ({ error: '网页版未接入云端生图通道' }),
   webSearch: async (query, maxResults) => {
     try {
       const resp = await fetch(`${RELAY_BASE}/search/web`, {

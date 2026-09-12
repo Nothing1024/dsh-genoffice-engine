@@ -514,6 +514,7 @@ export async function parseXlsxWorkbook(
       pivotRanges: [],
       pivotTables: [],
       sparklines: [],
+      cellImages: [],
       ...(sheet.defaultRowHeight === null ? {} : {}),
     })),
     styles,
@@ -565,10 +566,12 @@ export function buildRangeResult(
     hyperlinks: [],
     conditionalRules: [],
     autoFilter: null,
+    autoFilterColumns: [],
     dataValidations: [],
     sheetProtection: null,
     rowBreaks: [],
     colBreaks: [],
+    pageSetup: null,
     protectedRanges: [],
     // the in-memory model is fully indexed: report the sheet's full extent so
     // the renderer's streaming poll stops and requested ranges patch
@@ -720,6 +723,8 @@ export async function applySaveRequest(
       sheetOps.push({ kind: op.kind, start: op.start, end: op.end, hidden: op.hidden })
     } else if ('before' in op) {
       sheetOps.push({ kind: op.kind, index: op.index, count: op.count, before: op.before })
+    } else if (op.kind === 'set-col-style') {
+      sheetOps.push({ kind: 'set-col-style', start: op.start, end: op.end, style: op.style })
     } else {
       sheetOps.push({ kind: op.kind, index: op.index, count: op.count })
     }

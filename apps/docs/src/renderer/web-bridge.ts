@@ -33,11 +33,13 @@ import { pptxToText } from '@genoffice/file-parse/pptx'
 import { xlsxToText } from '@genoffice/file-parse/xlsx'
 import type { ProjectApi } from '@genoffice/project-store'
 import type { ChatMessage, ProjectSummary, TimelineEntry } from '@genoffice/project-store'
+import { DEFAULT_AI_PANEL_PREFS, NO_AUTO_SAVE_DEFAULT } from '@genoffice/ui'
 import type {
   AttachmentAddResult,
   AttachmentImageResult,
   AttachmentMeta,
   AttachmentReadResult,
+  AutoSaveDefault,
   DesktopApi,
   DocsTabInfo,
   MenuCommand,
@@ -499,6 +501,11 @@ const desktop: DesktopApi = {
     return () => window.removeEventListener('storage', handler as never)
   },
 
+  getAutoSaveDefault: async (): Promise<AutoSaveDefault> => NO_AUTO_SAVE_DEFAULT,
+  onAutoSaveDefaultChanged: () => () => {},
+  getAiPanelPrefs: async () => DEFAULT_AI_PANEL_PREFS,
+  onAiPanelPrefsChanged: () => () => {},
+
   onChromePressed: () => () => {},
 
   openDocx: async () => {
@@ -558,6 +565,12 @@ const desktop: DesktopApi = {
     return true
   },
 
+  consumeAiDocContent: async () => null,
+  createDocument: async () => ({
+    ok: false,
+    error: '网页版暂不支持 create_document；请在本页直接编辑后显式保存',
+  }),
+
   onOpenDocx: (handler) => {
     openListeners.add(handler)
     return () => openListeners.delete(handler)
@@ -601,6 +614,8 @@ const desktop: DesktopApi = {
     teardownListeners.add(handler)
     return () => teardownListeners.delete(handler)
   },
+
+  respellKick: async () => {},
 
   saveDocxAs: async (defaultName, data) => {
     if (typeof window.showSaveFilePicker === 'function') {
@@ -689,6 +704,12 @@ const desktop: DesktopApi = {
     return { ok: true, path: '浏览器打印（另存为 PDF）' }
   },
 
+  exportHtml: async (defaultName, html) => {
+    const name = defaultName.endsWith('.html') ? defaultName : `${defaultName}.html`
+    downloadBytes(new TextEncoder().encode(html).buffer, name)
+    return { ok: true, path: name }
+  },
+
   printPdfBuffer: async () => ({
     ok: false,
     error: '网页版无法直接生成 PDF 字节；请使用「文件 → 打印」或浏览器打印对话框另存为 PDF',
@@ -771,6 +792,10 @@ const desktop: DesktopApi = {
     return await relay<{ base64: string; mime: string }>('/fetch-image', { url })
   },
 
+  aiGenerateImage: async () => ({
+    error: '网页版未接入云端生图通道',
+  }),
+
   pickAttachments: async (): Promise<AttachmentAddResult | null> => {
     const input = hiddenInput('*')
     const files = await new Promise<File[] | null>((resolve) => {
@@ -809,6 +834,17 @@ const desktop: DesktopApi = {
     const meta = registerFileAsAttachment(file)
     if ('error' in meta) return { accepted: [], rejected: [meta.error] }
     return { accepted: [meta], rejected: [] }
+  },
+
+  copyImageToClipboard: async (dataUrl) => {
+    try {
+      const res = await fetch(dataUrl)
+      const blob = await res.blob()
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })])
+      return true
+    } catch {
+      return false
+    }
   },
 
   readAttachment: async (path, offset, maxChars): Promise<AttachmentReadResult> => {

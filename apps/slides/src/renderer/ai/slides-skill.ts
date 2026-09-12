@@ -96,6 +96,21 @@ export interface DeckAccess {
     fallbackReason?: string
     imageFailures?: { page: number; url: string }[]
   }>
+  /** Land pages from host-authored HTML / page-spec markers via htmlToPptx. */
+  generateFromHtml?(
+    pagesHtml: string[],
+    mode?: 'replace' | 'append' | 'insert_at',
+    deckName?: string,
+    insertAt?: number,
+  ): Promise<{
+    ok: boolean
+    pages?: number
+    appendedFrom?: number
+    insertedIndex?: number
+    error?: string
+    fallbackReason?: string
+    imageFailures?: { page: number; url: string }[]
+  }>
   /** Redo one slide in place: land the marker's page as a replacement for slide slideIndex (other slides untouched; undoable with ⌘Z). */
   regenerateSlide?(
     slideIndex: number,
@@ -111,6 +126,8 @@ export interface DeckAccess {
   searchImages?(query: string, maxResults: number): Promise<string[]>
   /** Whether cloud single-page generation is available (kill switch + gsk login state) */
   isCloudPageGenEnabled?(): Promise<boolean>
+  /** live predicate: gsk login && the Genspark-cloud-tools toggle */
+  gskTools?(): boolean
   /** live predicate (gsk login && cloud-tools toggle, or a BYOK media key); false hides generate_image */
   imageGenAvailable?(): boolean
   /** same for analyze_media */

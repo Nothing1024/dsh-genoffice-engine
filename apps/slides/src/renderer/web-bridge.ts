@@ -53,12 +53,14 @@ import type {
   SetTableCellAnchorOp,
   SetTableColWidthOp,
   SetTableRowHeightOp,
+  AutoSaveDefault,
   SlidesApi,
   TableMergeIpcOp,
   TableStructureIpcOp,
   UngroupElementOp,
   UiTheme,
 } from '../shared/ipc'
+import { DEFAULT_AI_PANEL_PREFS, NO_AUTO_SAVE_DEFAULT } from '@genoffice/ui'
 // The barrel, not ./ops/executor: importing the executor alone leaves the op
 // registry empty, and every transaction fails with `unknown op`.
 import { runTxn } from '../main/ops'
@@ -581,12 +583,21 @@ const slidesApi: SlidesApi = {
     themeListeners.add(handler)
     return () => themeListeners.delete(handler)
   },
+  getAutoSaveDefault: async (): Promise<AutoSaveDefault> => NO_AUTO_SAVE_DEFAULT,
+  onAutoSaveDefaultChanged: () => () => {},
+  getAiPanelPrefs: async () => DEFAULT_AI_PANEL_PREFS,
+  onAiPanelPrefsChanged: () => () => {},
   onChromePressed: () => () => {},
   setShowFullScreen: async () => {
     console.warn('[web-slides] setShowFullScreen is not available in the web version')
   },
   privateFontFaces: async () => [],
   privateFontData: async () => null,
+  fontCatalog: async () => [],
+  fontDownload: async () => ({ ok: false, error: '网页版不提供字体下载' }),
+  fontInstallLocal: async () => ({ families: [] }),
+  fontMissing: async () => [],
+  onFontsChanged: () => () => {},
 
   openPptx: async (fitWidthPx) => {
     const target = openPathFromUrl()
@@ -623,6 +634,9 @@ const slidesApi: SlidesApi = {
 
   newBlank: async (fitWidthPx) => webNewBlank(fitWidthPx),
 
+  landGeneratedPages: async () => ({
+    error: '网页版请使用 htmlToPptx / generateFromHtml 落页',
+  }),
   htmlToPptx: async (pagesHtml, fitWidthPx, mode, atIndex) =>
     webHtmlToPptx(pagesHtml, fitWidthPx, mode, atIndex),
 
@@ -945,6 +959,18 @@ const slidesApi: SlidesApi = {
     return rebuildSlide(session, op.slideIndex)
   },
   clipboardExternal: async () => ({ kind: 'none' }),
+  clipboardProbe: async () => false,
+  pickPictureFile: async () => null,
+  setEffects: async () => {
+    console.warn('[web-slides] setEffects is not available in the web version')
+    return null
+  },
+  setTextBodyProps: async () => {
+    console.warn('[web-slides] setTextBodyProps is not available in the web version')
+    return null
+  },
+  onDeckChanged: () => () => {},
+  aiLogRunFailure: async () => {},
 
   groupElements: async (op: GroupElementsOp) => {
     const session = getWebSession()

@@ -243,7 +243,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
       return
     }
     try {
-      const execution = executeTool(editor, call)
+      const execution = await Promise.resolve(executeTool(editor, call))
       if (!execution.isError) {
         const next = await sha256Hex(editor.getMarkdown())
         if (next !== revision) {

@@ -45,6 +45,14 @@ function landError(res: unknown, fallback: string): LandFailed {
   return { ok: false, error: fallback }
 }
 
+function htmlToPptx() {
+  const fn = window.slidesApi.htmlToPptx
+  if (!fn) {
+    throw new Error('htmlToPptx is not available in this host')
+  }
+  return fn
+}
+
 export async function landFromHtml(
   pagesHtml: string[],
   fitWidthPx: number,
@@ -53,7 +61,7 @@ export async function landFromHtml(
   insertAt?: number,
 ): Promise<LandedDeck | LandFailed> {
   try {
-    const res = await window.slidesApi.htmlToPptx(
+    const res = await htmlToPptx()(
       pagesHtml,
       fitWidthPx,
       mode,
@@ -82,7 +90,7 @@ export async function landReplaceAt(
   slideIndex: number,
 ): Promise<LandedDeck | LandFailed> {
   try {
-    const res = await window.slidesApi.htmlToPptx([html], fitWidthPx, 'replace_at', slideIndex)
+    const res = await htmlToPptx()([html], fitWidthPx, 'replace_at', slideIndex)
     if (!isLanded(res)) return landError(res, t('aiErrRegenFailed'))
     return {
       ok: true,

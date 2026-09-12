@@ -27,6 +27,7 @@ import type {
   TextEditValidation,
   UiTheme,
 } from '../shared/ipc'
+import { DEFAULT_AI_PANEL_PREFS } from '@genoffice/ui'
 import { applySaveRequest, verifyContentEdits } from './web-pdf-save'
 import { validateTextEdits as validateTextEditsImpl } from './web-text-edit'
 import { listEditFonts as listEditFontsImpl, canDrawText as canDrawTextImpl } from './web-text-edit'
@@ -331,12 +332,16 @@ const pdfApi: PdfApi = {
   getLanguage: async () => readLang(),
   onLanguageChanged: () => () => {},
   getTheme: async () => readTheme(),
+  getAiPanelPrefs: async () => DEFAULT_AI_PANEL_PREFS,
+  onAiPanelPrefsChanged: () => () => {},
   onThemeChanged: (handler) => {
     themeListeners.add(handler)
     return () => themeListeners.delete(handler)
   },
 
   getAiSettings: async () => readAiSettings(),
+  ocrPage: async () => null,
+  createDocument: async () => ({ ok: false, error: '网页版暂不支持 create_document' }),
   aiStream: async () => {},
   aiStreamCancel: async () => {},
   onAiStream: (handler) => {
