@@ -27,6 +27,37 @@ export const CONTROL_PATH: string | null = openTarget.startsWith('path:')
   ? openTarget.slice('path:'.length)
   : null
 
+
+export type FileLoadMeta = {
+  mtimeMs?: number | null
+  fileRevision?: string | null
+}
+
+type FileMetaSink = { apply(meta: FileLoadMeta): void }
+
+let pendingLoadMeta: FileLoadMeta | null = null
+let liveFileMetaSink: FileMetaSink | null = null
+
+/** Bind byte-bound mtime/revision from the same GET /api/file that loaded the document. */
+export function bindLoadMeta(meta: FileLoadMeta): void {
+  pendingLoadMeta = meta
+  liveFileMetaSink?.apply(meta)
+}
+
+function applyPendingFileMeta(
+  setMtime: (value: number) => void,
+  setRev: (value: string) => void,
+): void {
+  const sink: FileMetaSink = {
+    apply(meta) {
+      if (typeof meta.mtimeMs === "number") setMtime(meta.mtimeMs)
+      if (typeof meta.fileRevision === "string" && meta.fileRevision) setRev(meta.fileRevision)
+    },
+  }
+  liveFileMetaSink = sink
+  if (pendingLoadMeta) sink.apply(pendingLoadMeta)
+}
+
 async function sha256Hex(s: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -314,25 +345,11 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   /** conflict baseline: mtime / content hash of the original file as of adapter init (UF-002) */
   let mtimeMs: number | null = null
   let fileRev: string | null = null
-  const captureMtime = async (): Promise<number | null> => {
-    if (mtimeMs !== null) return mtimeMs
-    try {
-      const resp = await fetch(`/api/file?path=${encodeURIComponent(CONTROL_PATH ?? '')}`)
-      const data = (await resp.json()) as {
-        ok?: boolean
-        mtimeMs?: number | null
-        fileRevision?: string | null
-      }
-      if (data.ok) {
-        mtimeMs = data.mtimeMs ?? null
-        if (typeof data.fileRevision === 'string') fileRev = data.fileRevision
-      }
-    } catch {
-      /* keep null — conflict check skipped */
-    }
-    return mtimeMs
-  }
-  void captureMtime()
+  const captureMtime = async (): Promise<number | null> => mtimeMs
+  applyPendingFileMeta(
+    (value) => { mtimeMs = value },
+    (value) => { fileRev = value },
+  )
 
   if (opts.getDirty) {
     void (async () => {
@@ -365,6 +382,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
 
   const close = (): void => {
     closed = true
+    liveFileMetaSink = null
     if (reconnectTimer !== null) clearTimeout(reconnectTimer)
     if (dirtyTimer !== null) clearInterval(dirtyTimer)
     document.removeEventListener('visibilitychange', onVisibility)

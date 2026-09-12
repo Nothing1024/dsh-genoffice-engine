@@ -13,6 +13,7 @@
  * This file is only included by the web build (vite.web.config.ts); the desktop
  * build never sees it.
  */
+import { bindLoadMeta } from './control'
 import {
   chatForProvider,
   defaultAiSettings,
@@ -1396,11 +1397,19 @@ async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; nam
       if (isPath) throw new Error(`load-error: HTTP ${resp.status}`)
       return null
     }
-    const data = (await resp.json()) as { ok: boolean; base64?: string; name?: string; error?: string }
+    const data = (await resp.json()) as {
+      ok: boolean
+      base64?: string
+      name?: string
+      error?: string
+      mtimeMs?: number | null
+      fileRevision?: string | null
+    }
     if (!data.ok || !data.base64) {
       if (isPath) throw new Error(`load-error: ${data.error ?? 'empty result for path target'}`)
       return null
     }
+    if (isPath) bindLoadMeta({ mtimeMs: data.mtimeMs, fileRevision: data.fileRevision })
     const bin = Uint8Array.from(atob(data.base64), (c) => c.charCodeAt(0))
     return { data: bin.buffer as ArrayBuffer, name: data.name ?? 'remote-file' }
   } catch (error) {

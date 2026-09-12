@@ -20,6 +20,7 @@
  * This file is only included by the web build (vite.web.config.ts); the
  * desktop build never sees it.
  */
+import { bindLoadMeta } from './control'
 import type {
   AiChatRequest,
   AiChatResponse,
@@ -236,12 +237,20 @@ function parseOpenTarget(): string | null {
 const INITIAL_OPEN_TARGET = parseOpenTarget()
 
 async function fetchPathBytes(path: string): Promise<{ bytes: Uint8Array; name: string; mtimeMs: number | null }> {
-  const res = await relay<{ ok: boolean; base64?: string; name?: string; mtimeMs?: number | null; error?: string }>(
+  const res = await relay<{
+    ok: boolean
+    base64?: string
+    name?: string
+    mtimeMs?: number | null
+    fileRevision?: string | null
+    error?: string
+  }>(
     `/file?path=${encodeURIComponent(path)}`,
   )
   if (!res?.ok || !res.base64) {
     throw new Error(`load-error: ${res?.error ?? 'empty result for path target'}`)
   }
+  bindLoadMeta({ mtimeMs: res.mtimeMs, fileRevision: res.fileRevision })
   const bin = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0))
   return { bytes: bin, name: res.name ?? path.split('/').pop() ?? 'workbook.xlsx', mtimeMs: res.mtimeMs ?? null }
 }

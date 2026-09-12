@@ -16,6 +16,7 @@
  * This file is only included by the web build (vite.web.config.ts); the
  * desktop build never sees it.
  */
+import { bindLoadMeta } from './control'
 import type { AiSettings, AiStreamChunk } from '@genoffice/ai-provider'
 import { defaultAiSettings } from '@genoffice/ai-provider'
 import type {
@@ -213,6 +214,7 @@ async function fetchPathBytes(path: string): Promise<{
     fileRevision?: string
   }>(`/file?path=${encodeURIComponent(path)}`)
   if (!res?.ok || !res.base64) throw new Error(`load-error: ${res?.error ?? 'empty result for path target'}`)
+  bindLoadMeta({ mtimeMs: res.mtimeMs, fileRevision: res.fileRevision })
   const bin = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0))
   return {
     bytes: bin,

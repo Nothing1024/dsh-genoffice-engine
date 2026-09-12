@@ -18,6 +18,7 @@
  *     clipboard, animations, comments, media/links/header-footer
  *   - generateImage / analyzeMedia → localhost relay (no browser net egress)
  */
+import { bindLoadMeta } from './control'
 import './web-node-shims'
 import type {
   AddChartOp,
@@ -324,10 +325,18 @@ function clearOpenTarget(): void {
 }
 
 async function openPath(path: string, fitWidthPx: number): Promise<OpenResult> {
-  const res = await relay<{ ok: boolean; base64?: string; name?: string; error?: string }>(
+  const res = await relay<{
+    ok: boolean
+    base64?: string
+    name?: string
+    error?: string
+    mtimeMs?: number | null
+    fileRevision?: string | null
+  }>(
     `/file?path=${encodeURIComponent(path)}`,
   )
   if (!res?.ok || !res.base64) throw new Error(`load-error: ${res?.error ?? 'empty result for path target'}`)
+  bindLoadMeta({ mtimeMs: res.mtimeMs, fileRevision: res.fileRevision })
   const bin = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0))
   const result = await webOpenBytes(bin, path, fitWidthPx)
   clearOpenTarget()

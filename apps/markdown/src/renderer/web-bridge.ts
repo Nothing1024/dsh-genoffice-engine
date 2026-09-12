@@ -6,6 +6,7 @@
  * Uses the same shared IndexedDB "genoffice-web" database as the docs bridge,
  * so files opened on the home screen / in docs show up here and vice versa.
  */
+import { bindLoadMeta } from './control'
 import {
   defaultAiSettings,
   resolveAiSettings,
@@ -432,11 +433,14 @@ async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; nam
       base64?: string
       name?: string
       error?: string
+      mtimeMs?: number | null
+      fileRevision?: string | null
     }
     if (!resp.ok || !data.ok || !data.base64) {
       if (isPath) throw new Error(`load-error: ${data.error ?? `HTTP ${resp.status}`}`)
       return null
     }
+    if (isPath) bindLoadMeta({ mtimeMs: data.mtimeMs, fileRevision: data.fileRevision })
     const bin = Uint8Array.from(atob(data.base64), (c) => c.charCodeAt(0))
     return { data: bin.buffer as ArrayBuffer, name: data.name ?? 'remote-file' }
   } catch (error) {
