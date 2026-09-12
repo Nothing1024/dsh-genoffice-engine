@@ -37,11 +37,24 @@ function webBridgePlugin(): Plugin {
 
 const shims = path.resolve(__dirname, 'src/renderer/web-node-shims.ts')
 
+
+function stubCodexAppServer(): Plugin {
+  const stub = path.resolve(__dirname, '../../packages/ai-provider/src/codex-app-server.browser.ts')
+  return {
+    name: 'stub-codex-app-server-web',
+    enforce: 'pre',
+    resolveId(id) {
+      if (id.includes('codex-app-server') && !id.includes('.browser')) return stub
+      return undefined
+    },
+  }
+}
+
 export default defineConfig({
   root: 'src/renderer',
   // served under /sheets/ by web/server.mjs — asset URLs must match
   base: '/sheets/',
-  plugins: [react(), webBridgePlugin()],
+  plugins: [react(), webBridgePlugin(), stubCodexAppServer()],
   resolve: {
     alias: [
       // Node builtins → browser shims (gateway reuse; desktop build unaffected)

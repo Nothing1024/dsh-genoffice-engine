@@ -33,9 +33,22 @@ function webBridgePlugin(): Plugin {
   }
 }
 
+
+function stubCodexAppServer(): Plugin {
+  const stub = path.resolve(__dirname, '../../packages/ai-provider/src/codex-app-server.browser.ts')
+  return {
+    name: 'stub-codex-app-server-web',
+    enforce: 'pre',
+    resolveId(id) {
+      if (id.includes('codex-app-server') && !id.includes('.browser')) return stub
+      return undefined
+    },
+  }
+}
+
 export default defineConfig({
   root: 'src/renderer',
-  plugins: [react(), webBridgePlugin()],
+  plugins: [react(), webBridgePlugin(), stubCodexAppServer()],
   build: {
     outDir: path.resolve(__dirname, 'web-dist'),
     emptyOutDir: true,
