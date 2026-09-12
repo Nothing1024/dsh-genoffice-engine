@@ -150,7 +150,7 @@ export interface ParsedWorkbook {
   styles: WorkbookCellStyle[]
   entryCount: number
   sha256: string
-  definedNames: Array<{ name: string; formula: string; sheetIndex?: number }>
+  definedNames: WorkbookFile['definedNames']
 }
 
 const MINIMUM_ROW_COUNT = 100
@@ -602,8 +602,8 @@ export async function parseXlsxWorkbook(
   return { file, store: { name, sheets, styles, entryCount: file.entryCount, sha256, definedNames: file.definedNames } }
 }
 
-function parseDefinedNames(workbookXml: string): Array<{ name: string; formula: string; sheetIndex?: number }> {
-  const names: Array<{ name: string; formula: string; sheetIndex?: number }> = []
+function parseDefinedNames(workbookXml: string): WorkbookFile['definedNames'] {
+  const names: WorkbookFile['definedNames'] = []
   const block = workbookXml.match(/<definedNames>([\s\S]*?)<\/definedNames>/)?.[1] ?? ''
   for (const m of block.matchAll(/<definedName\b([^>]*)>([\s\S]*?)<\/definedName>/g)) {
     const name = readXmlAttribute(m[1] ?? '', 'name')

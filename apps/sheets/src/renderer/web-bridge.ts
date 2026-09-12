@@ -265,7 +265,9 @@ async function persistOpened(): Promise<void> {
   const rec = await idbGet<WebFileRecord>(STORE_HANDLES, opened.path)
   if (rec?.handle && typeof rec.handle.createWritable === 'function') {
     const writable = await rec.handle.createWritable()
-    await writable.write(opened.latestBytes)
+    const chunk = new Uint8Array(opened.latestBytes.byteLength)
+    chunk.set(opened.latestBytes)
+    await writable.write(chunk)
     await writable.close()
   }
   await idbPut(STORE_HANDLES, opened.path, {

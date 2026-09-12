@@ -160,10 +160,11 @@ export async function parseWorksheetPivots(
     const xml = await zip.file(path)?.async('text')
     if (!xml) continue
     const loc = /<(?:\w+:)?location\b([^>]*)\/?>/.exec(xml)
-    const ref = loc ? readXmlAttribute(loc[1] ?? '', 'ref') : null
-    if (!ref) continue
-    const firstDataRow = Number(readXmlAttribute(loc[1] ?? '', 'firstDataRow') ?? '1')
-    const firstDataCol = Number(readXmlAttribute(loc[1] ?? '', 'firstDataCol') ?? '1')
+    const locAttrs = loc?.[1] ?? ''
+    const ref = loc ? readXmlAttribute(locAttrs, 'ref') : null
+    if (!loc || !ref) continue
+    const firstDataRow = Number(readXmlAttribute(locAttrs, 'firstDataRow') ?? '1')
+    const firstDataCol = Number(readXmlAttribute(locAttrs, 'firstDataCol') ?? '1')
     const pivotRelsXml = (await zip.file(relsPathFor(path))?.async('text')) ?? ''
     const cacheRel = parseRelationships(pivotRelsXml).find((entry) =>
       entry.type.endsWith('/pivotCacheDefinition'),

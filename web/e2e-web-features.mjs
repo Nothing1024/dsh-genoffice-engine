@@ -20,7 +20,8 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets']
+const PHASE0_CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
 function parseArgs(argv) {
@@ -1528,20 +1529,43 @@ async function main() {
   const evidenceRoot = args.outDir
     ? resolve(process.cwd(), args.outDir)
     : join(PLUGIN, 'docs/web-feature-completion/evidence')
-  if (args.caseName === 'inventory' || args.all) {
+  const runPhase0 = args.caseName === 'entries-sheets' || args.all
+  const ran = []
+  if (args.caseName === 'inventory' || runPhase0) {
     await runInventory(join(evidenceRoot, 'phase-0'))
+    ran.push('inventory')
   }
-  if (args.caseName === 'sheets-slice' || args.all) {
+  if (args.caseName === 'sheets-slice' || runPhase0) {
     await runSheetsSlice(evidenceRoot)
+    ran.push('sheets-slice')
   }
-  if (args.caseName === 'entry-matrix' || args.all) {
+  if (args.caseName === 'entry-matrix' || runPhase0) {
     await runEntryMatrix(evidenceRoot)
+    ran.push('entry-matrix')
   }
-  if (args.caseName === 'sheets-semantics' || args.all) {
+  if (args.caseName === 'sheets-semantics' || runPhase0) {
     await runSheetsSemantics(evidenceRoot)
+    ran.push('sheets-semantics')
   }
-  if (args.caseName === 'sheets-media' || args.all) {
+  if (args.caseName === 'sheets-media' || runPhase0) {
     await runSheetsMedia(evidenceRoot)
+    ran.push('sheets-media')
+  }
+  if (args.caseName === 'entries-sheets') {
+    const missing = PHASE0_CASES.filter((name) => ran.includes(name) === false)
+    const payload = {
+      schema_version: 1,
+      package: 'web-feature-completion',
+      uf: 'EVD-007',
+      branch: 'entries-sheets',
+      status: missing.length === 0 ? 'passed' : 'failed',
+      cases: ran.map((id) => ({ id, status: 'passed' })),
+      missing,
+    }
+    await mkdir(join(evidenceRoot, 'phase-0'), { recursive: true })
+    await writeFile(join(evidenceRoot, 'phase-0/task-6.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (missing.length > 0) throw new Error(`entries-sheets missing ${missing.join(',')}`)
   }
 }
 
