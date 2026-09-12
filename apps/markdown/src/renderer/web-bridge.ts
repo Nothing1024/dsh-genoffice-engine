@@ -135,7 +135,15 @@ function downloadBytes(data: ArrayBuffer | Uint8Array, name: string): void {
 }
 
 function readText(data: ArrayBuffer): string {
-  return new TextDecoder('utf-8').decode(data)
+  const bytes = new Uint8Array(data)
+  if (bytes.includes(0)) {
+    throw new Error('load-error: binary markdown is not supported')
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    throw new Error('load-error: markdown is not valid UTF-8')
+  }
 }
 
 async function openRecordBytes(path: string): Promise<{ name: string; data: ArrayBuffer } | null> {

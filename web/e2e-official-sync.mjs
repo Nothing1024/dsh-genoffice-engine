@@ -785,11 +785,14 @@ async function archiveMatrix(ctx, results, outDir) {
     ['UF-003', 'failure-2', land, 'stale-or-lost-receipt'],
   ]
 
+  let matrixFailed = false
   for (const [uf, branch, item] of rows) {
     const source = item || { assertions: [assertion('missing-case', false, 'present', null)], ok: false }
+    const ok = source.ok !== false && (source.assertions ?? []).every((row) => row.status === 'passed')
+    if (!ok) matrixFailed = true
     await writeEvidence(outDir, uf, branch, {
       run_id: ctx.runId,
-      status: source.ok === false ? 'failed' : 'passed',
+      status: ok ? 'passed' : 'failed',
       cases: [{
         id: `${uf}-${branch}`,
         status: source.ok === false ? 'failed' : 'passed',
@@ -800,6 +803,7 @@ async function archiveMatrix(ctx, results, outDir) {
       screenshot: source.screenshot,
     })
   }
+  if (matrixFailed) throw new Error('5.2 matrix evidence has failed or empty assertion sets')
 }
 
 const CASE_RUNNERS = {
