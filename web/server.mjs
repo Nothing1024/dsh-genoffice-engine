@@ -224,15 +224,25 @@ const MIME = {
   '.wasm': 'application/wasm',
 }
 
+const CLAIMED_APPS = ['shell', 'docs', 'markdown', 'pdf', 'sheets', 'slides', 'html']
+
 /** find the first existing web-dist dir among the apps (shell first = the home screen) */
 function findStaticRoots() {
-  const candidates = ['shell', 'docs', 'markdown', 'pdf', 'sheets', 'slides', 'html']
   const roots = []
-  for (const app of candidates) {
+  for (const app of CLAIMED_APPS) {
     const dir = join(ROOT, 'apps', app, 'web-dist')
     if (existsSync(join(dir, 'index.html'))) roots.push({ app, dir })
   }
   return roots
+}
+
+function appHealth() {
+  const apps = {}
+  for (const app of CLAIMED_APPS) {
+    const build = existsSync(join(ROOT, 'apps', app, 'web-dist', 'index.html'))
+    apps[app] = { build, ready: build, missing: build ? [] : ['web-dist'] }
+  }
+  return apps
 }
 
 function json(res, status, body) {
@@ -585,12 +595,17 @@ async function handleApi(req, res, pathname, body, url) {
     // ready/roots are recomputed per request: a moved/renamed engine checkout
     // keeps the API alive while static serving 404s (liveness ≠ readiness).
     const live = findStaticRoots()
+    const apps = appHealth()
+    const suiteReady = CLAIMED_APPS.every((app) => apps[app].ready)
     return json(res, 200, {
       ok: true,
       name: 'genoffice-web-relay',
       port: PORT,
-      ready: live.length > 0,
+      live: true,
+      ready: suiteReady,
       roots: live.map((r) => r.app),
+      claimed: CLAIMED_APPS,
+      apps,
       executors: executors.size,
       print: printReady(),
       ocr: ocrReady(),
@@ -1356,7 +1371,7 @@ async function serveStatic(res, pathname, roots) {
   }
   if (!app) {
     const first = pathname.split('/').filter(Boolean)[0] ?? ''
-    const known = ['shell', 'docs', 'markdown', 'pdf', 'sheets', 'slides', 'html']
+    const known = CLAIMED_APPS
     if (known.includes(first)) {
       res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' })
       return res.end(

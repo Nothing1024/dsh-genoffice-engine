@@ -5,7 +5,7 @@
  *   node web/e2e-agent-runtime.mjs --all
  */
 import { join } from 'node:path'
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import {
   EVIDENCE,
   ENGINE,
@@ -31,7 +31,7 @@ import {
 } from './runtime-measure.mjs'
 
 
-const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve']
+const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file']
 const WEB_APPS = ['shell', 'docs', 'markdown', 'sheets', 'slides', 'pdf', 'html']
 
 
@@ -363,6 +363,145 @@ async function runBuildServe(outDir) {
   return payload
 }
 
+
+async function runReadiness(outDir) {
+  const sheetsIndex = join(ENGINE, 'apps/sheets/web-dist/index.html')
+  const sheetsBak = `${sheetsIndex}.wre-hidden`
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelayViaNpm(port, 'web:serve')
+  const browser = await chromium.launch({ headless: true })
+  let shot = null
+  try {
+    const full = await fetch(`${relay.base}/api/health`).then((r) => r.json())
+    const page = await browser.newPage()
+    await page.goto(`${relay.base}/markdown/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    shot = await page.screenshot({ type: 'png' }).catch(() => null)
+    await page.close().catch(() => {})
+
+    if (!existsSync(sheetsIndex)) throw new Error(`missing ${sheetsIndex}`)
+    await rename(sheetsIndex, sheetsBak)
+    let missing
+    let sheetsPage
+    let markdownPage
+    try {
+      missing = await fetch(`${relay.base}/api/health`).then((r) => r.json())
+      sheetsPage = await fetch(`${relay.base}/sheets/`).then(async (r) => ({ status: r.status, text: await r.text() }))
+      markdownPage = await fetch(`${relay.base}/markdown/`).then(async (r) => ({ status: r.status, text: await r.text() }))
+    } finally {
+      if (existsSync(sheetsBak)) await rename(sheetsBak, sheetsIndex)
+    }
+    const restored = await fetch(`${relay.base}/api/health`).then((r) => r.json())
+    stopRelay(relay)
+
+    const depPort = await freePort(DEFAULT_PORT + 1)
+    const depRelay = await startRelayViaNpm(depPort, 'web:serve', { GENOFFICE_PRINT_DISABLED: '1' })
+    const disabled = await fetch(`${depRelay.base}/api/health`).then((r) => r.json())
+    stopRelay(depRelay)
+
+    const assertions = [
+      assert('live', full.live === true, true, full.live),
+      assert('suite-ready-full', full.ready === true && WEB_APPS.every((app) => full.apps?.[app]?.ready === true), true, full.apps),
+      assert('claimed-covers-apps', Array.isArray(full.claimed) && WEB_APPS.every((app) => full.claimed.includes(app)), WEB_APPS, full.claimed),
+      assert('missing-sheets-not-ready', missing.apps?.sheets?.ready === false && missing.ready === false, false, missing.apps?.sheets),
+      assert('missing-sheets-markdown-ready', missing.apps?.markdown?.ready === true && missing.live === true, true, missing.apps?.markdown),
+      assert('missing-sheets-route', sheetsPage.status === 404 && /web-dist 未构建/.test(sheetsPage.text), 404, { status: sheetsPage.status, snippet: sheetsPage.text.slice(0, 180) }),
+      assert('other-app-still-served', markdownPage.status === 200 && /<!doctype html|<html/i.test(markdownPage.text), 200, markdownPage.status),
+      assert('restore-sheets', restored.apps?.sheets?.ready === true && restored.ready === true, true, restored.apps?.sheets),
+      assert('print-disabled-live', disabled.live === true && disabled.print?.available === false, false, disabled.print),
+      assert('print-disabled-reason', disabled.print?.reason === 'print-service-disabled', 'print-service-disabled', disabled.print),
+    ]
+    const ok = assertions.every((row) => row.status === 'passed')
+    const payload = {
+      schema_version: 1,
+      package: 'web-runtime-efficiency',
+      uf: 'UF-002',
+      branch: 'readiness',
+      status: ok ? 'passed' : 'failed',
+      run_id: `wre-readiness-${new Date().toISOString()}`,
+      source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+      full,
+      missing,
+      restored,
+      disabledPrint: disabled.print,
+      cases: [{ id: 'per-app-readiness-and-recovery', status: ok ? 'passed' : 'failed', assertions }],
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-4.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    if (shot) await writeFile(join(outDir, 'phase-0/task-4-screenshot.png'), shot)
+    console.log(JSON.stringify(payload, null, 2))
+    if (!ok) throw new Error('readiness case failed')
+    return payload
+  } finally {
+    if (existsSync(sheetsBak)) await rename(sheetsBak, sheetsIndex).catch(() => {})
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
+
+async function runStartupFile(outDir) {
+  const noDup = await runNoDuplicateRead(outDir)
+  const ready = await runReadiness(outDir)
+  const gaps = probeGaps()
+  const webScript = String(gaps.scripts.web ?? '')
+  const workDir = join(outDir, 'phase-0/work-startup-file')
+  const fixtures = await createFixtures(workDir)
+  const md = fixtures.find((row) => row.app === 'markdown' && row.size === 'small')
+  const port = await freePort(DEFAULT_PORT)
+  const t0 = Date.now()
+  const relay = await startRelayViaNpm(port, 'web:serve')
+  const browser = await chromium.launch({ headless: true })
+  let sample
+  let shot = null
+  try {
+    sample = await measureSample({
+      relay,
+      browser,
+      app: 'markdown',
+      file: md.path,
+      kind: 'cold',
+      marker: 'WreStartupKeep',
+    })
+    const page = await browser.newPage()
+    await page.goto(`${relay.base}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    shot = await page.screenshot({ type: 'png' }).catch(() => null)
+    await page.close().catch(() => {})
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+  const assertions = [
+    assert('phase0-no-duplicate', noDup.status === 'passed', 'passed', noDup.status),
+    assert('phase0-readiness', ready.status === 'passed', 'passed', ready.status),
+    assert('web-default-compatible', webScript.includes('web:build -w @genoffice/shell') && webScript.includes('node web/server.mjs'), true, webScript),
+    assert('web-serve-present', typeof gaps.scripts.webServe === 'string', 'string', gaps.scripts.webServe),
+    assert('startup-ready', sample.readiness === 'ready', 'ready', sample.readiness),
+    assert('startup-single-get', sample.file_gets === 1, 1, sample.file_gets),
+    assert('startup-save', sample.saveOk === true, true, sample.saveOk),
+    assert('serve-start-ms', Number.isFinite(relay.startMs), true, { serveMs: Date.now() - t0, relayStartMs: relay.startMs }),
+  ]
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'EVD-005',
+    branch: 'startup-file',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-startup-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    protocol: PROTOCOL,
+    sample,
+    cases: [{ id: 'phase-0-regression', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-5.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  
+  if (shot) await writeFile(join(outDir, 'phase-0/task-5-screenshot.png'), shot)
+  console.log(JSON.stringify(payload, null, 2))
+  if (!ok) throw new Error('startup-file case failed')
+  return payload
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.all) {
@@ -379,6 +518,8 @@ async function main() {
     if (name === 'baseline') await runBaseline(outDir)
     else if (name === 'no-duplicate-read') await runNoDuplicateRead(outDir)
     else if (name === 'build-serve') await runBuildServe(outDir)
+    else if (name === 'readiness') await runReadiness(outDir)
+    else if (name === 'startup-file') await runStartupFile(outDir)
   }
 }
 
