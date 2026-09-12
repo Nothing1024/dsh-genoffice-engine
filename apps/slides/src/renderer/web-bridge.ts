@@ -196,14 +196,76 @@ async function relay<T>(path: string, body?: unknown, timeoutMs = 60_000): Promi
   }
 }
 
-function openPathFromUrl(): string | null {
+
+const DB_NAME = 'genoffice-web'
+const DB_VERSION = 1
+const STORE_HANDLES = 'handles'
+
+interface WebFileRecord {
+  name: string
+  kind: 'fs' | 'bytes'
+  handle?: FileSystemFileHandle
+  bytes?: ArrayBuffer
+  mtime: number
+}
+
+let dbPromise: Promise<IDBDatabase> | null = null
+
+function openDb(): Promise<IDBDatabase> {
+  if (dbPromise) return dbPromise
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(STORE_HANDLES)) db.createObjectStore(STORE_HANDLES)
+    }
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+  return dbPromise
+}
+
+async function idbGet<T>(store: string, key: string): Promise<T | undefined> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly')
+    const req = tx.objectStore(store).get(key)
+    req.onsuccess = () => resolve(req.result as T | undefined)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+async function bytesFromWebdoc(path: string): Promise<{ bytes: Uint8Array; name: string }> {
+  const rec = await idbGet<WebFileRecord>(STORE_HANDLES, path)
+  if (!rec) throw new Error('load-error: missing browser file record')
+  if (rec.kind === 'fs' && rec.handle) {
+    const file = await rec.handle.getFile()
+    return { bytes: new Uint8Array(await file.arrayBuffer()), name: file.name }
+  }
+  if (rec.bytes) {
+    const bytes = rec.bytes instanceof Uint8Array ? rec.bytes : new Uint8Array(rec.bytes)
+    return { bytes, name: rec.name }
+  }
+  throw new Error('load-error: empty browser file record')
+}
+
+function parseOpenTarget(): string | null {
   const params = new URLSearchParams(location.search)
   for (const key of ['open', 'file']) {
     const v = params.get(key)
-    if (v?.startsWith('path:')) return v.slice('path:'.length)
+    if (v) return v
   }
   return null
 }
+
+const INITIAL_OPEN_TARGET = parseOpenTarget()
+
+function openPathFromUrl(): string | null {
+  const target = parseOpenTarget() ?? INITIAL_OPEN_TARGET
+  if (target?.startsWith('path:')) return target.slice('path:'.length)
+  return null
+}
+
 
 function clearOpenTarget(): void {
   const url = new URL(location.href)
@@ -217,15 +279,26 @@ function clearOpenTarget(): void {
   if (changed) history.replaceState(null, '', url)
 }
 
-async function openPath(path: string, fitWidthPx: number): Promise<OpenResult | null> {
+async function openPath(path: string, fitWidthPx: number): Promise<OpenResult> {
   const res = await relay<{ ok: boolean; base64?: string; name?: string; error?: string }>(
     `/file?path=${encodeURIComponent(path)}`,
   )
-  if (!res?.ok || !res.base64) return null
+  if (!res?.ok || !res.base64) throw new Error(`load-error: ${res?.error ?? 'empty result for path target'}`)
   const bin = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0))
   const result = await webOpenBytes(bin, path, fitWidthPx)
   clearOpenTarget()
   return result
+}
+
+async function openAnyTarget(target: string, fitWidthPx: number): Promise<OpenResult> {
+  if (target.startsWith('path:')) return openPath(target.slice('path:'.length), fitWidthPx)
+  if (target.startsWith('/webdoc/')) {
+    const fetched = await bytesFromWebdoc(target)
+    const result = await webOpenBytes(fetched.bytes, target, fitWidthPx)
+    clearOpenTarget()
+    return result
+  }
+  throw new Error(`load-error: unsupported open target`)
 }
 
 // ── event listeners (registered by the renderer) ────────────────────────
@@ -600,15 +673,8 @@ const slidesApi: SlidesApi = {
   onFontsChanged: () => () => {},
 
   openPptx: async (fitWidthPx) => {
-    const target = openPathFromUrl()
-    if (target) {
-      try {
-        return await openPath(target, fitWidthPx)
-      } catch (e) {
-        console.error('[web-slides] open failed:', e)
-        return null
-      }
-    }
+    const target = parseOpenTarget() ?? INITIAL_OPEN_TARGET
+    if (target) return openAnyTarget(target, fitWidthPx)
     return notAvailable('openPptx (dialog)')
   },
 
@@ -622,14 +688,9 @@ const slidesApi: SlidesApi = {
   },
 
   consumePendingOpen: async (fitWidthPx) => {
-    const target = openPathFromUrl()
+    const target = parseOpenTarget() ?? INITIAL_OPEN_TARGET
     if (!target) return null
-    try {
-      return await openPath(target, fitWidthPx)
-    } catch (e) {
-      console.error('[web-slides] open failed:', e)
-      return null
-    }
+    return openAnyTarget(target, fitWidthPx)
   },
 
   newBlank: async (fitWidthPx) => webNewBlank(fitWidthPx),

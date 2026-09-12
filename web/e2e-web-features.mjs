@@ -20,7 +20,7 @@ const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
 const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
-const CASES = ['inventory', 'sheets-slice']
+const CASES = ['inventory', 'sheets-slice', 'entry-matrix']
 const SHEETS_FIXTURE = join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
 
 function parseArgs(argv) {
@@ -474,6 +474,210 @@ async function runSheetsSlice(outDir) {
   }
 }
 
+
+const FAMILIES = [
+  { app: 'docs', ext: 'docx', sub: '.docx', fixture: join(ENGINE, 'fixtures/generated/simple.docx') },
+  { app: 'markdown', ext: 'md', sub: '.md', fixture: null },
+  { app: 'sheets', ext: 'xlsx', sub: '.xlsx', fixture: join(ENGINE, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx') },
+  { app: 'slides', ext: 'pptx', sub: '.pptx', fixture: join(ENGINE, 'fixtures/generated/sample.pptx') },
+  { app: 'pdf', ext: 'pdf', sub: '.pdf', fixture: join(ENGINE, 'fixtures/generated/simple.pdf') },
+]
+
+async function fixtureBytes(family) {
+  if (family.ext === 'md') return Buffer.from('# EntryMatrixKeep\n\nhello\n')
+  if (!family.fixture || !existsSync(family.fixture)) throw new Error(`missing fixture for ${family.app}: ${family.fixture}`)
+  return readFileSync(family.fixture)
+}
+
+async function runEntryMatrix(outDir) {
+  const workDir = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/work-entry-matrix')
+  await mkdir(workDir, { recursive: true })
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  const events = []
+  const assertions = []
+  const cancelAssertions = []
+  const failAssertions = []
+  let homeShot = null
+  try {
+    const home = await browser.newPage()
+    home.on('console', (msg) => logs.push(`[home] ${msg.text()}`))
+    home.on('dialog', (dialog) => { logs.push(`[alert] ${dialog.message()}`); void dialog.dismiss() })
+    await home.goto(`${relay.base}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    await home.waitForSelector('.quick-card', { timeout: 30_000 })
+
+    for (const family of FAMILIES) {
+      const popupPromise = home.waitForEvent('popup', { timeout: 15_000 })
+      await home.locator('.quick-card', { hasText: family.sub }).first().click()
+      const popup = await popupPromise
+      const url = popup.url()
+      assertions.push(assertion(`new-${family.app}-url`, url.includes(`/${family.app}/`), `/${family.app}/`, url))
+      await popup.waitForLoadState('domcontentloaded').catch(() => {})
+      const web = await popup.evaluate(() => window.__GENOFFICE_WEB__ === true).catch(() => false)
+      assertions.push(assertion(`new-${family.app}-bridge`, web === true, true, web))
+      await popup.close()
+    }
+
+    for (const family of FAMILIES) {
+      const bytes = await fixtureBytes(family)
+      const idbPath = `/webdoc/entry-${family.app}/sample.${family.ext}`
+      await home.evaluate(async ({ idbPath: key, name, b64 }) => {
+        const db = await new Promise((resolve, reject) => {
+          const req = indexedDB.open('genoffice-web', 1)
+          req.onupgradeneeded = () => {
+            if (!req.result.objectStoreNames.contains('handles')) req.result.createObjectStore('handles')
+          }
+          req.onsuccess = () => resolve(req.result)
+          req.onerror = () => reject(req.error)
+        })
+        const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction('handles', 'readwrite')
+          tx.objectStore('handles').put({
+            name,
+            kind: 'bytes',
+            bytes: raw.buffer,
+            mtime: Date.now(),
+            accessedAt: Date.now(),
+          }, key)
+          tx.oncomplete = () => resolve()
+          tx.onerror = () => reject(tx.error)
+        })
+      }, { idbPath, name: `sample.${family.ext}`, b64: bytes.toString('base64') })
+
+      const recents = await home.evaluate(async () => window.aiOffice.recents({ limit: 50 }))
+      const found = (recents.entries || []).some((e) => e.path === idbPath || e.name === `sample.${family.ext}`)
+      assertions.push(assertion(`recents-${family.app}`, found, true, recents.entries?.map((e) => e.name)))
+
+      const popupPromise = home.waitForEvent('popup', { timeout: 15_000 })
+      await home.evaluate((path) => window.aiOffice.openPath(path), idbPath)
+      const popup = await popupPromise
+      assertions.push(assertion(`open-${family.app}-url`, popup.url().includes(`/${family.app}/`), `/${family.app}/`, popup.url()))
+      await popup.close()
+
+      const dragPopupPromise = home.waitForEvent('popup', { timeout: 15_000 })
+      await home.evaluate(async ({ name, b64 }) => {
+        const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+        const file = new File([raw], name)
+        const dt = new DataTransfer()
+        dt.items.add(file)
+        window.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true }))
+      }, { name: `drag.${family.ext}`, b64: bytes.toString('base64') })
+      const dragPopup = await dragPopupPromise
+      assertions.push(assertion(`drag-${family.app}-url`, dragPopup.url().includes(`/${family.app}/`), `/${family.app}/`, dragPopup.url()))
+      await dragPopup.close()
+
+      const disk = join(workDir, `${family.app}-loop.${family.ext}`)
+      await writeFile(disk, bytes)
+      const page = await browser.newPage()
+      page.on('console', (msg) => logs.push(`[${family.app}] ${msg.text()}`))
+      await page.goto(`${relay.base}/${family.app}/?control=1&open=${encodeURIComponent(`path:${disk}`)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      })
+      const opened = await waitReady(relay.base, disk)
+      assertions.push(assertion(`file-${family.app}-ready`, opened.readiness === 'ready', 'ready', opened))
+      await page.close()
+      events.push({ family: family.app, opened })
+    }
+
+    const docsPage = await browser.newPage()
+    await docsPage.goto(`${relay.base}/docs/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    const crossPromise = docsPage.waitForEvent('popup', { timeout: 15_000 })
+    const mdBytes = Buffer.from('# CrossAppKeep\n')
+    await docsPage.evaluate(async ({ name, b64 }) => {
+      const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+      const file = new File([raw], name)
+      const dt = new DataTransfer()
+      dt.items.add(file)
+      window.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true }))
+    }, { name: 'cross.md', b64: mdBytes.toString('base64') })
+    const cross = await crossPromise
+    assertions.push(assertion('cross-app-docs-to-markdown', cross.url().includes('/markdown/'), '/markdown/', cross.url()))
+    await cross.close()
+    await docsPage.close()
+
+    const beforeFiles = (await home.evaluate(async () => (await window.aiOffice.recents({ limit: 100 })).totalAll))
+    await home.evaluate(async () => {
+      window.showOpenFilePicker = async () => {
+        const err = new Error('The user aborted a request.')
+        err.name = 'AbortError'
+        throw err
+      }
+      await window.aiOffice.browse()
+    })
+    const afterFiles = (await home.evaluate(async () => (await window.aiOffice.recents({ limit: 100 })).totalAll))
+    cancelAssertions.push(assertion('browse-cancel-no-create', afterFiles === beforeFiles, beforeFiles, afterFiles))
+
+    homeShot = await home.screenshot({ type: 'png' })
+    await home.close()
+
+    const missing = join(workDir, 'missing-entry.docx')
+    const missPage = await browser.newPage()
+    await missPage.goto(`${relay.base}/docs/?control=1&open=${encodeURIComponent(`path:${missing}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const missReady = await waitReady(relay.base, missing)
+    failAssertions.push(assertion('missing-docs-error', missReady.readiness === 'error', 'error', missReady))
+    await missPage.close()
+
+    const corruptPdf = join(workDir, 'corrupt-entry.pdf')
+    await writeFile(corruptPdf, 'not-a-pdf')
+    const badPage = await browser.newPage()
+    await badPage.goto(`${relay.base}/pdf/?control=1&open=${encodeURIComponent(`path:${corruptPdf}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    const badReady = await waitReady(relay.base, corruptPdf)
+    failAssertions.push(assertion('corrupt-pdf-error', badReady.readiness === 'error', 'error', badReady))
+    await badPage.close()
+
+    const success = await writeEvidence(outDir, 'UF-001', 'success', {
+      cases: [{
+        id: 'entry-matrix-five-families',
+        status: assertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions,
+      }],
+      console: logs.join('\n'),
+      network: { events, count: events.length },
+      screenshot: homeShot,
+    })
+    const failure1 = await writeEvidence(outDir, 'UF-001', 'failure-1', {
+      cases: [{
+        id: 'entry-matrix-cancel',
+        status: cancelAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: cancelAssertions,
+      }],
+      console: logs.join('\n'),
+      network: { events: [{ beforeFiles, afterFiles }], count: 1 },
+      screenshot: homeShot,
+    })
+    const failure2 = await writeEvidence(outDir, 'UF-001', 'failure-2', {
+      cases: [{
+        id: 'entry-matrix-missing-or-corrupt',
+        status: failAssertions.every((a) => a.status === 'passed') ? 'passed' : 'failed',
+        assertions: failAssertions,
+      }],
+      console: logs.join('\n'),
+      network: { events: [missReady, badReady], count: 2 },
+      screenshot: homeShot,
+    })
+    const ok = [success, failure1, failure2].every((item) => item.status === 'passed')
+    const payload = { schema_version: 1, package: 'web-feature-completion', uf: 'UF-001', branch: 'entry-matrix', status: ok ? 'passed' : 'failed', results: { success, failure1, failure2 } }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-3.log'), `${JSON.stringify(payload, null, 2)}\n`)
+    console.log(JSON.stringify(payload, null, 2))
+    if (!ok) throw new Error('entry-matrix case failed')
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+}
+
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.mode || (args.mode === 'case' && !CASES.includes(args.caseName))) {
@@ -488,6 +692,9 @@ async function main() {
   }
   if (args.caseName === 'sheets-slice' || args.all) {
     await runSheetsSlice(evidenceRoot)
+  }
+  if (args.caseName === 'entry-matrix' || args.all) {
+    await runEntryMatrix(evidenceRoot)
   }
 }
 

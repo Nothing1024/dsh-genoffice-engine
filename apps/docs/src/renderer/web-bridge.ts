@@ -1023,6 +1023,24 @@ const projectApi: ProjectApi = {
 //   server:<relpath>                file on the relay host (GENOFFICE_WEB_FILES_ROOT)
 // ────────────────────────────────────────────────────────────
 
+function appForExt(ext: string): string | null {
+  switch (ext) {
+    case 'docx':
+      return 'docs'
+    case 'md':
+    case 'markdown':
+      return 'markdown'
+    case 'xlsx':
+      return 'sheets'
+    case 'pptx':
+      return 'slides'
+    case 'pdf':
+      return 'pdf'
+    default:
+      return null
+  }
+}
+
 function parseOpenTarget(): string | null {
   const params = new URLSearchParams(location.search)
   for (const key of ['open', 'file']) {
@@ -1209,51 +1227,37 @@ function installFileDrop(): void {
     if (!file) return
     const ext = extOf(file.name)
     try {
-      if (ext === 'docx') {
-        // prefer a real FS handle (saves write back to the original file)
-        if (item && typeof (item as DataTransferItem & { getAsFileSystemHandle?: () => Promise<WebFileSystemHandle> }).getAsFileSystemHandle === 'function') {
-          const handle = await (item as DataTransferItem & { getAsFileSystemHandle: () => Promise<WebFileSystemHandle> }).getAsFileSystemHandle()
-          if (handle?.kind === 'file') {
-            const path = newPath(file.name)
-            await persistRecord(path, {
-              name: file.name,
-              kind: 'fs',
-              handle,
-              mtime: file.lastModified,
-              accessedAt: Date.now(),
-            })
-            window.open(`/docs/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
-            return
-          }
+      const app = appForExt(ext)
+      if (!app) {
+        // eslint-disable-next-line no-alert
+        alert(`网页版暂不支持打开 .${ext} 文件`)
+        return
+      }
+      const path = newPath(file.name)
+      if (item && typeof (item as DataTransferItem & { getAsFileSystemHandle?: () => Promise<WebFileSystemHandle> }).getAsFileSystemHandle === 'function') {
+        const handle = await (item as DataTransferItem & { getAsFileSystemHandle: () => Promise<WebFileSystemHandle> }).getAsFileSystemHandle()
+        if (handle?.kind === 'file') {
+          await persistRecord(path, {
+            name: file.name,
+            kind: 'fs',
+            handle,
+            mtime: file.lastModified,
+            accessedAt: Date.now(),
+          })
+          window.open(`/${app}/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
+          return
         }
-        const data = await file.arrayBuffer()
-        const path = newPath(file.name)
-        // bytes records must be persisted (the opening tab is a new one)
-        await idbPut(STORE_HANDLES, path, {
-          name: file.name,
-          kind: 'bytes',
-          bytes: data,
-          mtime: file.lastModified,
-          accessedAt: Date.now(),
-        })
-        window.open(`/docs/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
-        return
       }
-      if (ext === 'md' || ext === 'markdown') {
-        const data = await file.arrayBuffer()
-        const path = newPath(file.name)
-        await idbPut(STORE_HANDLES, path, {
-          name: file.name,
-          kind: 'bytes',
-          bytes: data,
-          mtime: file.lastModified,
-          accessedAt: Date.now(),
-        })
-        window.open(`/markdown/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
-        return
-      }
-      // eslint-disable-next-line no-alert
-      alert(`网页版暂不支持打开 .${ext} 文件（仅桌面版可用）`)
+      const data = await file.arrayBuffer()
+      await idbPut(STORE_HANDLES, path, {
+        name: file.name,
+        kind: 'bytes',
+        bytes: data,
+        mtime: file.lastModified,
+        accessedAt: Date.now(),
+      })
+      window.open(`/${app}/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
+      return
     } catch {
       /* fall through — user can use the open dialog instead */
     }

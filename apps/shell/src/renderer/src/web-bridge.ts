@@ -144,6 +144,10 @@ function appForExt(ext: string): string | null {
       return 'markdown'
     case 'xlsx':
       return 'sheets'
+    case 'pptx':
+      return 'slides'
+    case 'pdf':
+      return 'pdf'
     default:
       return null
   }
@@ -158,7 +162,7 @@ function notifyUnsupported(ext: string): void {
   }
   const name = names[ext] ?? `.${ext} 文件`
   // eslint-disable-next-line no-alert
-  alert(`网页版暂不支持打开 ${name}（仅桌面版可用）。\n当前支持：Word 文档 (.docx)、Excel 表格 (.xlsx)、Markdown (.md)`)
+  alert(`网页版暂不支持打开 ${name}。\n当前支持：Word (.docx)、Excel (.xlsx)、PPT (.pptx)、PDF (.pdf)、Markdown (.md)`)
 }
 
 function openWebApp(app: string, query?: string): void {
@@ -265,6 +269,9 @@ const aiOffice: HomeApi = {
                   '.docx',
                 ],
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
+                'application/pdf': ['.pdf'],
+                'text/markdown': ['.md', '.markdown'],
               },
             },
           ],
@@ -296,10 +303,10 @@ const aiOffice: HomeApi = {
 
   newDoc: async () => openWebApp('docs'),
   newSheet: async () => openWebApp('sheets'),
-  newSlide: async () => notifyUnsupported('pptx'),
+  newSlide: async () => openWebApp('slides'),
   newMarkdown: async () => openWebApp('markdown'),
   newHtml: async () => openWebApp('html'),
-  newPdf: async () => notifyUnsupported('pdf'),
+  newPdf: async () => openWebApp('pdf'),
 
   removeRecent: async (paths) => {
     for (const path of paths) await idbDelete(STORE_HANDLES, path)

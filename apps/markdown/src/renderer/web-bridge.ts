@@ -650,6 +650,24 @@ function extOf(name: string): string {
   return i < 0 ? '' : name.slice(i + 1).toLowerCase()
 }
 
+function appForExt(ext: string): string | null {
+  switch (ext) {
+    case 'docx':
+      return 'docs'
+    case 'md':
+    case 'markdown':
+      return 'markdown'
+    case 'xlsx':
+      return 'sheets'
+    case 'pptx':
+      return 'slides'
+    case 'pdf':
+      return 'pdf'
+    default:
+      return null
+  }
+}
+
 function installFileDrop(): void {
   let overlay: HTMLDivElement | null = null
 
@@ -700,49 +718,23 @@ function installFileDrop(): void {
     if (!file) return
     const ext = extOf(file.name)
     try {
+      const app = appForExt(ext)
+      if (!app) {
+        // eslint-disable-next-line no-alert
+        alert(`网页版暂不支持打开 .${ext} 文件`)
+        return
+      }
       const data = await file.arrayBuffer()
-      if (ext === 'md' || ext === 'markdown') {
-        const path = newPath(file.name)
-        if (item && typeof (item as DataTransferItem & { getAsFileSystemHandle?: () => Promise<WebFileSystemHandle> }).getAsFileSystemHandle === 'function') {
-          const handle = await (item as DataTransferItem & { getAsFileSystemHandle: () => Promise<WebFileSystemHandle> }).getAsFileSystemHandle()
-          if (handle?.kind === 'file') {
-            await idbPut(STORE_HANDLES, path, {
-              name: file.name,
-              kind: 'fs',
-              handle,
-              mtime: file.lastModified,
-              accessedAt: Date.now(),
-            })
-            currentPath = path
-            window.open(`/markdown/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
-            return
-          }
-        }
-        await idbPut(STORE_HANDLES, path, {
-          name: file.name,
-          kind: 'bytes',
-          bytes: data,
-          mtime: file.lastModified,
-          accessedAt: Date.now(),
-        })
-        currentPath = path
-        window.open(`/markdown/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
-        return
-      }
-      if (ext === 'docx') {
-        const path = newPath(file.name)
-        await idbPut(STORE_HANDLES, path, {
-          name: file.name,
-          kind: 'bytes',
-          bytes: data,
-          mtime: file.lastModified,
-          accessedAt: Date.now(),
-        })
-        window.open(`/docs/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
-        return
-      }
-      // eslint-disable-next-line no-alert
-      alert(`网页版暂不支持打开 .${ext} 文件（仅桌面版可用）`)
+      const path = newPath(file.name)
+      await idbPut(STORE_HANDLES, path, {
+        name: file.name,
+        kind: 'bytes',
+        bytes: data,
+        mtime: file.lastModified,
+        accessedAt: Date.now(),
+      })
+      window.open(`/${app}/?open=${encodeURIComponent(path)}`, '_blank', 'noopener')
+      return
     } catch {
       /* fall through */
     }
