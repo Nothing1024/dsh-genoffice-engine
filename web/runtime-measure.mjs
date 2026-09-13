@@ -249,7 +249,7 @@ export function probeGaps() {
     captureMtimeUsesFullFileGet: captureMtimeUsesFile,
     hasSdk: existsSync(join(ENGINE, 'web/sdk')) || existsSync(join(ENGINE, 'packages/agent-sdk')),
     hasCli: existsSync(join(ENGINE, 'web/agent-cli.mjs')),
-    hasHeadlessManager: /headless/.test(server),
+    hasHeadlessManager: existsSync(join(ENGINE, 'web/sdk/headless-executor.mjs')),
     pluginHasDshTools: Boolean(pluginPkg.devDependencies?.['@deepseek-ai/dsh-tools']),
     pluginHasMcp: JSON.stringify(pluginPkg).includes('mcp'),
     createControlToolsStatic: /export function createControlTools/.test(tools),

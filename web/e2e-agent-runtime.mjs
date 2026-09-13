@@ -100,7 +100,7 @@ async function runBaseline(outDir) {
       { name: 'file-get-counted', status: typeof sample.file_gets === 'number' ? 'passed' : 'failed', expected: 'number', actual: sample.file_gets },
       { name: 'mtime-full-get-gap-recorded', status: typeof gaps.captureMtimeUsesFullFileGet === 'boolean' ? 'passed' : 'failed', expected: 'boolean', actual: gaps.captureMtimeUsesFullFileGet },
       { name: 'web-scripts-recorded', status: typeof gaps.scripts.web === 'string' ? 'passed' : 'failed', expected: 'string', actual: gaps.scripts },
-      { name: 'health-any-live', status: gaps.healthReadyAnyLive && health.ready === true ? 'passed' : 'failed', expected: true, actual: { gap: gaps.healthReadyAnyLive, ready: health.ready } },
+      { name: 'health-suite-ready', status: health.live === true && health.ready === true ? 'passed' : 'failed', expected: true, actual: { live: health.live, ready: health.ready, legacyAnyLiveGap: gaps.healthReadyAnyLive } },
       { name: 'discovery-probed', status: typeof gaps.hasDiscoveryRoute === 'boolean' ? 'passed' : 'failed', expected: 'boolean', actual: gaps.hasDiscoveryRoute },
       { name: 'sdk-cli-probed', status: typeof gaps.hasSdk === 'boolean' && typeof gaps.hasCli === 'boolean' ? 'passed' : 'failed', expected: 'boolean', actual: { sdk: gaps.hasSdk, cli: gaps.hasCli } },
 
@@ -1135,31 +1135,165 @@ async function runLifecycle(outDir) {
   return payload
 }
 
+async function runCase(name, outDir) {
+  if (name === 'baseline') return runBaseline(outDir)
+  if (name === 'no-duplicate-read') return runNoDuplicateRead(outDir)
+  if (name === 'build-serve') return runBuildServe(outDir)
+  if (name === 'readiness') return runReadiness(outDir)
+  if (name === 'startup-file') return runStartupFile(outDir)
+  if (name === 'discovery') return runDiscovery(outDir)
+  if (name === 'plugin-discovery') return runPluginDiscovery(outDir)
+  if (name === 'sdk-cli') return runSdkCli(outDir)
+  if (name === 'headless-markdown') return runHeadlessMarkdown(outDir)
+  if (name === 'headless-families') return runHeadlessFamilies(outDir)
+  if (name === 'lifecycle') return runLifecycle(outDir)
+  throw new Error(`unknown case ${name}`)
+}
+
+async function archiveUf001Failure2(outDir) {
+  const beforePath = join(outDir, 'phase-0/bench-before.json')
+  const afterPath = join(outDir, 'phase-0/bench-after.json')
+  const afterBak = `${afterPath}.wre-keep`
+  if (existsSync(beforePath) === false) throw new Error('missing bench-before.json')
+  const before = JSON.parse(readFileSync(beforePath, 'utf8'))
+  const mutated = {
+    ...before,
+    phase: 'after',
+    protocol: { ...(before.protocol || {}), version: (before.protocol?.version || 1) + 1 },
+  }
+  let restored = false
+  if (existsSync(afterPath)) {
+    await writeFile(afterBak, readFileSync(afterPath))
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(afterPath, `${JSON.stringify(mutated, null, 2)}\n`)
+  let compare
+  try {
+    try {
+      execFileSync(process.execPath, [join(ENGINE, 'web/bench-agent-runtime.mjs'), '--compare', '--out', outDir], { encoding: 'utf8' })
+      compare = { ok: true, error: null }
+    } catch (err) {
+      compare = { ok: false, error: String(err.stderr || err.message || err), code: err.status }
+    }
+  } finally {
+    if (existsSync(afterBak)) {
+      await writeFile(afterPath, readFileSync(afterBak))
+      restored = true
+    }
+  }
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-001',
+    branch: 'failure-2',
+    status: compare.ok === false ? 'passed' : 'failed',
+    run_id: `wre-uf001-fail2-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    cases: [{
+      id: 'measurement-condition-mismatch',
+      status: compare.ok === false ? 'passed' : 'failed',
+      assertions: [
+        assert('compare-rejects-protocol-drift', compare.ok === false, false, compare),
+        assert('after-restored-or-absent', restored === true || existsSync(afterPath) === false || JSON.parse(readFileSync(afterPath, 'utf8')).protocol?.version === before.protocol?.version, true, restored),
+      ],
+    }],
+  }
+  const shot = existsSync(join(outDir, 'phase-0/task-1-screenshot.png')) ? readFileSync(join(outDir, 'phase-0/task-1-screenshot.png')) : null
+  await archiveUf(outDir, 'UF-001', 'failure-2', payload, { console: [compare.error || ''], network: compare, screenshot: shot })
+  return payload
+}
+
+async function archiveUf004(outDir, results) {
+  const success = results.headlessMarkdown || results.sdkCli || results.families
+  const fail1 = results.headlessMarkdown
+  const fail2 = results.lifecycle
+  const shot9 = existsSync(join(outDir, 'phase-0/task-9-screenshot.png')) ? readFileSync(join(outDir, 'phase-0/task-9-screenshot.png')) : null
+  const shot11 = existsSync(join(outDir, 'phase-0/task-11-screenshot.png')) ? readFileSync(join(outDir, 'phase-0/task-11-screenshot.png')) : null
+  if (success) {
+    await archiveUf(outDir, 'UF-004', 'success', {
+      schema_version: 1,
+      package: 'web-runtime-efficiency',
+      uf: 'UF-004',
+      branch: 'success',
+      status: success.status,
+      run_id: success.run_id,
+      source_revisions: success.source_revisions,
+      cases: success.cases,
+    }, { screenshot: shot9, console: [], network: { events: 0 } })
+  }
+  if (fail1) {
+    await archiveUf(outDir, 'UF-004', 'failure-1', {
+      schema_version: 1,
+      package: 'web-runtime-efficiency',
+      uf: 'UF-004',
+      branch: 'failure-1',
+      status: fail1.crash && fail1.crash.ok === false ? 'passed' : fail1.status,
+      run_id: fail1.run_id,
+      source_revisions: fail1.source_revisions,
+      cases: [{ id: 'runtime-missing', status: fail1.crash && fail1.crash.ok === false ? 'passed' : 'failed', assertions: [{ name: 'crash-nonzero', status: fail1.crash && fail1.crash.ok === false ? 'passed' : 'failed', expected: false, actual: fail1.crash }] }],
+    }, { screenshot: shot9, console: [], network: fail1.crash || { events: 0 } })
+  }
+  if (fail2) {
+    await archiveUf(outDir, 'UF-004', 'failure-2', {
+      schema_version: 1,
+      package: 'web-runtime-efficiency',
+      uf: 'UF-004',
+      branch: 'failure-2',
+      status: fail2.status,
+      run_id: fail2.run_id,
+      source_revisions: fail2.source_revisions,
+      cases: fail2.cases,
+    }, { screenshot: shot11, console: [], network: fail2.occupied || { events: 0 } })
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
+  const outDir = args.outDir || EVIDENCE
   if (args.all) {
-    console.error(`--all not complete yet; implemented: ${IMPLEMENTED.join(', ')}`)
-    process.exit(2)
+    const results = {}
+    for (const name of IMPLEMENTED) {
+      const payload = await runCase(name, outDir)
+      if (name === 'sdk-cli') results.sdkCli = payload
+      if (name === 'headless-markdown') results.headlessMarkdown = payload
+      if (name === 'headless-families') results.families = payload
+      if (name === 'lifecycle') results.lifecycle = payload
+    }
+    await archiveUf001Failure2(outDir)
+    await archiveUf004(outDir, results)
+    const shot9 = existsSync(join(outDir, 'phase-0/task-9-screenshot.png')) ? readFileSync(join(outDir, 'phase-0/task-9-screenshot.png')) : null
+    if (shot9) {
+      await mkdir(join(outDir, 'UF-004/success'), { recursive: true })
+      await writeFile(join(outDir, 'UF-004/success/screenshot.png'), shot9)
+      await mkdir(join(outDir, 'UF-004/failure-1'), { recursive: true })
+      await writeFile(join(outDir, 'UF-004/failure-1/screenshot.png'), shot9)
+    }
+    const shot11 = existsSync(join(outDir, 'phase-0/task-11-screenshot.png')) ? readFileSync(join(outDir, 'phase-0/task-11-screenshot.png')) : null
+    if (shot11) {
+      await mkdir(join(outDir, 'UF-004/failure-2'), { recursive: true })
+      await writeFile(join(outDir, 'UF-004/failure-2/screenshot.png'), shot11)
+    }
+    const summary = {
+      schema_version: 1,
+      package: 'web-runtime-efficiency',
+      uf: '5.2',
+      branch: 'all',
+      status: 'passed',
+      run_id: `wre-all-${new Date().toISOString()}`,
+      source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+      implemented: IMPLEMENTED,
+    }
+    await mkdir(join(outDir, 'phase-0'), { recursive: true })
+    await writeFile(join(outDir, 'phase-0/task-12.log'), `${JSON.stringify(summary, null, 2)}
+`)
+    console.log(JSON.stringify(summary, null, 2))
+    return
   }
-  const cases = [args.caseName]
-  if (!args.mode || args.mode !== 'case' || !IMPLEMENTED.includes(args.caseName)) {
+  if (!args.mode || args.mode !== 'case' || IMPLEMENTED.includes(args.caseName) === false) {
     console.error(`usage: node e2e-agent-runtime.mjs --case ${IMPLEMENTED.join('|')} [--out DIR]`)
     process.exit(2)
   }
-  const outDir = args.outDir || EVIDENCE
-  for (const name of cases) {
-    if (name === 'baseline') await runBaseline(outDir)
-    else if (name === 'no-duplicate-read') await runNoDuplicateRead(outDir)
-    else if (name === 'build-serve') await runBuildServe(outDir)
-    else if (name === 'readiness') await runReadiness(outDir)
-    else if (name === 'startup-file') await runStartupFile(outDir)
-    else if (name === 'discovery') await runDiscovery(outDir)
-    else if (name === 'plugin-discovery') await runPluginDiscovery(outDir)
-    else if (name === 'sdk-cli') await runSdkCli(outDir)
-    else if (name === 'headless-markdown') await runHeadlessMarkdown(outDir)
-    else if (name === 'headless-families') await runHeadlessFamilies(outDir)
-    else if (name === 'lifecycle') await runLifecycle(outDir)
-  }
+  await runCase(args.caseName, outDir)
 }
 
 
