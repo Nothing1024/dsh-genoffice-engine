@@ -36,7 +36,7 @@ import {
 } from './runtime-measure.mjs'
 
 
-const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file', 'discovery']
+const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file', 'discovery', 'plugin-discovery']
 const WEB_APPS = ['shell', 'docs', 'markdown', 'sheets', 'slides', 'pdf', 'html']
 
 
@@ -683,6 +683,118 @@ async function runDiscovery(outDir) {
   return payload
 }
 
+
+async function runPluginDiscovery(outDir) {
+  const workDir = join(outDir, 'phase-0/work-plugin-discovery')
+  const fixtures = await createFixtures(workDir)
+  const md = fixtures.find((row) => row.app === 'markdown' && row.size === 'small')
+  const xlsx = fixtures.find((row) => row.app === 'sheets' && row.size === 'small')
+  const pptx = fixtures.find((row) => row.app === 'slides' && row.size === 'small')
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  let shot = null
+  let compatible
+  let familyXlsx
+  let familyPptx
+  let workbook
+  let deck
+  let crossFamily
+  let legacyWrite
+  let mdBefore
+  let mdAfterCross
+  let mdAfterLegacy
+  try {
+    compatible = await getJson(relay.base, '/api/discovery')
+    familyXlsx = await getJson(relay.base, '/api/discovery?family=xlsx')
+    familyPptx = await getJson(relay.base, '/api/discovery?family=pptx')
+
+    const mdPage = await browser.newPage()
+    mdPage.on('console', (msg) => logs.push(msg.text()))
+    await mdPage.goto(`${relay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${md.path}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    shot = await mdPage.screenshot({ type: 'png' }).catch(() => null)
+    await waitReady(relay.base, md.path)
+    mdBefore = readFileSync(md.path, 'utf8')
+    crossFamily = await callTool(relay.base, 'markdown', md.path, 'insert_content', {
+      afterIndex: -1,
+      markdown: 'CROSS_FAMILY_MUST_NOT',
+    }, { 'X-GenOffice-Family': 'sheets', 'X-GenOffice-Schema-Revision': '2026.09.1' })
+    mdAfterCross = readFileSync(md.path, 'utf8')
+    legacyWrite = await callTool(relay.base, 'markdown', md.path, 'insert_content', {
+      afterIndex: -1,
+      markdown: 'WrePluginKeep',
+    })
+    if (toolOk(legacyWrite)) await saveApp(relay.base, 'markdown', md.path)
+    mdAfterLegacy = readFileSync(md.path, 'utf8')
+    await mdPage.close().catch(() => {})
+
+    const sheetsPage = await browser.newPage()
+    await sheetsPage.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${xlsx.path}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    await waitReady(relay.base, xlsx.path)
+    workbook = await callTool(relay.base, 'sheets', xlsx.path, 'get_workbook_context', {}, {
+      'X-GenOffice-Family': 'xlsx',
+      'X-GenOffice-Schema-Revision': '2026.09.1',
+    })
+    await sheetsPage.close().catch(() => {})
+
+    const slidesPage = await browser.newPage()
+    await slidesPage.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${pptx.path}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    await waitReady(relay.base, pptx.path)
+    deck = await callTool(relay.base, 'slides', pptx.path, 'get_deck_context', {}, {
+      'X-GenOffice-Family': 'pptx',
+      'X-GenOffice-Schema-Revision': '2026.09.1',
+    })
+    await slidesPage.close().catch(() => {})
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+
+  const xlsxNames = (familyXlsx.tools || []).map((t) => t.name)
+  const pptxNames = (familyPptx.tools || []).map((t) => t.name)
+  const assertions = [
+    assert('compatible-full', compatible.status === 200 && compatible.tool_count === 100, 100, compatible.tool_count),
+    assert('xlsx-family', familyXlsx.status === 200 && xlsxOnly(familyXlsx.tools) && xlsxNames.includes('xlsx_save') && xlsxNames.includes('xlsx_get_workbook_context'), 13, xlsxNames),
+    assert('pptx-family', familyPptx.status === 200 && familyPptx.tool_count === 39 && pptxNames.includes('pptx_save') && pptxNames.includes('pptx_get_deck_context'), 39, { count: familyPptx.tool_count, sample: pptxNames.slice(0, 5) }),
+    assert('switch-no-overlap', xlsxNames.every((name) => pptxNames.includes(name) === false), true, { xlsx: xlsxNames.length, pptx: pptxNames.length }),
+    assert('schema-bytes-smaller', familyXlsx.schema_bytes < compatible.schema_bytes && familyPptx.schema_bytes < compatible.schema_bytes, true, { full: compatible.schema_bytes, xlsx: familyXlsx.schema_bytes, pptx: familyPptx.schema_bytes }),
+    assert('workbook-real', toolOk(workbook), true, toolOutput(workbook).slice(0, 180)),
+    assert('deck-real', toolOk(deck), true, toolOutput(deck).slice(0, 180)),
+    assert('cross-family-write-refused', crossFamily.status === 409 && crossFamily.error === 'family-unsupported' && mdAfterCross === mdBefore, 409, { status: crossFamily.status, error: crossFamily.error, changed: mdAfterCross !== mdBefore }),
+    assert('legacy-write-ok', mdAfterLegacy.includes('WrePluginKeep') && mdAfterLegacy.includes('CROSS_FAMILY_MUST_NOT') === false, true, mdAfterLegacy.slice(0, 240)),
+  ]
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-003',
+    branch: 'plugin-discovery',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-plugin-discovery-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    compatible: { tool_count: compatible.tool_count, schema_bytes: compatible.schema_bytes },
+    familyXlsx: { tool_count: familyXlsx.tool_count, schema_bytes: familyXlsx.schema_bytes },
+    familyPptx: { tool_count: familyPptx.tool_count, schema_bytes: familyPptx.schema_bytes },
+    cases: [{ id: 'plugin-family-negotiation', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-7.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  if (shot) await writeFile(join(outDir, 'phase-0/task-7-screenshot.png'), shot)
+  console.log(JSON.stringify(payload, null, 2))
+  if (ok === false) throw new Error('plugin-discovery case failed')
+  return payload
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.all) {
@@ -702,6 +814,7 @@ async function main() {
     else if (name === 'readiness') await runReadiness(outDir)
     else if (name === 'startup-file') await runStartupFile(outDir)
     else if (name === 'discovery') await runDiscovery(outDir)
+    else if (name === 'plugin-discovery') await runPluginDiscovery(outDir)
   }
 }
 
