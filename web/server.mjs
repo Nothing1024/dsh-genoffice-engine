@@ -60,6 +60,7 @@ import { cryptoReady, decryptDocxRequest, encryptDocxRequest } from './docs-cryp
 import { extractReady, extractAttachmentRequest } from './docs-extract.mjs'
 import { assetsReady, saveMarkdownAsset } from './markdown-assets.mjs'
 import { htmlDocxReady, startHtmlDocxJob, getHtmlDocxJob, cancelHtmlDocxJob, waitHtmlDocxJob } from './html-docx.mjs'
+import { buildDiscovery, checkWriteContract, clientContractFrom } from './capability-manifest.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -617,6 +618,25 @@ async function handleApi(req, res, pathname, body, url) {
     })
   }
 
+  if ((req.method === 'GET' || req.method === 'POST') && (pathname === '/api/discovery' || pathname === '/api/capabilities')) {
+    const query = Object.fromEntries(url.searchParams.entries())
+    const payload = body && typeof body === 'object' ? body : {}
+    const client = clientContractFrom({ headers: req.headers, query, body: payload })
+    const apps = appHealth()
+    const appsReady = {}
+    for (const [name, info] of Object.entries(apps)) appsReady[name] = info.ready === true
+    const result = buildDiscovery({
+      family: client.family || query.family || payload.family,
+      app: query.app || payload.app,
+      ext: query.ext || payload.ext,
+      mode: query.mode || payload.mode,
+      schema_revision: client.schema_revision,
+      protocol_version: client.protocol || query.protocol_version || payload.protocol_version,
+      appsReady,
+    })
+    return json(res, result.httpStatus, result.body)
+  }
+
   if (req.method === 'GET' && pathname === '/api/print/ready') {
     return json(res, 200, { ok: true, ...printReady() })
   }
@@ -946,6 +966,13 @@ async function handleApi(req, res, pathname, body, url) {
         // any executor lookup — the check is purely local)
         return json(res, 200, { ok: false, error: 'invalid input' })
       }
+      const gate = checkWriteContract({
+        headers: req.headers,
+        app: controlMatch[1],
+        skillName: call.name,
+        op: 'tool',
+      })
+      if (!gate.ok) return json(res, gate.httpStatus, gate.body)
       const ready = requireReady(docId)
       if (!ready.ok) return json(res, 200, ready)
       const conn = ready.conn
@@ -971,6 +998,12 @@ async function handleApi(req, res, pathname, body, url) {
     }
 
     if (op === 'export') {
+      const exportGate = checkWriteContract({
+        headers: req.headers,
+        app: controlMatch[1],
+        op: 'export',
+      })
+      if (!exportGate.ok) return json(res, exportGate.httpStatus, exportGate.body)
       const requestPath = typeof parsed.path === 'string' ? parsed.path : null
       if (requestPath !== null && !isAbsolute(requestPath)) {
         return json(res, 400, { ok: false, error: 'invalid path' })
@@ -1439,7 +1472,7 @@ const server = createServer(async (req, res) => {
   const origin = req.headers.origin
   if (origin && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin)
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, X-GenOffice-Schema-Revision, X-GenOffice-Family, X-GenOffice-Protocol')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     if (req.method === 'OPTIONS') {
       res.writeHead(204)

@@ -115,17 +115,29 @@ export function stopRelay(relay) {
   relay.child.kill('SIGTERM')
 }
 
-export async function post(base, url, body) {
+export async function getJson(base, url, headers = {}) {
+  const resp = await fetch(base + url, { headers })
+  const raw = await resp.text()
+  try {
+    const parsed = JSON.parse(raw)
+    return { ...parsed, status: resp.status, _bytes: Buffer.byteLength(raw) }
+  } catch {
+    return { ok: false, status: resp.status, error: `non-json ${resp.status}: ${raw.slice(0, 200)}`, _bytes: Buffer.byteLength(raw) }
+  }
+}
+
+export async function post(base, url, body, headers = {}) {
   const resp = await fetch(base + url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body ?? {}),
   })
-  const text = await resp.text()
+  const raw = await resp.text()
   try {
-    return { status: resp.status, ...JSON.parse(text) }
+    const parsed = JSON.parse(raw)
+    return { ...parsed, status: resp.status, _bytes: Buffer.byteLength(raw) }
   } catch {
-    return { ok: false, status: resp.status, error: `non-json ${resp.status}: ${text.slice(0, 200)}` }
+    return { ok: false, status: resp.status, error: `non-json ${resp.status}: ${raw.slice(0, 200)}`, _bytes: Buffer.byteLength(raw) }
   }
 }
 
@@ -137,10 +149,10 @@ export function toolOk(result) {
   return result?.ok === true && result?.execution?.isError !== true
 }
 
-export async function callTool(base, app, file, name, input = {}) {
+export async function callTool(base, app, file, name, input = {}, headers = {}) {
   return post(base, `/api/control/${app}/${docIdFor(file)}/tool`, {
     call: { id: randomUUID(), name, input },
-  })
+  }, headers)
 }
 
 export async function waitReady(base, path, timeout = 90_000) {

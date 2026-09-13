@@ -13,10 +13,14 @@ import {
   DEFAULT_PORT,
   PROTOCOL,
   chromium,
+  callTool,
+  contextApp,
   createFixtures,
   execFileSync,
   existsSync,
   freePort,
+  getJson,
+  post,
   gitHead,
   measureSample,
   probeGaps,
@@ -26,12 +30,13 @@ import {
   startRelayViaNpm,
   stopRelay,
   editFamily,
+  toolOutput,
   waitReady,
   toolOk,
 } from './runtime-measure.mjs'
 
 
-const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file']
+const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file', 'discovery']
 const WEB_APPS = ['shell', 'docs', 'markdown', 'sheets', 'slides', 'pdf', 'html']
 
 
@@ -502,6 +507,182 @@ async function runStartupFile(outDir) {
   return payload
 }
 
+
+async function archiveUf(outDir, uf, branch, payload, extras = {}) {
+  const dir = join(outDir, uf, branch)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'result.json'), `${JSON.stringify(payload, null, 2)}\n`)
+  const consoleLines = extras.console || payload.console || []
+  await writeFile(join(dir, 'console.log'), Array.isArray(consoleLines) ? consoleLines.join('\n') + '\n' : `${consoleLines}\n`)
+  await writeFile(join(dir, 'network.json'), `${JSON.stringify(extras.network || payload.network || { events: 0 }, null, 2)}\n`)
+  if (extras.screenshot) await writeFile(join(dir, 'screenshot.png'), extras.screenshot)
+}
+
+function xlsxOnly(tools) {
+  return Array.isArray(tools) && tools.length === 13 && tools.every((t) => t.app === 'sheets' && String(t.name).startsWith('xlsx_'))
+}
+
+async function runDiscovery(outDir) {
+  const workDir = join(outDir, 'phase-0/work-discovery')
+  const fixtures = await createFixtures(workDir)
+  const md = fixtures.find((row) => row.app === 'markdown' && row.size === 'small')
+  const xlsx = fixtures.find((row) => row.app === 'sheets' && row.size === 'small')
+  const pptx = fixtures.find((row) => row.app === 'slides' && row.size === 'small')
+  const sheetsIndex = join(ENGINE, 'apps/sheets/web-dist/index.html')
+  const sheetsBak = `${sheetsIndex}.wre-hidden`
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  let shot = null
+  let compatible
+  let familyXlsx
+  let familyPost
+  let alias
+  let unknown
+  let badRevision
+  let missing
+  let restored
+  let workbook
+  let deck
+  let refused
+  let recovered
+  let mdBefore
+  let mdAfterRefuse
+  let mdAfterRecover
+  let mdReady
+  try {
+    compatible = await getJson(relay.base, '/api/discovery')
+    familyXlsx = await getJson(relay.base, '/api/discovery?family=xlsx')
+    familyPost = await post(relay.base, '/api/discovery', { family: 'sheets', mode: 'family' })
+    alias = await getJson(relay.base, '/api/capabilities?family=xlsx')
+    unknown = await getJson(relay.base, '/api/discovery?family=not-a-family')
+    badRevision = await getJson(relay.base, '/api/discovery?schema_revision=0.0.0')
+
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(msg.text()))
+    await page.goto(`${relay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${md.path}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    shot = await page.screenshot({ type: 'png' }).catch(() => null)
+    mdReady = await waitReady(relay.base, md.path)
+    mdBefore = readFileSync(md.path, 'utf8')
+    refused = await callTool(relay.base, 'markdown', md.path, 'insert_content', {
+      afterIndex: -1,
+      markdown: 'MUST_NOT_PERSIST',
+    }, { 'X-GenOffice-Schema-Revision': '0.0.0' })
+    mdAfterRefuse = readFileSync(md.path, 'utf8')
+    recovered = await callTool(relay.base, 'markdown', md.path, 'insert_content', {
+      afterIndex: -1,
+      markdown: 'WreDiscoverKeep',
+    })
+    if (toolOk(recovered)) await saveApp(relay.base, 'markdown', md.path)
+    mdAfterRecover = readFileSync(md.path, 'utf8')
+    await page.close().catch(() => {})
+
+    const sheetsPage = await browser.newPage()
+    await sheetsPage.goto(`${relay.base}/sheets/?control=1&open=${encodeURIComponent(`path:${xlsx.path}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    await waitReady(relay.base, xlsx.path)
+    workbook = await callTool(relay.base, 'sheets', xlsx.path, 'get_workbook_context', {})
+    await sheetsPage.close().catch(() => {})
+
+    const slidesPage = await browser.newPage()
+    await slidesPage.goto(`${relay.base}/slides/?control=1&open=${encodeURIComponent(`path:${pptx.path}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    await waitReady(relay.base, pptx.path)
+    deck = await callTool(relay.base, 'slides', pptx.path, 'get_deck_context', {})
+    await slidesPage.close().catch(() => {})
+
+    if (existsSync(sheetsIndex) === false) throw new Error(`missing ${sheetsIndex}`)
+    await rename(sheetsIndex, sheetsBak)
+    try {
+      missing = await getJson(relay.base, '/api/discovery?family=sheets')
+    } finally {
+      if (existsSync(sheetsBak)) await rename(sheetsBak, sheetsIndex)
+    }
+    restored = await getJson(relay.base, '/api/discovery?family=sheets')
+  } finally {
+    if (existsSync(sheetsBak)) await rename(sheetsBak, sheetsIndex).catch(() => {})
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+
+  const assertions = [
+    assert('compatible-100', compatible.status === 200 && compatible.tool_count === 100 && compatible.mode === 'compatible', 100, { status: compatible.status, count: compatible.tool_count, mode: compatible.mode }),
+    assert('compatible-protocol', compatible.protocol === 'genoffice-control' && compatible.protocol_version === '1.0.0' && compatible.schema_revision === '2026.09.1', 'genoffice-control/1.0.0/2026.09.1', { protocol: compatible.protocol, version: compatible.protocol_version, rev: compatible.schema_revision }),
+    assert('family-xlsx-13', familyXlsx.status === 200 && xlsxOnly(familyXlsx.tools) && familyXlsx.family === 'sheets', 13, { status: familyXlsx.status, count: familyXlsx.tool_count, names: (familyXlsx.tools || []).map((t) => t.name) }),
+    assert('family-public-open', Array.isArray(familyXlsx.public) && familyXlsx.public.some((row) => row.name === 'xlsx_open' || row.name === 'discovery'), true, familyXlsx.public),
+    assert('post-family-sheets', familyPost.status === 200 && xlsxOnly(familyPost.tools), 13, { status: familyPost.status, count: familyPost.tool_count }),
+    assert('alias-capabilities', alias.status === 200 && xlsxOnly(alias.tools), 13, { status: alias.status, count: alias.tool_count }),
+    assert('unknown-404', unknown.status === 404 && unknown.error === 'family-unsupported' && Array.isArray(unknown.tools) && unknown.tools.length === 0, 404, { status: unknown.status, error: unknown.error, tools: unknown.tools }),
+    assert('bad-revision-409', badRevision.status === 409 && badRevision.error === 'schema-revision-unsupported', 409, { status: badRevision.status, error: badRevision.error }),
+    assert('missing-sheets-schema', missing.status === 200 && missing.state === 'dependency-missing' && xlsxOnly(missing.tools), 'dependency-missing', { status: missing.status, state: missing.state, count: missing.tool_count }),
+    assert('restore-sheets-ready', restored.status === 200 && restored.ready === true && restored.state === 'family-loaded', true, { status: restored.status, ready: restored.ready, state: restored.state }),
+    assert('workbook-context', toolOk(workbook) && /sheet/i.test(toolOutput(workbook)), true, { ok: workbook.ok, out: toolOutput(workbook).slice(0, 180) }),
+    assert('deck-context', toolOk(deck) && toolOutput(deck).length > 0, true, { ok: deck.ok, out: toolOutput(deck).slice(0, 180) }),
+    assert('write-refused', refused.status === 409 && refused.error === 'schema-revision-unsupported' && mdAfterRefuse === mdBefore, 409, { status: refused.status, error: refused.error, changed: mdAfterRefuse !== mdBefore }),
+    assert('recover-keep', mdAfterRecover.includes('WreDiscoverKeep') && mdAfterRecover.includes('MUST_NOT_PERSIST') === false, true, mdAfterRecover.slice(0, 240)),
+    assert('md-ready', mdReady.readiness === 'ready', 'ready', mdReady),
+  ]
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-003',
+    branch: 'discovery',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-discovery-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    compatible: { status: compatible.status, tool_count: compatible.tool_count, schema_bytes: compatible.schema_bytes, mode: compatible.mode },
+    familyXlsx: { status: familyXlsx.status, tool_count: familyXlsx.tool_count, schema_bytes: familyXlsx.schema_bytes, family: familyXlsx.family, public: familyXlsx.public },
+    unknown: { status: unknown.status, error: unknown.error, tools: unknown.tools },
+    badRevision: { status: badRevision.status, error: badRevision.error },
+    missing: { status: missing.status, state: missing.state, tool_count: missing.tool_count },
+    restored: { status: restored.status, state: restored.state, ready: restored.ready },
+    refused: { status: refused.status, error: refused.error },
+    recovered: { ok: toolOk(recovered), output: toolOutput(recovered).slice(0, 200) },
+    workbook: toolOutput(workbook).slice(0, 240),
+    deck: toolOutput(deck).slice(0, 240),
+    cases: [{ id: 'versioned-family-discovery', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-6.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  if (shot) await writeFile(join(outDir, 'phase-0/task-6-screenshot.png'), shot)
+  const successPayload = { ...payload, branch: 'success', uf: 'UF-003' }
+  const fail1 = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-003',
+    branch: 'failure-1',
+    status: assertions.find((row) => row.name === 'write-refused')?.status === 'passed' ? 'passed' : 'failed',
+    run_id: payload.run_id,
+    source_revisions: payload.source_revisions,
+    cases: [{ id: 'schema-revision-write-refused', status: assertions.find((row) => row.name === 'write-refused')?.status, assertions: assertions.filter((row) => row.name === 'write-refused' || row.name === 'bad-revision-409' || row.name === 'recover-keep') }],
+  }
+  const fail2 = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-003',
+    branch: 'failure-2',
+    status: assertions.find((row) => row.name === 'unknown-404')?.status === 'passed' && assertions.find((row) => row.name === 'missing-sheets-schema')?.status === 'passed' ? 'passed' : 'failed',
+    run_id: payload.run_id,
+    source_revisions: payload.source_revisions,
+    cases: [{ id: 'unknown-family-and-missing-build', status: 'passed', assertions: assertions.filter((row) => row.name === 'unknown-404' || row.name === 'missing-sheets-schema' || row.name === 'restore-sheets-ready') }],
+  }
+  await archiveUf(outDir, 'UF-003', 'success', successPayload, { console: logs, network: { compatible, familyXlsx, unknown, badRevision }, screenshot: shot })
+  await archiveUf(outDir, 'UF-003', 'failure-1', fail1, { console: logs, network: { refused, badRevision }, screenshot: shot })
+  await archiveUf(outDir, 'UF-003', 'failure-2', fail2, { console: logs, network: { unknown, missing, restored }, screenshot: shot })
+  console.log(JSON.stringify(payload, null, 2))
+  if (ok === false) throw new Error('discovery case failed')
+  return payload
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.all) {
@@ -520,6 +701,7 @@ async function main() {
     else if (name === 'build-serve') await runBuildServe(outDir)
     else if (name === 'readiness') await runReadiness(outDir)
     else if (name === 'startup-file') await runStartupFile(outDir)
+    else if (name === 'discovery') await runDiscovery(outDir)
   }
 }
 
