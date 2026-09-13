@@ -36,7 +36,7 @@ import {
 } from './runtime-measure.mjs'
 
 
-const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file', 'discovery', 'plugin-discovery']
+const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file', 'discovery', 'plugin-discovery', 'sdk-cli']
 const WEB_APPS = ['shell', 'docs', 'markdown', 'sheets', 'slides', 'pdf', 'html']
 
 
@@ -795,6 +795,122 @@ async function runPluginDiscovery(outDir) {
   return payload
 }
 
+
+async function runCli(args, extra = {}) {
+  const argv = [join(ENGINE, 'web/agent-cli.mjs'), ...args]
+  try {
+    const stdout = execFileSync(process.execPath, argv, {
+      encoding: 'utf8',
+      timeout: extra.timeout ?? 60_000,
+      env: { ...process.env, ...(extra.env || {}) },
+    })
+    return { code: 0, stdout, stderr: '' }
+  } catch (err) {
+    return {
+      code: err.status ?? 1,
+      stdout: String(err.stdout ?? ''),
+      stderr: String(err.stderr ?? err.message ?? ''),
+    }
+  }
+}
+
+function parseCli(result) {
+  const raw = (result.stdout || result.stderr || '').trim()
+  const start = raw.indexOf('{')
+  if (start < 0) return { ok: false, error: raw.slice(0, 200), code: result.code }
+  try {
+    return { ...JSON.parse(raw.slice(start)), code: result.code }
+  } catch {
+    return { ok: false, error: raw.slice(0, 200), code: result.code }
+  }
+}
+
+async function runSdkCli(outDir) {
+  const workDir = join(outDir, 'phase-0/work-sdk-cli')
+  const fixtures = await createFixtures(workDir)
+  const md = fixtures.find((row) => row.app === 'markdown' && row.size === 'small')
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const browser = await chromium.launch({ headless: true })
+  const logs = []
+  let shot = null
+  let help
+  let opened
+  let context
+  let edited
+  let saved
+  let reopened
+  let missing
+  let cancelled
+  let disk
+  try {
+    help = await runCli(['--help'])
+    const page = await browser.newPage()
+    page.on('console', (msg) => logs.push(msg.text()))
+    await page.goto(`${relay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${md.path}`)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    })
+    shot = await page.screenshot({ type: 'png' }).catch(() => null)
+    await waitReady(relay.base, md.path)
+
+    const env = { GENOFFICE_RELAY: relay.base }
+    opened = parseCli(await runCli(['open', '--path', md.path], { env }))
+    context = parseCli(await runCli(['context', '--path', md.path], { env }))
+    edited = parseCli(await runCli(['edit', '--path', md.path, '--marker', 'WreSdkKeep'], { env }))
+    saved = parseCli(await runCli(['save', '--path', md.path], { env }))
+    reopened = parseCli(await runCli(['reopen', '--path', md.path], { env }))
+    disk = readFileSync(md.path, 'utf8')
+    missing = parseCli(await runCli(['open', '--path', join(workDir, 'no-such.md'), '--timeout', '2000'], { env }))
+
+    const { GenOfficeClient } = await import('./sdk/genoffice-control.mjs')
+    const client = new GenOfficeClient({ base: relay.base })
+    const ac = new AbortController()
+    ac.abort()
+    try {
+      await client.tool('markdown', md.path, 'insert_content', { afterIndex: -1, markdown: 'ABORT' }, { signal: ac.signal })
+      cancelled = { threw: false }
+    } catch (err) {
+      cancelled = { threw: true, name: err.name, message: err.message }
+    }
+    await page.close().catch(() => {})
+  } finally {
+    await browser.close().catch(() => {})
+    stopRelay(relay)
+  }
+
+  const assertions = [
+    assert('help-exit-0', help.code === 0 && /Exit codes/.test(help.stdout), 0, { code: help.code, snippet: help.stdout.slice(0, 120) }),
+    assert('cli-open-ready', opened.ok === true && opened.readiness === 'ready', 'ready', opened),
+    assert('cli-context', context.ok === true && String(context.context || '').length > 0, true, context),
+    assert('cli-edit', edited.ok === true, true, edited),
+    assert('cli-save', saved.ok === true, true, saved),
+    assert('cli-reopen-disk', reopened.ok === true && disk.includes('WreSdkKeep'), true, disk.slice(0, 200)),
+    assert('missing-file-nonzero', missing.ok === false && missing.code !== 0, true, missing),
+    assert('sdk-abort', cancelled.threw === true, true, cancelled),
+  ]
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-004',
+    branch: 'sdk-cli',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-sdk-cli-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    opened,
+    saved,
+    cancelled,
+    cases: [{ id: 'sdk-cli-existing-executor', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-8.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  if (shot) await writeFile(join(outDir, 'phase-0/task-8-screenshot.png'), shot)
+  console.log(JSON.stringify(payload, null, 2))
+  if (ok === false) throw new Error('sdk-cli case failed')
+  return payload
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.all) {
@@ -815,6 +931,7 @@ async function main() {
     else if (name === 'startup-file') await runStartupFile(outDir)
     else if (name === 'discovery') await runDiscovery(outDir)
     else if (name === 'plugin-discovery') await runPluginDiscovery(outDir)
+    else if (name === 'sdk-cli') await runSdkCli(outDir)
   }
 }
 
