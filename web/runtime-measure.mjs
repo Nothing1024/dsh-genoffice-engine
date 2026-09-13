@@ -216,8 +216,7 @@ export async function editFamily(base, app, file, marker) {
     })
   }
   if (app === 'pdf') {
-    const ctx = await contextApp(base, app, file)
-    return { ok: ctx.ok !== false, execution: { output: toolOutput(ctx), mutated: false, summary: 'pdf-context' }, context: ctx }
+    return callTool(base, app, file, 'insert_text', { page: 1, text: marker })
   }
   throw new Error(`unknown app ${app}`)
 }

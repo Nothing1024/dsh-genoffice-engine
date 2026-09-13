@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { writeFileAtomic } from './write-atomic.mjs'
+import { createRequire } from 'node:module'
 
 const ENGINE = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const CLI = join(ENGINE, 'packages/html2docx/tools/cli.ts')
@@ -23,8 +24,14 @@ function findChrome() {
     '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
-  ].filter(Boolean)
-  return candidates.find((p) => existsSync(p)) ?? null
+  ]
+  try {
+    const { chromium } = createRequire(import.meta.url)('playwright')
+    candidates.push(chromium.executablePath())
+  } catch {
+    /* playwright optional */
+  }
+  return candidates.filter(Boolean).find((p) => existsSync(p)) ?? null
 }
 
 export function htmlDocxReady() {

@@ -56,7 +56,7 @@ export class HeadlessExecutor {
     if (!session) {
       const browser = await this.ensureBrowser()
       const page = await browser.newPage()
-      session = { page, path, app, owner }
+      session = { page, path, app, owner, dirty: false }
       this.sessions.set(key, session)
       const url = `${this.client.base}/${app}/?control=1&open=${encodeURIComponent(`path:${path}`)}`
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout })
@@ -77,6 +77,7 @@ export class HeadlessExecutor {
     const session = this.sessions.get(key)
     if (!session) return { released: false, retained: false }
     if (dirty && force === false) {
+      session.dirty = true
       return { released: false, retained: true, reason: 'dirty' }
     }
     await session.page.close().catch(() => {})
@@ -84,12 +85,13 @@ export class HeadlessExecutor {
     return { released: true, retained: false }
   }
 
-  async close() {
-    for (const session of this.sessions.values()) {
+  async close({ force = false } = {}) {
+    for (const [key, session] of [...this.sessions.entries()]) {
+      if (session.dirty && force === false) continue
       await session.page.close().catch(() => {})
+      this.sessions.delete(key)
     }
-    this.sessions.clear()
-    if (this.browser) {
+    if (this.sessions.size === 0 && this.browser) {
       await this.browser.close().catch(() => {})
       this.browser = null
     }

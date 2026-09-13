@@ -700,6 +700,13 @@ async function handleApi(req, res, pathname, body, url) {
   }
   if (req.method === 'POST' && pathname === '/api/html/docx/jobs') {
     if (!isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
+    const htmlGate = checkWriteContract({
+      headers: req.headers,
+      app: 'html',
+      skillName: 'export_docx',
+      op: 'tool',
+    })
+    if (!htmlGate.ok) return json(res, htmlGate.httpStatus, htmlGate.body)
     return json(res, 200, startHtmlDocxJob(body ?? {}))
   }
   if (req.method === 'GET' && pathname === '/api/html/docx/jobs') {
