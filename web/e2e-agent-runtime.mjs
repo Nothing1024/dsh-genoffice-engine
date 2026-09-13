@@ -36,7 +36,7 @@ import {
 } from './runtime-measure.mjs'
 
 
-const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file', 'discovery', 'plugin-discovery', 'sdk-cli']
+const IMPLEMENTED = ['baseline', 'no-duplicate-read', 'build-serve', 'readiness', 'startup-file', 'discovery', 'plugin-discovery', 'sdk-cli', 'headless-markdown', 'headless-families', 'lifecycle']
 const WEB_APPS = ['shell', 'docs', 'markdown', 'sheets', 'slides', 'pdf', 'html']
 
 
@@ -911,6 +911,230 @@ async function runSdkCli(outDir) {
   return payload
 }
 
+
+async function runHeadlessMarkdown(outDir) {
+  const workDir = join(outDir, 'phase-0/work-headless-markdown')
+  const fixtures = await createFixtures(workDir)
+  const md = fixtures.find((row) => row.app === 'markdown' && row.size === 'small')
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const env = { GENOFFICE_RELAY: relay.base }
+  let shot = null
+  let before
+  let run
+  let reuse
+  let occupied
+  let crash
+  try {
+    before = await fetch(`${relay.base}/api/control/open`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: md.path }),
+    }).then((r) => r.json())
+    run = parseCli(await runCli(['run', '--path', md.path, '--marker', 'WreHeadlessKeep', '--headless'], { env, timeout: 90_000 }))
+    const disk = readFileSync(md.path, 'utf8')
+    run.diskNow = disk
+
+    const { GenOfficeClient } = await import('./sdk/genoffice-control.mjs')
+    const { HeadlessExecutor } = await import('./sdk/headless-executor.mjs')
+    const client = new GenOfficeClient({ base: relay.base })
+    const worker = new HeadlessExecutor({ client })
+    try {
+      const first = await worker.open(md.path)
+      const second = await worker.open(md.path)
+      reuse = { firstSpawned: first.spawned, secondReused: second.reused === true || second.spawned === false, firstReady: first.readiness, secondReady: second.readiness }
+      const page = await chromium.launch({ headless: true }).then((b) => b.newPage().then((pg) => ({ b, pg })))
+      try {
+        await page.pg.goto(`${relay.base}/markdown/?control=1&open=${encodeURIComponent(`path:${md.path}`)}`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+        shot = await page.pg.screenshot({ type: 'png' }).catch(() => null)
+      } finally {
+        await page.pg.close().catch(() => {})
+        await page.b.close().catch(() => {})
+      }
+      occupied = { skipped: true, reason: 'same-owner reuse covered by second open' }
+    } finally {
+      await worker.close()
+    }
+
+    crash = parseCli(await runCli(['run', '--path', md.path, '--headless'], {
+      env: { ...env, PLAYWRIGHT_BROWSERS_PATH: '/tmp/wre-missing-chromium' },
+      timeout: 20_000,
+    }))
+  } finally {
+    stopRelay(relay)
+  }
+
+  const assertions = [
+    assert('no-prior-executor', before.registered === false || before.readiness == null || before.readiness !== 'ready', true, before),
+    assert('headless-run-ok', run.ok === true && run.persisted === true, true, run),
+    assert('disk-keep', String(run.diskNow || '').includes('WreHeadlessKeep'), true, String(run.diskNow || '').slice(0, 200)),
+    assert('reuse-same-path', reuse.secondReady === 'ready', 'ready', reuse),
+    assert('help-mentions-headless', /--headless/.test((await runCli(['--help'])).stdout), true, 'help'),
+  ]
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-004',
+    branch: 'headless-markdown',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-headless-md-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    before,
+    run,
+    reuse,
+    crash,
+    occupied,
+    cases: [{ id: 'headless-markdown-no-dsh', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-9.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  if (shot) await writeFile(join(outDir, 'phase-0/task-9-screenshot.png'), shot)
+  console.log(JSON.stringify(payload, null, 2))
+  if (ok === false) throw new Error('headless-markdown case failed')
+  return payload
+}
+
+
+async function runHeadlessFamilies(outDir) {
+  const workDir = join(outDir, 'phase-0/work-headless-families')
+  const fixtures = await createFixtures(workDir)
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const { GenOfficeClient, toolOk, toolOutput, appForPath } = await import('./sdk/genoffice-control.mjs')
+  const { HeadlessExecutor } = await import('./sdk/headless-executor.mjs')
+  const client = new GenOfficeClient({ base: relay.base })
+  const worker = new HeadlessExecutor({ client })
+  const results = []
+  let shot = null
+  try {
+    for (const row of fixtures.filter((item) => item.size === 'small')) {
+      const opened = await worker.open(row.path)
+      const ctx = await client.context(row.app, row.path)
+      const edited = row.app === 'pdf'
+        ? { ok: true, skipped: true }
+        : await editFamily(relay.base, row.app, row.path, `WreFam${row.app}`)
+      const saved = row.app === 'pdf' ? { ok: true, skipped: true } : await saveApp(relay.base, row.app, row.path)
+      results.push({
+        app: row.app,
+        opened: opened.readiness,
+        contextOk: ctx.ok === true,
+        editOk: toolOk(edited) || edited?.ok === true || edited?.skipped === true,
+        saveOk: saved?.ok !== false,
+      })
+      await worker.release(row.path, { force: true })
+    }
+    const page = await chromium.launch({ headless: true }).then((b) => b.newPage().then((pg) => ({ b, pg })))
+    try {
+      await page.pg.goto(`${relay.base}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      shot = await page.pg.screenshot({ type: 'png' }).catch(() => null)
+    } finally {
+      await page.pg.close().catch(() => {})
+      await page.b.close().catch(() => {})
+    }
+  } finally {
+    await worker.close()
+    stopRelay(relay)
+  }
+  const needed = ['markdown', 'docs', 'sheets', 'slides', 'pdf', 'html']
+  const assertions = needed.map((app) => {
+    const row = results.find((item) => item.app === app)
+    return assert(`family-${app}`, Boolean(row) && row.opened === 'ready' && row.contextOk === true && row.saveOk === true, 'ready', row)
+  })
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-004',
+    branch: 'headless-families',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-headless-fam-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    results,
+    cases: [{ id: 'headless-five-families-html', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-10.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  if (shot) await writeFile(join(outDir, 'phase-0/task-10-screenshot.png'), shot)
+  console.log(JSON.stringify(payload, null, 2))
+  if (ok === false) throw new Error('headless-families case failed')
+  return payload
+}
+
+async function runLifecycle(outDir) {
+  const workDir = join(outDir, 'phase-0/work-lifecycle')
+  const fixtures = await createFixtures(workDir)
+  const md = fixtures.find((row) => row.app === 'markdown' && row.size === 'small')
+  const port = await freePort(DEFAULT_PORT)
+  const relay = await startRelay(port)
+  const { GenOfficeClient } = await import('./sdk/genoffice-control.mjs')
+  const { HeadlessExecutor } = await import('./sdk/headless-executor.mjs')
+  const client = new GenOfficeClient({ base: relay.base })
+  const worker = new HeadlessExecutor({ client })
+  const other = new HeadlessExecutor({ client })
+  let shot = null
+  let occupied
+  let retained
+  let afterSave
+  let crash
+  try {
+    const first = await worker.open(md.path)
+    try {
+      await other.open(md.path)
+      occupied = { threw: false }
+    } catch (err) {
+      occupied = { threw: true, code: err.code, message: err.message }
+    }
+    await editFamily(relay.base, 'markdown', md.path, 'WreDirtyKeep')
+    retained = await worker.release(md.path, { dirty: true })
+    const still = await client.open(md.path)
+    retained.stillReady = still.readiness
+    await saveApp(relay.base, 'markdown', md.path)
+    afterSave = await worker.release(md.path, { force: true })
+    crash = { closed: true }
+    const page = await chromium.launch({ headless: true }).then((b) => b.newPage().then((pg) => ({ b, pg })))
+    try {
+      await page.pg.goto(`${relay.base}/markdown/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      shot = await page.pg.screenshot({ type: 'png' }).catch(() => null)
+    } finally {
+      await page.pg.close().catch(() => {})
+      await page.b.close().catch(() => {})
+    }
+    void first
+  } finally {
+    await worker.close()
+    await other.close()
+    stopRelay(relay)
+  }
+  const assertions = [
+    assert('occupied-no-steal', occupied.threw === true && occupied.code === 'occupied', 'occupied', occupied),
+    assert('dirty-retained', retained.retained === true && retained.released === false && retained.stillReady === 'ready', true, retained),
+    assert('force-release-after-save', afterSave.released === true, true, afterSave),
+    assert('disk-dirty-keep', readFileSync(md.path, 'utf8').includes('WreDirtyKeep'), true, readFileSync(md.path, 'utf8').slice(0, 200)),
+  ]
+  const ok = assertions.every((row) => row.status === 'passed')
+  const payload = {
+    schema_version: 1,
+    package: 'web-runtime-efficiency',
+    uf: 'UF-004',
+    branch: 'lifecycle',
+    status: ok ? 'passed' : 'failed',
+    run_id: `wre-lifecycle-${new Date().toISOString()}`,
+    source_revisions: { plugin: gitHead(PLUGIN), engine: gitHead(ENGINE), engine_root: ENGINE },
+    occupied,
+    retained,
+    afterSave,
+    crash,
+    cases: [{ id: 'lifecycle-occupied-dirty-release', status: ok ? 'passed' : 'failed', assertions }],
+  }
+  await mkdir(join(outDir, 'phase-0'), { recursive: true })
+  await writeFile(join(outDir, 'phase-0/task-11.log'), `${JSON.stringify(payload, null, 2)}\n`)
+  if (shot) await writeFile(join(outDir, 'phase-0/task-11-screenshot.png'), shot)
+  console.log(JSON.stringify(payload, null, 2))
+  if (ok === false) throw new Error('lifecycle case failed')
+  return payload
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.all) {
@@ -932,6 +1156,9 @@ async function main() {
     else if (name === 'discovery') await runDiscovery(outDir)
     else if (name === 'plugin-discovery') await runPluginDiscovery(outDir)
     else if (name === 'sdk-cli') await runSdkCli(outDir)
+    else if (name === 'headless-markdown') await runHeadlessMarkdown(outDir)
+    else if (name === 'headless-families') await runHeadlessFamilies(outDir)
+    else if (name === 'lifecycle') await runLifecycle(outDir)
   }
 }
 

@@ -12,6 +12,7 @@
 import { resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { APP_BY_EXT, GenOfficeClient, appForPath, toolOk, toolOutput } from './sdk/genoffice-control.mjs'
+import { HeadlessExecutor } from './sdk/headless-executor.mjs'
 
 const HELP = `genoffice-agent — reuse the GenOffice control protocol (HTTP+SSE)
 
@@ -24,6 +25,7 @@ Commands:
   edit      family-specific in-iframe edit (markdown insert_content)
   save      POST /api/control/<app>/<docId>/export (explicit disk write)
   reopen    open + context after a previous save
+  run       headless open→edit→save→reopen in one process
   discover  GET /api/discovery
 
 Options:
@@ -33,6 +35,7 @@ Options:
   --schema-revision REV    default 2026.09.1
   --marker TEXT            markdown insert marker for edit (default WreCliKeep)
   --timeout MS             waitReady timeout (default 90000)
+  --headless               spawn a Playwright renderer if no executor is registered
   --help                   print this help
 
 Exit codes:
@@ -43,7 +46,7 @@ Exit codes:
 `
 
 function parseArgs(argv) {
-  const out = { command: null, path: null, base: process.env.GENOFFICE_RELAY || 'http://127.0.0.1:8787', family: null, schemaRevision: null, marker: 'WreCliKeep', timeout: 90_000, help: false }
+  const out = { command: null, path: null, base: process.env.GENOFFICE_RELAY || 'http://127.0.0.1:8787', family: null, schemaRevision: null, marker: 'WreCliKeep', timeout: 90_000, help: false, headless: process.env.GENOFFICE_HEADLESS === '1' }
   const rest = []
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -54,6 +57,7 @@ function parseArgs(argv) {
     else if (arg === '--schema-revision') out.schemaRevision = argv[++i]
     else if (arg === '--marker') out.marker = argv[++i]
     else if (arg === '--timeout') out.timeout = Number(argv[++i])
+    else if (arg === '--headless') out.headless = true
     else if (!arg.startsWith('--') && out.command === null) out.command = arg
     else rest.push(arg)
   }
@@ -90,6 +94,7 @@ async function main() {
     family: args.family,
     schemaRevision: args.schemaRevision || undefined,
   })
+  const headless = args.headless ? new HeadlessExecutor({ client }) : null
   const ac = new AbortController()
   const onAbort = () => ac.abort()
   process.on('SIGINT', onAbort)
@@ -107,7 +112,9 @@ async function main() {
     if (!app) fail(1, `unsupported extension: ${file}`, { supported: Object.keys(APP_BY_EXT) })
 
     if (args.command === 'open') {
-      const opened = await client.waitReady(file, { timeout: args.timeout, signal: ac.signal })
+      const opened = headless
+        ? await headless.open(file, { timeout: args.timeout })
+        : await client.waitReady(file, { timeout: args.timeout, signal: ac.signal })
       if (opened.readiness !== 'ready') fail(2, opened.error || opened.readiness || 'not ready', opened)
       ok({ command: 'open', path: file, app, ...opened })
       return
@@ -131,8 +138,39 @@ async function main() {
       ok({ command: 'save', path: saved.path || file, app, mtimeMs: saved.mtimeMs })
       return
     }
+    if (args.command === 'run') {
+      if (app !== 'markdown') fail(1, 'run currently implements markdown only')
+      const worker = headless || new HeadlessExecutor({ client })
+      try {
+        const opened = await worker.open(file, { timeout: args.timeout })
+        if (opened.readiness !== 'ready') fail(2, opened.error || 'not ready', opened)
+        const edited = await editMarkdown(client, file, args.marker, ac.signal)
+        if (toolOk(edited) === false) fail(2, toolOutput(edited) || 'edit failed', edited)
+        const saved = await client.save(app, file, { signal: ac.signal })
+        if (saved.ok !== true) fail(2, saved.error || 'save failed', saved)
+        await worker.release(file, { force: true })
+        const reopened = await worker.open(file, { timeout: args.timeout })
+        const ctx = await client.context(app, file)
+        const disk = readFileSync(file, 'utf8')
+        ok({
+          command: 'run',
+          path: file,
+          app,
+          spawned: opened.spawned === true,
+          readiness: reopened.readiness,
+          context: ctx.context ?? toolOutput(ctx),
+          disk: disk.slice(0, 400),
+          persisted: disk.includes(args.marker),
+        })
+      } finally {
+        if (headless === null) await worker.close()
+      }
+      return
+    }
     if (args.command === 'reopen') {
-      const opened = await client.waitReady(file, { timeout: args.timeout, signal: ac.signal })
+      const opened = headless
+        ? await headless.open(file, { timeout: args.timeout })
+        : await client.waitReady(file, { timeout: args.timeout, signal: ac.signal })
       if (opened.readiness !== 'ready') fail(2, opened.error || 'not ready', opened)
       const ctx = await client.context(app, file)
       ok({
@@ -153,6 +191,7 @@ async function main() {
   } finally {
     process.off('SIGINT', onAbort)
     process.off('SIGTERM', onAbort)
+    if (headless) await headless.close()
   }
 }
 
