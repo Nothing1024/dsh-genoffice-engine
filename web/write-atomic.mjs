@@ -3,10 +3,10 @@
  * Extracted so dest preflight and error-code mapping can be unit-tested
  * without starting the HTTP server.
  */
-import { link, rename, rm, writeFile } from 'node:fs/promises'
+import { link, rename, rm, writeFile, readFile } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { dirname, join, resolve } from 'node:path'
 
 /** Stable short codes for the disk errors the UI must show (UF-001 write-fail). */
 export function diskError(e) {
@@ -42,9 +42,25 @@ export async function preflightDest(absPath, exclusive = false) {
   return { ok: true }
 }
 
+export function fileRevision(buf) {
+  return createHash('sha256').update(buf).digest('hex')
+}
+
+const writeQueues = new Map()
+function enqueueWrite(key, fn) {
+  const prev = writeQueues.get(key) ?? Promise.resolve()
+  const run = prev.then(fn, fn)
+  writeQueues.set(key, run.catch(() => {}))
+  return run
+}
+
 /** atomic write-back: tmp in the same directory + rename (BR-004, INV-003).
  *  exclusive: skip mtime, wx tmp then link(tmp, dest); EEXIST → exists; never overwrite dest. */
 export async function writeFileAtomic(absPath, buf, expectedMtimeMs, opts = {}) {
+  return enqueueWrite(resolve(absPath), () => writeFileAtomicUnqueued(absPath, buf, expectedMtimeMs, opts))
+}
+
+async function writeFileAtomicUnqueued(absPath, buf, expectedMtimeMs, opts = {}) {
   const exclusive = opts.exclusive === true
   const parent = dirname(absPath)
   if (!existsSync(parent) || !statSync(parent).isDirectory()) {
@@ -64,14 +80,22 @@ export async function writeFileAtomic(absPath, buf, expectedMtimeMs, opts = {}) 
       }
       return { ok: true }
     }
-    if (expectedMtimeMs !== undefined && expectedMtimeMs !== null) {
+    if (existsSync(absPath)) {
       let st = null
       try {
         st = statSync(absPath)
       } catch {
-        /* original missing → conflict */
+        st = null
       }
-      if (!st || Math.abs(st.mtimeMs - Number(expectedMtimeMs)) > 100) {
+      const expectedRev = opts.expectedRevision
+      if (typeof expectedRev === 'string' && expectedRev !== '') {
+        const current = fileRevision(await readFile(absPath))
+        if (current !== expectedRev) return { ok: false, error: 'conflict' }
+      } else if (expectedMtimeMs !== undefined && expectedMtimeMs !== null) {
+        if (!st || Number(st.mtimeMs) !== Number(expectedMtimeMs)) {
+          return { ok: false, error: 'conflict' }
+        }
+      } else {
         return { ok: false, error: 'conflict' }
       }
     }

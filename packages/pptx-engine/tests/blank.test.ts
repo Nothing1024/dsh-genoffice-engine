@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { openPptx, savePptx, createBlankPptx, addElement, duplicateSlide } from '../src/index'
+import { openPptx, savePptx, createBlankPptx, addElement, duplicateSlide, BLANK_PPTX_PARTS } from '../src/index'
+import { blankPptxBytes } from '../../../web/blank-pptx.mjs'
 
 describe('createBlankPptx', () => {
   it('opens as a 16:9 single blank slide', async () => {
@@ -33,5 +34,15 @@ describe('createBlankPptx', () => {
       .map((r: any) => r.text)
       .join('')
     expect(texts).toBe('Generated Title')
+  })
+
+  it('the relay blank deck carries the same parts as createBlankPptx', async () => {
+    const JSZip = (await import('jszip')).default
+    const relay = await JSZip.loadAsync(blankPptxBytes())
+    const names = Object.keys(relay.files).filter((n) => !relay.files[n].dir).sort()
+    expect(names).toEqual(BLANK_PPTX_PARTS.map(([name]) => name).sort())
+    for (const [name, xml] of BLANK_PPTX_PARTS) {
+      expect(await relay.file(name)!.async('string')).toBe(xml)
+    }
   })
 })

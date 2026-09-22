@@ -41,7 +41,7 @@ import { createImageLoader } from './image-loader'
 import { syncPrivateFonts } from './doc-fonts'
 import { toPickerHex } from './color-input'
 import { InkOverlay } from './InkOverlay'
-import { initControlMode, CONTROL_MODE } from './control'
+import { initControlMode, CONTROL_MODE, CONTROL_PATH } from './control'
 import type { DeckAccess, ClarifyQuestion } from './ai/slides-skill'
 import { createControlDeckAccess } from './ai/control-deck-access'
 import { inkNodesOf, type InkPenSettings, type InkStroke, type InkTool } from './ink'
@@ -274,6 +274,12 @@ export function App() {
   const [drawKind, setDrawKind] = useState<InsertKind | null>(null)
   /** Latest-state bundle for the extracted action modules; refreshed every render (see action-context.ts). */
   const ctxRef = useRef<ActionCtx>(null as unknown as ActionCtx)
+  const controlRef = useRef<ReturnType<typeof initControlMode>>(null)
+  const pendingReadyRef = useRef<{ readiness: 'loading' | 'ready' | 'error'; extra?: { revision?: string; error?: string } } | null>(null)
+  const applyControlReady = (readiness: 'loading' | 'ready' | 'error', extra?: { revision?: string; error?: string }) => {
+    if (controlRef.current) controlRef.current.setReadiness(readiness, extra)
+    else pendingReadyRef.current = { readiness, extra }
+  }
   const [zoom, setZoom] = useState(1)
   /** unscaled layout size of .stage-scale — its transform-scaled visual size is
    * scaleBox * zoom, which the wrapper zoom-box adopts so scrolling can reach it all */
@@ -693,6 +699,7 @@ export function App() {
       setSelectedIds([])
       setEditing(null)
       setDirty(false)
+      applyControlReady('ready')
       setInkTool('select')
       setAiPanelKey((k) => k + 1)
       needsFitRef.current = true
@@ -1011,13 +1018,15 @@ export function App() {
         if (bootHandledRef.current) return
         bootHandledRef.current = true
         if (r) applyOpen(r)
+        else if (CONTROL_PATH) applyControlReady('error', { error: 'empty path load' })
         else void bootBlank()
       })
       // Open failures (corrupt file etc.) also land on a blank deck, or it stays at "Opening…" forever
       .catch(() => {
         if (bootHandledRef.current) return
         bootHandledRef.current = true
-        void bootBlank()
+        if (CONTROL_PATH) applyControlReady('error', { error: 'load failed' })
+        else void bootBlank()
       })
     return off
   }, [applyOpen, newBlank])
@@ -1154,7 +1163,17 @@ export function App() {
         })
       },
     })
-    return () => handle?.close()
+    controlRef.current = handle
+    if (pendingReadyRef.current) {
+      handle?.setReadiness(pendingReadyRef.current.readiness, pendingReadyRef.current.extra)
+      pendingReadyRef.current = null
+    } else {
+      handle?.setReadiness('loading')
+    }
+    return () => {
+      handle?.close()
+      controlRef.current = null
+    }
   }, [applySlide, applyDeck])
 
   const addSlide = useCallback(() => slideActions.addSlide(ctxRef.current), [])

@@ -329,17 +329,20 @@ async function bytesFromRemote(target: string): Promise<{ data: ArrayBuffer; nam
           ? `inject/${encodeURIComponent(target.slice('inject:'.length))}`
           : `file?path=${encodeURIComponent(target.slice('path:'.length))}`
     const resp = await fetch(`${RELAY_BASE}/${endpoint}`)
-    if (!resp.ok) return null
-    const data = (await resp.json()) as {
-      ok: boolean
+    const data = (await resp.json().catch(() => ({}))) as {
+      ok?: boolean
       base64?: string
       name?: string
       error?: string
     }
-    if (!data.ok || !data.base64) return null
+    if (!resp.ok || !data.ok || !data.base64) {
+      if (isPath) throw new Error(`load-error: ${data.error ?? `HTTP ${resp.status}`}`)
+      return null
+    }
     const bin = Uint8Array.from(atob(data.base64), (c) => c.charCodeAt(0))
     return { data: bin.buffer as ArrayBuffer, name: data.name ?? 'remote-file' }
-  } catch {
+  } catch (error) {
+    if (target.startsWith('path:')) throw error
     return null
   }
 }
@@ -352,7 +355,10 @@ async function openTarget(target: string): Promise<string | null> {
   }
   // remote / data: / server: → pull bytes and register as a local document
   const remote = await bytesFromRemote(target)
-  if (!remote) return null
+  if (!remote) {
+    if (target.startsWith('path:')) throw new Error('load-error: empty result for path target')
+    return null
+  }
   if (!remote.name.toLowerCase().endsWith('.md') && !remote.name.toLowerCase().endsWith('.markdown')) {
     return null
   }

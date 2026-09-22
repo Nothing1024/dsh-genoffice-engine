@@ -31,17 +31,33 @@ async function sha256Hex(s: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+function ownerIdFor(path: string): string {
+  const key = `genoffice-control-owner:${path}`
+  try {
+    const existing = sessionStorage.getItem(key)
+    if (existing) return existing
+    const created = crypto.randomUUID()
+    sessionStorage.setItem(key, created)
+    return created
+  } catch {
+    return crypto.randomUUID()
+  }
+}
+
+let activeOwner: string | undefined
+
 async function notify(
   docId: string,
-  kind: 'tool-result' | 'context' | 'export',
+  kind: 'tool-result' | 'context' | 'export' | 'status',
   requestId: string | undefined,
   payload: unknown,
+  owner?: string,
 ): Promise<void> {
   try {
     await fetch('/api/control/notify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ docId, kind, requestId, payload }),
+      body: JSON.stringify({ docId, kind, requestId, payload, owner: owner ?? activeOwner }),
     })
   } catch (e) {
     console.error('[control] notify failed:', e)
@@ -92,6 +108,8 @@ export interface ControlAdapterOptions {
 
 export interface ControlHandle {
   close: () => void
+  setReadiness: (readiness: 'loading' | 'ready' | 'error', extra?: { revision?: string; error?: string }) => void
+  bumpRevision: () => void
 }
 
 /**
@@ -110,6 +128,37 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   let es: EventSource | null = null
   let closed = false
 
+  const ownerId = ownerIdFor(CONTROL_PATH)
+  activeOwner = ownerId
+  let occupied = false
+  let readiness: 'loading' | 'ready' | 'error' = 'loading'
+  let revision: string | null = null
+  let loadError: string | null = null
+  let fileRev: string | null = null
+  const flushStatus = (): void => {
+    void docIdPromise.then((id) => {
+      if (closed || occupied) return
+      void notify(id, 'status', undefined, { readiness, revision, error: loadError }, ownerId)
+    })
+  }
+  const setReadiness = (
+    next: 'loading' | 'ready' | 'error',
+    extra?: { revision?: string; error?: string },
+  ): void => {
+    readiness = next
+    if (extra?.revision !== undefined) revision = extra.revision
+    else if (next === 'ready' && revision == null) revision = fileRev
+    loadError = next === 'error' ? extra?.error ?? loadError : extra?.error ?? null
+    flushStatus()
+  }
+  const bumpRevision = (): void => {
+    void (async () => {
+      if (closed || occupied) return
+      revision = await sha256Hex(`${CONTROL_PATH}:${revision ?? ''}:${Date.now()}`)
+      flushStatus()
+    })()
+  }
+
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let dirtyTimer: ReturnType<typeof setInterval> | null = null
   let lastDirty: boolean | undefined
@@ -123,13 +172,19 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   }
   const openStream = async (): Promise<void> => {
     const docId = await docIdPromise
-    if (closed) return
+    if (closed || occupied) return
     es?.close()
-    es = new EventSource(`/api/control/stream?docId=${docId}`)
+    es = new EventSource(`/api/control/stream?docId=${docId}&owner=${encodeURIComponent(ownerId)}`)
     es.onopen = () => console.log(`[control] stream open (docId=${docId.slice(0, 8)}…)`)
-    es.addEventListener('hello', () =>
-      console.log(`[control] executor registered (${CONTROL_PATH})`),
-    )
+    es.addEventListener('hello', () => {
+      console.log(`[control] executor registered (${CONTROL_PATH})`)
+      flushStatus()
+    })
+    es.addEventListener('occupied', () => {
+      occupied = true
+      console.warn('[control] occupied — this window is not the executor')
+      es?.close()
+    })
     es.addEventListener('tool', (ev) => {
       void handleTool(docId, ev as MessageEvent)
     })
@@ -148,11 +203,22 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
         return
       }
       if (typeof data.mtimeMs === 'number') mtimeMs = data.mtimeMs
+      if (typeof (data as { fileRevision?: unknown }).fileRevision === 'string') {
+        fileRev = (data as { fileRevision: string }).fileRevision
+      }
+      const exportRevision = (data as { exportRevision?: unknown }).exportRevision
+      if (exportRevision != null && String(exportRevision) !== String(revision)) {
+        return
+      }
       unwritten = false
       opts.onSaved?.()
       reportDirty(docId, false)
     })
     es.onerror = () => {
+      if (closed || occupied) {
+        es?.close()
+        return
+      }
       console.warn('[control] stream error — reconnecting…')
       es?.close()
       if (document.visibilityState === 'visible') {
@@ -186,6 +252,23 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
       )
       return
     }
+
+    const expected = (call.input as { expectedRevision?: unknown }).expectedRevision
+    if (typeof expected === 'string' && expected !== '' && expected !== revision) {
+      await notify(
+        docId,
+        'tool-result',
+        requestId,
+        {
+          ...errorExecution('conflict: stale revision; re-read context then retry', call.name),
+          error: 'conflict',
+          revision,
+        },
+        ownerId,
+      )
+      return
+    }
+
     const deps = opts.getDeps()
     if (!deps) {
       // UF-003 failure branch: no document until the file finishes loading
@@ -217,11 +300,11 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     }
     const deps = opts.getDeps()
     if (!deps) {
-      await notify(docId, 'context', requestId, { context: 'editor not ready' })
+      await notify(docId, 'context', requestId, { context: 'editor not ready', revision })
       return
     }
     const skill = await import('./ai/pdf-skill').then((m) => m.createPdfSkill(deps))
-    await notify(docId, 'context', requestId, { context: skill.buildContext?.() ?? '' })
+    await notify(docId, 'context', requestId, { context: skill.buildContext?.() ?? '', revision })
   }
 
   const handleExport = async (docId: string, ev: MessageEvent): Promise<void> => {
@@ -231,6 +314,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     } catch {
       return
     }
+    const exportRevision = revision
     try {
       // Apply the CURRENT renderer state to the in-memory bytes first (BR-008:
       // the save request is the same payload a ⌘S/autosave would produce)
@@ -261,6 +345,9 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
         name: exported.name,
         path: CONTROL_PATH,
         mtimeMs,
+        expectedRevision: fileRev,
+        exportRevision,
+        owner: ownerId,
       })
     } catch (e) {
       // INV-003: an export failure never lands anything on disk
@@ -276,8 +363,11 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     if (mtimeMs !== null) return mtimeMs
     try {
       const resp = await fetch(`/api/file?path=${encodeURIComponent(CONTROL_PATH ?? '')}`)
-      const data = (await resp.json()) as { ok?: boolean; mtimeMs?: number | null }
-      if (data.ok) mtimeMs = data.mtimeMs ?? null
+      const data = (await resp.json()) as { ok?: boolean; mtimeMs?: number | null; fileRevision?: string | null }
+      if (data.ok) {
+        mtimeMs = data.mtimeMs ?? null
+        if (typeof data.fileRevision === 'string') fileRev = data.fileRevision
+      }
     } catch {
       /* keep null — conflict check skipped */
     }
@@ -300,6 +390,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   }
 
   const onVisibility = (): void => {
+    if (occupied) return
     if (
       document.visibilityState === 'visible' &&
       (es === null || es.readyState === EventSource.CLOSED)
@@ -308,6 +399,7 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
     }
   }
   const onOnline = (): void => {
+    if (occupied) return
     if (es === null || es.readyState === EventSource.CLOSED) void openStream()
   }
   document.addEventListener('visibilitychange', onVisibility)
@@ -332,5 +424,5 @@ export function initControlMode(opts: ControlAdapterOptions): ControlHandle | nu
   }
 
   void openStream()
-  return { close }
+  return { close, setReadiness, bumpRevision }
 }

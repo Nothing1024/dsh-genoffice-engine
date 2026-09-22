@@ -654,6 +654,12 @@ export function App() {
   const saveIncompleteRef = useRef(false)
 
   const editorRef = useRef<Editor | null>(null)
+  const controlRef = useRef<ReturnType<typeof initControlMode>>(null)
+  const pendingReadyRef = useRef<{ readiness: 'loading' | 'ready' | 'error'; extra?: { revision?: string; error?: string } } | null>(null)
+  const applyControlReady = (readiness: 'loading' | 'ready' | 'error', extra?: { revision?: string; error?: string }) => {
+    if (controlRef.current) controlRef.current.setReadiness(readiness, extra)
+    else pendingReadyRef.current = { readiness, extra }
+  }
   const editor = useEditor({
     extensions: editorExtensions,
     content: { type: 'doc', content: [{ type: 'docParagraph' }] },
@@ -1078,6 +1084,12 @@ export function App() {
         // line explaining why (github.com/genspark-ai/genoffice issue #102).
         // 'password': the prompt is up; its cancel path lands on blank instead.
         const outcome = pending ? await loadFile(pending) : 'canceled'
+        if (outcome === 'ok') {
+          applyControlReady('ready')
+        } else if (CONTROL_PATH && outcome === 'failed') {
+          applyControlReady('error', { error: 'load failed' })
+          return
+        }
         if (outcome === 'failed' || outcome === 'canceled') await newFile()
       })
       // Open failures also land on a blank document, or the tab stays at "Opening…" forever
@@ -1382,7 +1394,17 @@ export function App() {
         fileCtxRef.current.dirtyRef.current = false
       },
     })
-    return () => handle?.close()
+    controlRef.current = handle
+    if (pendingReadyRef.current) {
+      handle?.setReadiness(pendingReadyRef.current.readiness, pendingReadyRef.current.extra)
+      pendingReadyRef.current = null
+    } else {
+      handle?.setReadiness('loading')
+    }
+    return () => {
+      handle?.close()
+      controlRef.current = null
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- control mode arms once per editor instance
   }, [editor])
 

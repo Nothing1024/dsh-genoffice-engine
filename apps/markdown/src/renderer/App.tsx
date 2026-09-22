@@ -130,6 +130,7 @@ export default function App() {
   const filePathRef = useRef<string | null>(null)
   const slashMenuRef = useRef<SlashMenuHandle>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const controlRef = useRef<ReturnType<typeof initControlMode>>(null)
 
   const zoomOut = useCallback(
     () => setZoom((value) => Math.max(MIN_ZOOM, Math.round(value) - ZOOM_STEP)),
@@ -141,11 +142,14 @@ export default function App() {
   )
 
   const markDirty = useCallback(() => {
-    if (statusRef.current !== 'ready' || dirtyRef.current) return
-    dirtyRef.current = true
-    setDirty(true)
-    setSaveState('idle')
-    window.markdownApi.setDirty(true)
+    if (statusRef.current !== 'ready') return
+    if (!dirtyRef.current) {
+      dirtyRef.current = true
+      setDirty(true)
+      setSaveState('idle')
+      window.markdownApi.setDirty(true)
+    }
+    controlRef.current?.bumpRevision()
   }, [])
 
   const insertImage = useCallback(() => {
@@ -183,12 +187,7 @@ export default function App() {
   editorRef.current = editor
   filePathRef.current = filePath
 
-  // Control mode (genoffice-dsh-control): register the executor with the
-  // relay once the editor exists; non-control loads skip entirely (INV-001).
-  // Export reuses the save serialization (serializeDocText + getMarkdown) —
-  // never a re-parse of the disk file (INV-005).
   useEffect(() => {
-    if (!editor) return
     const handle = initControlMode({
       getEditor: () => editorRef.current,
       exportBytes: async () => {
@@ -207,9 +206,13 @@ export default function App() {
         window.markdownApi.setDirty(false)
       },
     })
-    return () => handle?.close()
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- control mode arms once per editor instance
-  }, [editor])
+    controlRef.current = handle
+    handle?.setReadiness('loading')
+    return () => {
+      handle?.close()
+      controlRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     setImageBaseDir(filePath ? dirOf(filePath) : null)
@@ -239,16 +242,26 @@ export default function App() {
           const inner = frontmatterInner(envelope.frontmatter)
           setFmText(inner)
           if (inner) setFmOpen(true)
+          statusRef.current = 'ready'
+          setStatus('ready')
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
+          const revision = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+          controlRef.current?.setReadiness('ready', { revision })
+        } else if (CONTROL_PATH) {
+          throw new Error('load-error: empty result for path target')
         } else {
           envelopeRef.current = { ...EMPTY_ENVELOPE }
+          statusRef.current = 'ready'
+          setStatus('ready')
         }
-        statusRef.current = 'ready'
-        setStatus('ready')
       } catch (err) {
         console.error('[markdown] load failed:', err)
         if (!cancelled) {
           statusRef.current = 'error'
           setStatus('error')
+          controlRef.current?.setReadiness('error', {
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
     })()
@@ -515,16 +528,9 @@ export default function App() {
             ? t('savedOk')
             : ''
 
-  if (status === 'error') {
-    return (
-      <div className="app">
-        <div className="center-note">{t('loadError')}</div>
-      </div>
-    )
-  }
-
   return (
-    <div className="app">
+    <div className="app" data-readiness={status}>
+      {status === 'error' && <div className="center-note">{t('loadError')}</div>}
       <Ribbon
         editor={editor}
         disabled={status !== 'ready'}

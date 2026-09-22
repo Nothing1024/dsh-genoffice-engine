@@ -43,7 +43,7 @@ import {
   type LazyWorkbookState,
   type UniverRuntime,
 } from './univer-state'
-import { initControlMode } from './control'
+import { initControlMode, CONTROL_PATH } from './control'
 import { pushBulkFillUndo } from './bulk-fill-undo'
 import {
   applyAiPivotAdd,
@@ -373,6 +373,7 @@ let pendingCopySource: string | undefined
 
 export function App(): React.JSX.Element {
   const adapterRef = useRef(new InMemoryWorkbookAdapter(initialSnapshot))
+  const controlRef = useRef<ReturnType<typeof initControlMode>>(null)
   const univerRef = useRef<UniverRuntime | null>(null)
   const lazyWorkbookRef = useRef<LazyWorkbookState | null>(null)
   /// Univer undo/redo stack occupancy (subscribed at mount): drives the QAT button gray states
@@ -1278,7 +1279,12 @@ export function App(): React.JSX.Element {
       getDirty: () => pendingEditsRef.current > 0,
       onSaved: () => { setPendingEdits(0) },
     })
-    return () => handle?.close()
+    controlRef.current = handle
+    handle?.setReadiness(CONTROL_PATH ? 'loading' : 'loading')
+    return () => {
+      handle?.close()
+      controlRef.current = null
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- arm once; call-time state via refs
   }, [])
 
@@ -3826,6 +3832,7 @@ export function App(): React.JSX.Element {
       }
     }
     lazyWorkbookRef.current = state
+    controlRef.current?.setReadiness('ready')
     // Pivot definitions load eagerly so refresh (a synchronous apply step)
     // never waits on IPC. Best effort: a failed parse just disables refresh.
     for (const sheet of selected.sheets) {

@@ -42,6 +42,7 @@ import type {
   EditTableStyleOp,
   EditTextOp,
   EditTransformOp,
+  FindReplaceOp,
   FlipElementOp,
   GroupElementsOp,
   MenuCommand,
@@ -573,6 +574,13 @@ function chartColorSchemes(
 
 let autoSavePref = true
 
+function findReplaceCount(records: ReadonlyArray<{ after?: unknown }> | undefined): number {
+  const after = records?.[0]?.after
+  if (typeof after !== 'object' || after === null || !('count' in after)) return 0
+  const count = after.count
+  return typeof count === 'number' ? count : 0
+}
+
 const slidesApi: SlidesApi = {
   getLanguage: async () => readLang(),
   onLanguageChanged: () => () => {},
@@ -712,7 +720,30 @@ const slidesApi: SlidesApi = {
     return rendered
   },
 
-  findReplace: async () => notAvailable('findReplace'),
+  findReplace: async (op: FindReplaceOp) => {
+    const session = getWebSession()
+    if (!session) return null
+    // Same executor as apply_ops. The dialog used to call notAvailable, so a
+    // web find/replace always reported zero hits even though the op works.
+    const r = runTxn(session.opened, {
+      ops: [
+        {
+          op: 'findReplace',
+          find: op.find,
+          replace: op.replace,
+          matchCase: op.matchCase,
+          firstOnly: op.firstOnly,
+          slideIndex: op.slideIndex,
+          elementId: op.elementId,
+        },
+      ],
+    })
+    if (!r.applied) return { count: 0, slides: null }
+    const count = findReplaceCount(r.records)
+    if (!count) return { count: 0, slides: null }
+    pushHistory(session)
+    return { count, slides: buildAllRenderSlides(session.opened, session.fitWidthPx) }
+  },
 
   setSlideLayout: async () => notAvailable('setSlideLayout'),
   setSlideSize: async () => notAvailable('setSlideSize'),

@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async () => [{ address: '8.8.8.8', family: 4 }]),
+}))
+
 import { fetchRemoteImage, remoteImageHeaders } from '../src/remote-image'
 
 const png = () => new Response('img', { status: 200 })

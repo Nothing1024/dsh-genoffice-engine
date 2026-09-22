@@ -8,7 +8,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
 import { AiPanel, GensparkMark } from './ai/AiPanel'
 import type { PdfAiDeps } from './ai/tools'
-import { initControlMode, CONTROL_MODE } from './control'
+import { initControlMode, CONTROL_MODE, CONTROL_PATH } from './control'
 import {
   MARKUP_COLORS,
   geomDispSize,
@@ -369,6 +369,12 @@ export default function App() {
   const [textDraft, setTextDraft] = useState<TextDraft | null>(null)
   /** Current draft for async callbacks (block-probe fallback runs after renders) */
   const textDraftRef = useRef<TextDraft | null>(null)
+  const controlRef = useRef<ReturnType<typeof initControlMode>>(null)
+  const pendingReadyRef = useRef<{ readiness: 'loading' | 'ready' | 'error'; extra?: { revision?: string; error?: string } } | null>(null)
+  const applyControlReady = (readiness: 'loading' | 'ready' | 'error', extra?: { revision?: string; error?: string }) => {
+    if (controlRef.current) controlRef.current.setReadiness(readiness, extra)
+    else pendingReadyRef.current = { readiness, extra }
+  }
   textDraftRef.current = textDraft
   /** Hover affordance in edit-text mode: one box over the whole merged line */
   interface LineHover {
@@ -1048,14 +1054,17 @@ export default function App() {
             setScale(Math.min(MAX_SCALE, Math.max(MIN_SCALE, savedView.scale)))
         }
         setStatus('ready')
+        applyControlReady('ready')
       } catch (err) {
         if ((err as Error | null)?.name === 'PasswordException') {
           setPwWrong(passwordRef.current !== undefined)
           setStatus('password')
+          applyControlReady('error', { error: 'password required' })
           return
         }
         console.error('[pdf] open failed:', err)
         setStatus('error')
+        applyControlReady('error', { error: 'load failed' })
       }
     },
     [loadDoc],
@@ -1066,6 +1075,7 @@ export default function App() {
       const path = await window.pdfApi.consumePending()
       if (!path) {
         setStatus('empty')
+        if (CONTROL_PATH) applyControlReady('error', { error: 'empty path load' })
         return
       }
       await openPath(path)
@@ -4912,7 +4922,17 @@ export default function App() {
       getDirty: () => dirtyFlagRef.current,
       onMerged: () => controlMergedCbRef.current(),
     })
-    return () => handle?.close()
+    controlRef.current = handle
+    if (pendingReadyRef.current) {
+      handle?.setReadiness(pendingReadyRef.current.readiness, pendingReadyRef.current.extra)
+      pendingReadyRef.current = null
+    } else {
+      handle?.setReadiness('loading')
+    }
+    return () => {
+      handle?.close()
+      controlRef.current = null
+    }
   }, [])
 
   /**
