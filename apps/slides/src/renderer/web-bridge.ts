@@ -912,6 +912,13 @@ function chartColorSchemes(
 
 let autoSavePref = true
 
+function findReplaceCount(records: ReadonlyArray<{ after?: unknown }> | undefined): number {
+  const after = records?.[0]?.after
+  if (typeof after !== 'object' || after === null || !('count' in after)) return 0
+  const count = after.count
+  return typeof count === 'number' ? count : 0
+}
+
 const slidesApi: SlidesApi = {
   getLanguage: async () => readLang(),
   onLanguageChanged: () => () => {},
@@ -1069,7 +1076,7 @@ const slidesApi: SlidesApi = {
       },
     ])
     if (!txn || txn.failed) return { count: 0, slides: null }
-    const count = (txn.r.records?.[0]?.after as { count?: number } | undefined)?.count ?? 0
+    const count = findReplaceCount(txn.r.records)
     return { count, slides: buildAllRenderSlides(txn.session.opened, txn.session.fitWidthPx) }
   },
 

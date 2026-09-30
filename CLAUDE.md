@@ -2,6 +2,41 @@
 
 Guidance for AI agents and human contributors working in this repo.
 
+## Syncing the official upstream (fork rule, mandatory)
+
+This checkout is the DSH fork (`origin` = `Nothing1024/dsh-genoffice-engine`).
+`upstream` (`genspark-ai/genoffice`) is fetch-only: merge it in, never push to
+it. Merge upstream tag by tag into a sync branch, then push that branch to
+`origin`.
+
+Every upstream merge must review the editor agent tools it brings in before
+the DSH plugin (`../plugin`) may expose them:
+
+1. List what changed since the last synced upstream commit
+   (`git merge-base HEAD upstream/main`) in the tool definition files:
+   `apps/{docs,pdf,markdown,html}/src/renderer/ai/tools.ts` (`AGENT_TOOLS`),
+   `apps/sheets/src/renderer/ai/tools.ts` (`WORKBOOK_TOOLS`) and
+   `apps/slides/src/renderer/ai/slides-skill.ts`. Cover added, removed or
+   renamed tools, and input schema changes on tools the plugin already
+   exposes.
+2. For each changed tool, answer three questions:
+   - Compatible: does it run in the web build? Check that it needs no
+     Electron-only IPC (a `web-bridge.ts` stub), and whether it needs
+     App-held state the control executor must pass in (like the docs
+     comments and header/footer accessors).
+   - Needs adaptation: what must change in the control executor,
+     `web-bridge.ts` or the relay (`web/server.mjs`) to make it work?
+   - Worth exposing: does a DSH agent need it, does it duplicate an existing
+     plugin tool, and does it reach the network?
+3. Record the decision per tool in the plugin's
+   `packages/tab-genoffice/src/host/capability.ts` (`CAPABILITY`, with
+   evidence). A tool without an entry is not registered, and an unreviewed
+   tool stays unregistered. A schema change on an exposed tool needs a
+   review too.
+4. Before calling the sync done, run the plugin's
+   `node scripts/e2e-plugin-alignment.mjs --all` against the merged engine.
+   Put the per-tool decisions in the sync commit message or PR description.
+
 ## Theming rules (mandatory)
 
 The suite supports light / dark / system UI themes. The switching mechanism is a

@@ -209,12 +209,7 @@ export default function App() {
   filePathRef.current = filePath
   const findTarget = useMemo(() => (editor ? tiptapFindTarget(editor) : null), [editor])
 
-  // Control mode (genoffice-dsh-control): register the executor with the
-  // relay once the editor exists; non-control loads skip entirely (INV-001).
-  // Export reuses the save serialization (serializeDocText + getMarkdown) —
-  // never a re-parse of the disk file (INV-005).
   useEffect(() => {
-    if (!editor) return
     const handle = initControlMode({
       getEditor: () => editorRef.current,
       exportBytes: async () => {
@@ -239,8 +234,7 @@ export default function App() {
       handle?.close()
       controlRef.current = null
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- control mode arms once per editor instance
-  }, [editor])
+  }, [])
 
   useEffect(() => {
     setImageBaseDir(filePath ? dirOf(filePath) : null)
@@ -270,6 +264,8 @@ export default function App() {
           const inner = frontmatterInner(envelope.frontmatter)
           setFmText(inner)
           if (inner) setFmOpen(true)
+          statusRef.current = 'ready'
+          setStatus('ready')
           const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
           const revision = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
           controlRef.current?.setReadiness('ready', { revision })
@@ -277,9 +273,9 @@ export default function App() {
           throw new Error('load-error: empty result for path target')
         } else {
           envelopeRef.current = { ...EMPTY_ENVELOPE }
+          statusRef.current = 'ready'
+          setStatus('ready')
         }
-        statusRef.current = 'ready'
-        setStatus('ready')
       } catch (err) {
         console.error('[markdown] load failed:', err)
         if (!cancelled) {

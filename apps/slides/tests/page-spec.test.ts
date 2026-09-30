@@ -82,6 +82,24 @@ describe('parsePageSpec', () => {
     expect(r.spec.elements).toHaveLength(2)
     expect((r.spec.elements[0] as { shape: string }).shape).toBe('rect')
   })
+
+  it('keeps a data:image URL and still drops a file URL', () => {
+    const dataUrl = 'data:image/png;base64,aaaa'
+    const r = parsePageSpec(
+      JSON.stringify({
+        elements: [
+          { type: 'image', url: dataUrl, x: 0, y: 0, w: 100, h: 100 },
+          { type: 'image', url: 'file:///tmp/a.png', x: 200, y: 0, w: 100, h: 100 },
+        ],
+      }),
+    )
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.spec.elements).toHaveLength(1)
+    expect((r.spec.elements[0] as { url: string }).url).toBe(dataUrl)
+    expect(r.warnings.some((w) => w.includes('file:'))).toBe(false)
+    expect(r.warnings.some((w) => w.includes('dropped'))).toBe(true)
+  })
 })
 
 describe('buildPagePptx', () => {

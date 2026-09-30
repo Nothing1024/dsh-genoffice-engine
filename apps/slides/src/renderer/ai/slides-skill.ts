@@ -8,7 +8,7 @@ import type {
 } from '@genoffice/pptx-render'
 import type { AddSmartArtOp, AgentToolCall, AgentToolDef, EditParagraph } from '../../shared/ipc'
 import { OP_GROUPS, opGuide, opGuideCatalog, opSignatureIndex } from '../../shared/op-docs'
-import { parsePageSpec } from '../../shared/page-spec'
+import { isEmbeddableImageUrl, parsePageSpec } from '../../shared/page-spec'
 import { auditSlideLayout, formatAudit } from './layout-audit'
 import { runLayoutScript, type LayoutScriptElement } from './layout-script'
 import { t } from '../i18n/locale'
@@ -1335,12 +1335,16 @@ async function executeLandPages(
   if (state) state.htmlGenerated = true
   const allFails = [...imageFails, ...(land.imageFailures ?? [])]
   const pageCount = land.pages ?? access.getSlides().length
+  const note = imageFailNote(allFails.length ? allFails : undefined)
   return {
     output:
       `Landed ${markers.length} host-authored page(s) (insert_mode:${modeRes.mode}). Deck now has ${pageCount} page(s).` +
-      imageFailNote(allFails.length ? allFails : undefined),
+      note,
+    // isError keeps the missing-image note on the tool result. A plain
+    // success used to be schema-rejected upstream and the blank slots vanished.
+    ...(note ? { isError: true as const } : {}),
     mutated: true,
-    summary: `land_pages ${markers.length}`,
+    summary: note ? `land_pages ${markers.length} (missing images)` : `land_pages ${markers.length}`,
   }
 }
 
@@ -1722,7 +1726,7 @@ async function executeTool(
         return fail(t('aiFailInsertImage'), `slideIndex out of range (0-${slides.length - 1})`)
       const url = String(call.input.url ?? '')
       // file:// = a BYOK-generated image in the local store (the main process only resolves its own files)
-      if (!/^(https?|file):\/\//.test(url)) return fail(t('aiFailInsertImage'), 'Invalid url')
+      if (!/^file:\/\//.test(url) && !isEmbeddableImageUrl(url)) return fail(t('aiFailInsertImage'), 'Invalid url')
       const r = await window.slidesApi.insertImageUrl({
         slideIndex: idx,
         url,

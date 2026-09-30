@@ -28,6 +28,11 @@ import { coverCropFractions } from './cover-crop'
 export const SPEC_CANVAS_W = 1280
 export const SPEC_CANVAS_H = 720
 
+/** Remote pictures and host-inlined local files. file: and bare paths are not fetchable. */
+export function isEmbeddableImageUrl(url: string): boolean {
+  return /^(https?:\/\/|data:image\/)/i.test(url)
+}
+
 const MAX_ELEMENTS = 48
 const MAX_IMAGES = 8
 const MAX_TEXT_LEN = 4000
@@ -234,8 +239,10 @@ export function parsePageSpec(
 
     if (type === 'image') {
       const url = typeof el.url === 'string' ? el.url.trim() : ''
-      if (!/^https?:\/\//.test(url)) {
-        warnings.push(`element ${i}: image url must be http(s), dropped`)
+      // http(s) for remote pictures; data: for a local file the host already
+      // inlined. file: and bare paths stay dropped — the browser cannot fetch them.
+      if (!isEmbeddableImageUrl(url)) {
+        warnings.push(`element ${i}: image url must be http(s) or a data:image URL, dropped`)
         continue
       }
       if (images >= MAX_IMAGES) {

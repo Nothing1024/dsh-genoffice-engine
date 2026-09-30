@@ -12,7 +12,7 @@
 
 仓库约定：与产品仓并列 clone，目录名 `engine/`。当前工作分支：`fork/eat-official-engine`。
 
-状态：**实验性（experimental）· 维护中**。配套插件适配 DSH `@deepseek-ai/dsh@0.1.0-rc.7` + `dsh-better-sidebar@0.13.0`。
+状态：**实验性（experimental）· 维护中**。配套插件适配 DSH `@deepseek-ai/dsh@0.1.6-alpha.2`。右侧栏由官方 `@deepseek-ai/dsh-client-ui-sidebar-right` 提供。
 
 ## 跑起来（web 版）
 

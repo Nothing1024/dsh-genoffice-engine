@@ -61,6 +61,7 @@ import { extractReady, extractAttachmentRequest } from './docs-extract.mjs'
 import { assetsReady, saveMarkdownAsset } from './markdown-assets.mjs'
 import { htmlDocxReady, startHtmlDocxJob, getHtmlDocxJob, cancelHtmlDocxJob, waitHtmlDocxJob } from './html-docx.mjs'
 import { buildDiscovery, checkWriteContract, clientContractFrom } from './capability-manifest.mjs'
+import { blankPptxBytes } from './blank-pptx.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORT = Number(process.env.PORT || 8787)
@@ -1377,6 +1378,28 @@ async function handleApi(req, res, pathname, body, url) {
     return
   }
 
+  if (req.method === 'POST' && pathname === '/api/pptx/create') {
+    if (!ALLOW_ABS_PATHS || !isLoopbackRequest(req)) {
+      return json(res, 403, { ok: false, error: 'loopback only' })
+    }
+    let parsed
+    try {
+      parsed = await readJsonCapped(req, 64 * 1024)
+    } catch (e) {
+      return json(res, 413, { ok: false, error: e.message })
+    }
+    const target = typeof parsed.path === 'string' ? parsed.path : ''
+    if (!isAbsolute(target) || !target.toLowerCase().endsWith('.pptx')) {
+      return json(res, 400, { ok: false, error: 'path must be an absolute .pptx' })
+    }
+    if (existsSync(target)) {
+      return json(res, 200, { ok: false, error: 'conflict' })
+    }
+    const written = await writeFileAtomic(target, blankPptxBytes(), undefined, {})
+    if (!written.ok) return json(res, 200, written)
+    return json(res, 200, { ok: true, path: target })
+  }
+
   if (req.method === 'POST' && pathname === '/api/open') {
     if (!ALLOW_ABS_PATHS || !isLoopbackRequest(req)) return json(res, 403, { ok: false, error: 'loopback only' })
     const target = typeof body.path === 'string' ? body.path : ''
@@ -1497,7 +1520,7 @@ const server = createServer(async (req, res) => {
     // generic JSON read so the raw stream reaches the handler intact.
     let body = {}
     if (req.method !== 'GET' && pathname !== '/api/inject' &&
-        pathname !== '/api/file' && !pathname.startsWith('/api/control/')) {
+        pathname !== '/api/file' && pathname !== '/api/pptx/create' && !pathname.startsWith('/api/control/')) {
       try {
         body = await readJson(req)
       } catch {
