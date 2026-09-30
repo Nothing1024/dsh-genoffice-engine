@@ -9,7 +9,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
+const PLUGIN = resolve(process.env.PLUGIN_ROOT || join(HERE, '../../plugin'))
 const SCHEMA = join(PLUGIN, 'packages/tab-genoffice/src/host/tool-schema.ts')
 const OUT = join(HERE, 'capability-manifest.json')
 

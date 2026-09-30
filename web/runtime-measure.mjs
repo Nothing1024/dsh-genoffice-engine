@@ -10,7 +10,7 @@ import { chromium } from 'playwright'
 
 export const HERE = fileURLToPath(new URL('.', import.meta.url))
 export const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
-export const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
+export const PLUGIN = resolve(process.env.PLUGIN_ROOT || join(HERE, '../../plugin'))
 export const EVIDENCE = join(PLUGIN, 'docs/web-runtime-efficiency/evidence')
 export const DEFAULT_PORT = 18787
 export const PROTOCOL = {

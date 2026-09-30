@@ -18,7 +18,7 @@ import { PDFDocument, StandardFonts } from 'pdf-lib'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const ENGINE = resolve(process.env.ENGINE_ROOT || join(HERE, '..'))
-const PLUGIN = resolve(process.env.PLUGIN_ROOT || '/Users/nothing/workspace/dsh/plugin/dsh-genoffice/plugin')
+const PLUGIN = resolve(process.env.PLUGIN_ROOT || join(HERE, '../../plugin'))
 const INVENTORY = join(PLUGIN, 'docs/web-feature-completion/evidence/phase-0/capability-inventory.csv')
 const DEFAULT_PORT = 18787
 const CASES = ['inventory', 'sheets-slice', 'entry-matrix', 'sheets-semantics', 'sheets-media', 'entries-sheets', 'pdf-pages', 'pdf-convert', 'slides-structure', 'slides-media', 'slides-presentation', 'pdf-slides', 'print-export', 'ocr', 'providers', 'docs-markdown', 'html-edit', 'html-docx', 'capability']
